@@ -45,7 +45,6 @@ import {
  *  (the legacy display cap) — deliberate zooming can still go to MAX_SCALE. */
 const FIT_CAP = 6;
 
-const PASTE_OFFSET = 16;
 /** Marker key of the system-clipboard shapes envelope (see `copy`). */
 const SHAPES_ENVELOPE = "application/x-draw-board-shapes";
 /** A concrete color for the text-edit overlay/caret when the adaptive ink is
@@ -203,6 +202,12 @@ export function DrawEditor({
     return () => onChangeRef.current?.(toDoc(stateRef.current));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Paste target: the cursor's spot on the plane ────────────────────────────
+  // The area div tracks the pointer (ref only — no re-renders); a paste centers
+  // its content there, falling back to the view center when the pointer is
+  // elsewhere (menu paste, keyboard paste right after switching windows).
+  const pointerPosRef = useRef<{ clientX: number; clientY: number } | null>(null);
 
   // ── Camera (pan/zoom viewport over the logical plane) ───────────────────────
   const policy: ViewportPolicy = viewport ?? (bgImage ? "bounded" : "infinite");
@@ -420,17 +425,55 @@ export function DrawEditor({
     return () => cancelAnimationFrame(raf);
   }, [session]);
 
+  // ── Add an image / text (drop or paste from the system) ─────────────────────
+  // Placement is CAMERA-relative: "the middle of the board" means the middle of
+  // what the user is looking at, and sizing fits the visible window, not the
+  // (possibly irrelevant) doc box.
+  const visibleRect = useCallback(() => {
+    const v = viewRef.current;
+    const a = availRef.current;
+    if (v && a) return visibleLogicalRect(v, a);
+    const d = stateRef.current;
+    return { x: 0, y: 0, width: d.width, height: d.height };
+  }, []);
+  const viewCenterLogical = useCallback(() => {
+    const r = visibleRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  }, [visibleRect]);
+  /** Zoom-honest attach detection scale for placed content (see the reducer). */
+  const distScale = useCallback(() => 1 / (viewRef.current?.scale ?? 1), []);
+  /** Where a paste lands: the cursor's LOGICAL spot while it's over the board,
+   *  else the center of the current view. */
+  const pastePoint = useCallback(() => {
+    const ptr = pointerPosRef.current;
+    const v = viewRef.current;
+    const el = areaRef.current;
+    if (ptr && v && el) {
+      const r = el.getBoundingClientRect();
+      if (ptr.clientX >= r.left && ptr.clientX <= r.right && ptr.clientY >= r.top && ptr.clientY <= r.bottom) {
+        return screenToLogical(v, { x: ptr.clientX - r.left, y: ptr.clientY - r.top });
+      }
+    }
+    return viewCenterLogical();
+  }, [viewCenterLogical]);
+
   // ── Clipboard (internal drawn shapes) ───────────────────────────────────────
   const pasteShapes = useCallback(
     (shapesToPaste: Shape[]) => {
-      // Copy a glued assembly → paste a glued assembly: intra-batch attach/binds are
-      // remapped to the new ids and kept; edges to shapes outside the batch drop. No
-      // attach re-detection (the paste offset is within ATTACH_DIST — detecting would
-      // weld every copy to its original).
-      dispatch({ type: "addShapes", shapes: clonePastedShapes(shapesToPaste, PASTE_OFFSET, PASTE_OFFSET, newShapeId) });
+      // The batch lands CENTERED at the paste point — its whole bounding box (a
+      // multi-selection pastes as one assembly around the cursor), not offset
+      // from wherever the source shapes happened to live (which, on an infinite
+      // board, can be far off-screen). Intra-batch attach/binds are remapped to
+      // the new ids and kept; edges to shapes outside the batch drop; no attach
+      // re-detection (it would weld every copy to whatever it lands on).
+      const b = contentBounds(shapesToPaste);
+      const pt = pastePoint();
+      const dx = b ? pt.x - (b.x + b.width / 2) : 0;
+      const dy = b ? pt.y - (b.y + b.height / 2) : 0;
+      dispatch({ type: "addShapes", shapes: clonePastedShapes(shapesToPaste, dx, dy, newShapeId) });
       dispatch({ type: "setTool", tool: "select" });
     },
-    [dispatch]
+    [dispatch, pastePoint]
   );
   const copy = useCallback(() => {
     const sel = new Set(stateRef.current.selectedIds);
@@ -465,23 +508,6 @@ export function DrawEditor({
     }
   }, []);
 
-  // ── Add an image / text (drop or paste from the system) ─────────────────────
-  // Placement is CAMERA-relative: "the middle of the board" means the middle of
-  // what the user is looking at, and sizing fits the visible window, not the
-  // (possibly irrelevant) doc box.
-  const visibleRect = useCallback(() => {
-    const v = viewRef.current;
-    const a = availRef.current;
-    if (v && a) return visibleLogicalRect(v, a);
-    const d = stateRef.current;
-    return { x: 0, y: 0, width: d.width, height: d.height };
-  }, []);
-  const viewCenterLogical = useCallback(() => {
-    const r = visibleRect();
-    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-  }, [visibleRect]);
-  /** Zoom-honest attach detection scale for placed content (see the reducer). */
-  const distScale = useCallback(() => 1 / (viewRef.current?.scale ?? 1), []);
 
   const addImageFile = useCallback(
     async (file: File, cx: number, cy: number, detectAttach = false) => {
@@ -557,7 +583,7 @@ export function DrawEditor({
         if (file) {
           e.preventDefault();
           // A single system-pasted image is one piece of new content → auto-attach.
-          const c = viewCenterLogical();
+          const c = pastePoint();
           void addImageSafe(file, c.x, c.y, true);
           return;
         }
@@ -574,13 +600,17 @@ export function DrawEditor({
           return;
         }
         e.preventDefault();
-        const r = visibleRect();
-        addTextValue(text.replace(/\s+$/, ""), r.x + r.width * 0.2, r.y + r.height * 0.3);
+        // Center the (approximate) text box on the paste point.
+        const trimmed = text.replace(/\s+$/, "");
+        const fs = fontForStroke(stateRef.current.strokeWidth);
+        const firstLine = trimmed.split("\n")[0] ?? "";
+        const pt = pastePoint();
+        addTextValue(trimmed, pt.x - Math.max(8, firstLine.length * fs * 0.6) / 2, pt.y - fs * 0.6);
         return;
       }
       if (pasteInternal()) e.preventDefault();
     },
-    [session, addImageSafe, addTextValue, pasteInternal, pasteShapes, parseEnvelope, viewCenterLogical, visibleRect]
+    [session, addImageSafe, addTextValue, pasteInternal, pasteShapes, parseEnvelope, pastePoint]
   );
 
   const onDrop = useCallback(
@@ -883,6 +913,12 @@ export function DrawEditor({
     >
       <div
         ref={areaRef}
+        onPointerMove={(e) => {
+          pointerPosRef.current = { clientX: e.clientX, clientY: e.clientY };
+        }}
+        onPointerLeave={() => {
+          pointerPosRef.current = null;
+        }}
         onDragOver={(e) => e.preventDefault()}
         onDrop={onDrop}
         className="relative min-h-0 flex-1 overflow-hidden bg-ink-900"
