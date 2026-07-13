@@ -1,0 +1,1466 @@
+import { describe, it, expect } from "vitest";
+import {
+  drawReducer,
+  initialDrawState,
+  normalizeBox,
+  boundingBox,
+  shapesInMarquee,
+  offsetShape,
+  isSelectable,
+  reflowBindings,
+  bindAt,
+  nearestBindableId,
+  nearestEdgeBindableId,
+  attachAt,
+  reflowAttachments,
+  containedIds,
+  moveClusterIds,
+  clusterWeight,
+  toClusterVariant,
+  paintOrder,
+  clonePastedShapes,
+  toDoc,
+  canUndo,
+  canRedo,
+  PALETTE,
+  CONTRAST_INK,
+  isContrastInk,
+  type DrawState,
+  type BoxShape,
+  type TextShape,
+  type Shape,
+  type Attach,
+} from "./drawModel.ts";
+
+const box = (id: string, over: Partial<BoxShape> = {}): BoxShape => ({
+  id,
+  type: "rect",
+  stroke: "#000",
+  strokeWidth: 3,
+  x: 10,
+  y: 10,
+  width: 40,
+  height: 30,
+  ...over,
+});
+
+const text = (id: string, over: Partial<TextShape> = {}): TextShape => ({
+  id,
+  type: "text",
+  stroke: "#000",
+  strokeWidth: 3,
+  x: 5,
+  y: 5,
+  text: "hi",
+  fontSize: 18,
+  ...over,
+});
+
+const seeded = (shapes: Shape[]): DrawState => initialDrawState({ shapes, width: 400, height: 300 });
+
+describe("drawReducer — draw gesture", () => {
+  it("draws a rect and (from the cursor base) auto-selects it, one history entry", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "setTool", tool: "select" }); // cursor base → snap back auto-selects
+    s = drawReducer(s, { type: "setTool", tool: "rect" });
+    s = drawReducer(s, { type: "beginDraw", shape: box("r1", { width: 0, height: 0 }) });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 60, y: 50 } });
+    s = drawReducer(s, { type: "endDraw" });
+    expect(s.shapes).toHaveLength(1);
+    expect(s.shapes[0]).toMatchObject({ id: "r1", width: 50, height: 40 });
+    expect(s.selectedIds).toEqual(["r1"]);
+    expect(s.tool).toBe("select"); // snapped back to the cursor
+    expect(s.draftId).toBeNull();
+    expect(s.past).toHaveLength(1);
+  });
+
+  it("normalizes a box dragged up-and-left at commit", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "beginDraw", shape: box("r1", { x: 100, y: 100, width: 0, height: 0 }) });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 40, y: 30 } });
+    s = drawReducer(s, { type: "endDraw" });
+    expect(s.shapes[0]).toMatchObject({ x: 40, y: 30, width: 60, height: 70 });
+  });
+
+  it("discards a degenerate click-without-drag (no shape, no history)", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "beginDraw", shape: box("r1", { width: 0, height: 0 }) });
+    s = drawReducer(s, { type: "endDraw" });
+    expect(s.shapes).toHaveLength(0);
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("accumulates freehand points then commits", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "p1", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0] } });
+    s = drawReducer(s, { type: "extendFreehand", point: { x: 5, y: 5 } });
+    s = drawReducer(s, { type: "extendFreehand", point: { x: 9, y: 2 } });
+    s = drawReducer(s, { type: "endDraw" });
+    const pen = s.shapes[0];
+    expect(pen.type === "pen" && pen.points).toEqual([0, 0, 5, 5, 9, 2]);
+    expect(s.past).toHaveLength(1);
+  });
+});
+
+describe("drawReducer — move gesture (single + group)", () => {
+  it("translates one shape, single history entry", () => {
+    let s = seeded([box("r1")]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "translateShapes", ids: ["r1"], dx: 15, dy: -5 });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.shapes[0]).toMatchObject({ x: 25, y: 5 });
+    expect(s.past).toHaveLength(1);
+  });
+
+  it("translates a whole multi-selection together, one history entry", () => {
+    let s = seeded([box("r1"), box("r2", { x: 100, y: 100 })]);
+    s = drawReducer(s, { type: "select", ids: ["r1", "r2"] });
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "translateShapes", ids: ["r1", "r2"], dx: 10, dy: 10 });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.shapes[0]).toMatchObject({ x: 20, y: 20 });
+    expect(s.shapes[1]).toMatchObject({ x: 110, y: 110 });
+    expect(s.past).toHaveLength(1);
+  });
+
+  it("records no history for a gesture that changed nothing", () => {
+    let s = seeded([box("r1")]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("translates line points, not x/y", () => {
+    let s = seeded([{ id: "l1", type: "arrow", stroke: "#000", strokeWidth: 3, points: [0, 0, 10, 10] }]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "translateShapes", ids: ["l1"], dx: 5, dy: 7 });
+    s = drawReducer(s, { type: "endGesture" });
+    const l = s.shapes[0];
+    expect(l.type === "arrow" && l.points).toEqual([5, 7, 15, 17]);
+  });
+
+  it("resizes via patchShape", () => {
+    let s = seeded([box("r1")]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "patchShape", id: "r1", patch: { width: 80, height: 60 } });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.shapes[0]).toMatchObject({ width: 80, height: 60 });
+    expect(s.past).toHaveLength(1);
+  });
+});
+
+describe("drawReducer — tool classes (persistent vs one-use snap-back)", () => {
+  it("picking a selectable tool updates baseTool; a shape tool does not", () => {
+    let s = seeded([]);
+    s = drawReducer(s, { type: "setTool", tool: "pen" });
+    expect(s.baseTool).toBe("pen");
+    s = drawReducer(s, { type: "setTool", tool: "rect" });
+    expect(s.tool).toBe("rect");
+    expect(s.baseTool).toBe("pen"); // unchanged by a one-use tool
+    s = drawReducer(s, { type: "setTool", tool: "select" });
+    expect(s.baseTool).toBe("select");
+  });
+
+  it("a one-use shape snaps back to baseTool=select and auto-selects the shape", () => {
+    let s = seeded([]);
+    s = drawReducer(s, { type: "setTool", tool: "select" }); // baseTool = select
+    s = drawReducer(s, { type: "setTool", tool: "rect" });
+    s = drawReducer(s, { type: "beginDraw", shape: box("r1", { width: 0, height: 0 }) });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 60, y: 50 } });
+    s = drawReducer(s, { type: "endDraw" });
+    expect(s.tool).toBe("select"); // snapped back
+    expect(s.selectedIds).toEqual(["r1"]); // auto-selected (we returned to cursor)
+  });
+
+  it("a one-use shape snaps back to baseTool=pen with NO lingering selection", () => {
+    let s = seeded([]);
+    s = drawReducer(s, { type: "setTool", tool: "pen" }); // baseTool = pen
+    s = drawReducer(s, { type: "setTool", tool: "rect" });
+    s = drawReducer(s, { type: "beginDraw", shape: box("r1", { width: 0, height: 0 }) });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 60, y: 50 } });
+    s = drawReducer(s, { type: "endDraw" });
+    expect(s.tool).toBe("pen"); // stayed in the pen base
+    expect(s.selectedIds).toEqual([]); // no selection in pen mode
+  });
+
+  it("pen is persistent — drawing a stroke keeps the pen tool", () => {
+    let s = seeded([]);
+    s = drawReducer(s, { type: "setTool", tool: "pen" });
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "p1", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0] } });
+    s = drawReducer(s, { type: "extendFreehand", point: { x: 5, y: 5 } });
+    s = drawReducer(s, { type: "endDraw" });
+    expect(s.tool).toBe("pen");
+  });
+
+  it("isSelectable is true only for cursor + pen", () => {
+    expect([isSelectable("select"), isSelectable("pen")]).toEqual([true, true]);
+    expect([isSelectable("rect"), isSelectable("eraser"), isSelectable("text")]).toEqual([false, false, false]);
+  });
+});
+
+describe("drawReducer — selection", () => {
+  it("select replaces, toggleSelect adds/removes", () => {
+    let s = seeded([box("r1"), box("r2")]);
+    s = drawReducer(s, { type: "select", ids: ["r1"] });
+    expect(s.selectedIds).toEqual(["r1"]);
+    s = drawReducer(s, { type: "toggleSelect", id: "r2" });
+    expect(s.selectedIds).toEqual(["r1", "r2"]);
+    s = drawReducer(s, { type: "toggleSelect", id: "r1" });
+    expect(s.selectedIds).toEqual(["r2"]);
+  });
+
+  it("resizeCanvas sets the logical canvas size (blank fills its container)", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "resizeCanvas", width: 1000, height: 620 });
+    expect(s).toMatchObject({ width: 1000, height: 620 });
+  });
+
+  it("resizeCanvasCentered grows from center — shifts content AND history by half the delta", () => {
+    let s = seeded([box("r1", { x: 100, y: 100, width: 20, height: 20 })]); // 400x300
+    s = drawReducer(s, { type: "select", ids: ["r1"] });
+    s = drawReducer(s, { type: "setColor", color: "#ff0000" }); // one history entry (pre-color)
+    s = drawReducer(s, { type: "resizeCanvasCentered", width: 500, height: 340 }); // +100 w, +40 h
+    expect(s).toMatchObject({ width: 500, height: 340 });
+    expect(s.shapes[0]).toMatchObject({ x: 150, y: 120 }); // shifted +50, +20
+    expect((s.past[s.past.length - 1][0] as BoxShape).x).toBe(150); // history shifted too
+  });
+
+  it("switching off select clears the selection", () => {
+    let s = seeded([box("r1")]);
+    s = drawReducer(s, { type: "select", ids: ["r1"] });
+    s = drawReducer(s, { type: "setTool", tool: "pen" });
+    expect(s.selectedIds).toEqual([]);
+  });
+
+  it("recolors ALL selected shapes as one undoable edit", () => {
+    let s = seeded([box("r1"), box("r2")]);
+    s = drawReducer(s, { type: "select", ids: ["r1", "r2"] });
+    s = drawReducer(s, { type: "setColor", color: "#ff0000" });
+    expect(s.shapes.every((sh) => sh.stroke === "#ff0000")).toBe(true);
+    expect(s.color).toBe("#ff0000");
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes.every((sh) => sh.stroke === "#000")).toBe(true);
+  });
+
+  it("recolors + resizes the in-progress draft mid-draw, without a history entry", () => {
+    let s = seeded([]);
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "p1", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0] } });
+    s = drawReducer(s, { type: "extendFreehand", point: { x: 5, y: 5 } });
+    s = drawReducer(s, { type: "setColor", color: "#ff0000" });
+    expect(s.shapes[0].stroke).toBe("#ff0000");
+    expect(s.color).toBe("#ff0000");
+    s = drawReducer(s, { type: "setStrokeWidth", width: 10 });
+    expect(s.shapes[0].strokeWidth).toBe(10);
+    expect(s.past).toHaveLength(0); // mid-gesture: no discrete commits
+    s = drawReducer(s, { type: "endDraw" });
+    expect(s.shapes[0].stroke).toBe("#ff0000");
+    expect(s.past).toHaveLength(1); // one entry for the whole stroke
+  });
+
+  it("setColor with nothing selected only changes the active color", () => {
+    let s = seeded([box("r1")]);
+    s = drawReducer(s, { type: "setColor", color: "#00ff00" });
+    expect(s.shapes[0].stroke).toBe("#000");
+    expect(s.color).toBe("#00ff00");
+    expect(canUndo(s)).toBe(false);
+  });
+
+  it("deletes every selected shape and clears selection", () => {
+    let s = seeded([box("r1"), box("r2"), box("r3")]);
+    s = drawReducer(s, { type: "select", ids: ["r1", "r3"] });
+    s = drawReducer(s, { type: "deleteSelected" });
+    expect(s.shapes.map((sh) => sh.id)).toEqual(["r2"]);
+    expect(s.selectedIds).toEqual([]);
+  });
+
+  it("deleteShapes removes by id (eraser) and drops them from selection", () => {
+    let s = seeded([box("r1"), box("r2")]);
+    s = drawReducer(s, { type: "select", ids: ["r1", "r2"] });
+    s = drawReducer(s, { type: "deleteShapes", ids: ["r1"] });
+    expect(s.shapes.map((sh) => sh.id)).toEqual(["r2"]);
+    expect(s.selectedIds).toEqual(["r2"]);
+    // erasing a non-existent id is a no-op (no history churn)
+    const before = s.past.length;
+    s = drawReducer(s, { type: "deleteShapes", ids: ["nope"] });
+    expect(s.past.length).toBe(before);
+  });
+});
+
+describe("drawReducer — text size (S/M/L) via stroke slots + labels", () => {
+  it("stroke width sets fontSize on a selected TEXT (not strokeWidth)", () => {
+    let s = seeded([text("t1", { fontSize: 18 })]);
+    s = drawReducer(s, { type: "select", ids: ["t1"] });
+    s = drawReducer(s, { type: "setStrokeWidth", width: 10 });
+    const t = s.shapes[0] as TextShape;
+    expect(t.fontSize).toBe(44); // fontForStroke(10)
+    expect(s.strokeWidth).toBe(10);
+  });
+
+  it("a bound label patched onto a shape survives a move (follows the shape)", () => {
+    let s = seeded([box("r1")]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "patchShape", id: "r1", patch: { label: "DB" } });
+    s = drawReducer(s, { type: "endGesture" });
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "translateShapes", ids: ["r1"], dx: 20, dy: 20 });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.shapes[0].label).toBe("DB");
+    expect(s.shapes[0]).toMatchObject({ x: 30, y: 30 });
+  });
+});
+
+describe("drawReducer — marquee hit-test", () => {
+  it("selects shapes whose bbox intersects the marquee", () => {
+    const shapes: Shape[] = [box("r1", { x: 0, y: 0, width: 20, height: 20 }), box("r2", { x: 200, y: 200, width: 20, height: 20 })];
+    expect(shapesInMarquee(shapes, { x: -5, y: -5, width: 40, height: 40 })).toEqual(["r1"]);
+    expect(shapesInMarquee(shapes, { x: -5, y: -5, width: 300, height: 300 })).toEqual(["r1", "r2"]);
+    expect(shapesInMarquee(shapes, { x: 50, y: 50, width: 20, height: 20 })).toEqual([]);
+  });
+
+  it("handles a marquee dragged up-left (negative extent)", () => {
+    const shapes: Shape[] = [box("r1", { x: 0, y: 0, width: 20, height: 20 })];
+    expect(shapesInMarquee(shapes, { x: 30, y: 30, width: -40, height: -40 })).toEqual(["r1"]);
+  });
+});
+
+describe("drawReducer — clipboard (addShapes) + paste offset", () => {
+  it("addShapes appends, selects the new ones, one history entry", () => {
+    let s = seeded([box("r1")]);
+    s = drawReducer(s, { type: "addShapes", shapes: [box("r2"), box("r3")] });
+    expect(s.shapes.map((sh) => sh.id)).toEqual(["r1", "r2", "r3"]);
+    expect(s.selectedIds).toEqual(["r2", "r3"]);
+    expect(s.past).toHaveLength(1);
+  });
+
+  it("offsetShape shifts box x/y and segment points", () => {
+    expect(offsetShape(box("r1"), 5, 5)).toMatchObject({ x: 15, y: 15 });
+    const seg = offsetShape({ id: "l", type: "line", stroke: "#000", strokeWidth: 3, points: [0, 0, 10, 0] }, 4, 4);
+    expect(seg.type === "line" && seg.points).toEqual([4, 4, 14, 4]);
+  });
+});
+
+describe("drawReducer — text", () => {
+  it("adds and edits text, each an undoable commit", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "addShapes", shapes: [text("t1", { text: "hi" })] });
+    s = drawReducer(s, { type: "setText", id: "t1", text: "hello" });
+    const t = s.shapes[0];
+    expect(t.type === "text" && t.text).toBe("hello");
+    expect(s.past).toHaveLength(2);
+  });
+});
+
+describe("drawReducer — undo/redo", () => {
+  it("undo restores prior shapes and redo re-applies; selection survives if the shape does", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "beginDraw", shape: box("r1", { width: 0, height: 0 }) });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 60, y: 50 } });
+    s = drawReducer(s, { type: "endDraw" });
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes).toHaveLength(0);
+    expect(s.selectedIds).toEqual([]);
+    expect(canRedo(s)).toBe(true);
+    s = drawReducer(s, { type: "redo" });
+    expect(s.shapes).toHaveLength(1);
+    expect(canRedo(s)).toBe(false);
+  });
+
+  it("a fresh commit clears the redo stack", () => {
+    let s = seeded([box("r1")]);
+    s = drawReducer(s, { type: "select", ids: ["r1"] });
+    s = drawReducer(s, { type: "deleteSelected" });
+    s = drawReducer(s, { type: "undo" });
+    expect(canRedo(s)).toBe(true);
+    s = drawReducer(s, { type: "select", ids: ["r1"] });
+    s = drawReducer(s, { type: "setColor", color: "#123456" });
+    expect(canRedo(s)).toBe(false);
+  });
+
+  it("undo is a no-op with empty history", () => {
+    const s = initialDrawState();
+    expect(drawReducer(s, { type: "undo" })).toBe(s);
+  });
+});
+
+describe("bindings (arrow/line cling to shapes) + containment", () => {
+  const arrow = (id: string, pts: [number, number, number, number], over: Partial<Shape> = {}): Shape =>
+    ({ id, type: "arrow", stroke: "#fff", strokeWidth: 3, points: pts, ...over } as Shape);
+
+  it("nearestBindableId finds a nearby area shape, not a far one", () => {
+    const rect = box("r1", { x: 100, y: 100, width: 50, height: 50 });
+    expect(nearestBindableId({ x: 160, y: 125 }, [rect], "a1")).toBe("r1"); // ~10px past the border
+    expect(nearestBindableId({ x: 400, y: 400 }, [rect], "a1")).toBeUndefined();
+  });
+
+  it("bindAt captures the drawn point; reflow reproduces it unchanged", () => {
+    const rect = box("r1", { x: 100, y: 100, width: 50, height: 50 }); // center (125,125)
+    // endpoint (160,125), other endpoint to the right at (300,125)
+    const b = bindAt({ x: 160, y: 125 }, { x: 300, y: 125 }, [rect], "a1")!;
+    expect(b.id).toBe("r1");
+    const a = arrow("a1", [300, 125, 160, 125], { bindEnd: b });
+    const out = reflowBindings([rect, a]);
+    const seg = out.find((s) => s.id === "a1") as Shape & { points: number[] };
+    expect(seg.points[2]).toBeCloseTo(160); // stays exactly where drawn
+    expect(seg.points[3]).toBeCloseTo(125);
+  });
+
+  it("the bound endpoint ROTATES around the shape when the other end swings", () => {
+    const rect = box("r1", { x: 100, y: 100, width: 50, height: 50 }); // center (125,125)
+    // drawn: endpoint at (160,125) — to the RIGHT of the rect — other end at (300,125).
+    const b = bindAt({ x: 160, y: 125 }, { x: 300, y: 125 }, [rect], "a1")!;
+    // now the other end swings to directly ABOVE (125,-100); the bound endpoint
+    // should rotate to the TOP of the rect (~x=125, y<125), not stay on the right.
+    const a = arrow("a1", [125, -100, 0, 0], { bindEnd: b });
+    const seg = reflowBindings([rect, a]).find((s) => s.id === "a1") as Shape & { points: number[] };
+    expect(seg.points[2]).toBeCloseTo(125); // rotated to the top (x back to center)
+    expect(seg.points[3]).toBeCloseTo(90); // 125 - 35 radius, above the center
+  });
+
+  it("reflowBindings drops a binding whose target no longer exists", () => {
+    const out = reflowBindings([arrow("a1", [200, 200, 150, 150], { bindEnd: { id: "gone", angle: 0, gap: 10 } })]);
+    expect((out[0] as Shape & { bindEnd?: unknown }).bindEnd).toBeUndefined();
+  });
+
+  it("a bound endpoint clings to a RECTANGLE's border (not a circular path) as it rotates", () => {
+    // Non-square rect so a rect border differs clearly from a circle/ellipse.
+    const rect = box("r1", { x: 0, y: 0, width: 200, height: 40 }); // center (100,20), hx=100 hy=20
+    // draw the endpoint just past the right edge (205,20): on-border + tiny gap.
+    const b = bindAt({ x: 205, y: 20 }, { x: 400, y: 20 }, [rect], "a1")!; // gap ≈ 5
+    // swing the other end straight DOWN → endpoint should drop to the BOTTOM edge
+    // (y ≈ 20 + 20 + gap = ~45), a rect-edge distance, not the ~105 a circle would give.
+    const a = arrow("a1", [100, 400, 0, 0], { bindEnd: b });
+    const seg = reflowBindings([rect, a]).find((s) => s.id === "a1") as Shape & { points: number[] };
+    expect(seg.points[2]).toBeCloseTo(100); // straight below center
+    expect(seg.points[3]).toBeCloseTo(45); // bottom edge (20 + hy 20) + gap 5 — NOT ~105
+  });
+
+  it("moving the bound shape drags the endpoint along (translation preserves the spot)", () => {
+    const rect = box("r1", { x: 100, y: 100, width: 50, height: 50 });
+    const b = bindAt({ x: 160, y: 125 }, { x: 300, y: 125 }, [rect], "a1")!;
+    let s = seeded([box("r1", { x: 100, y: 100, width: 50, height: 50 }), arrow("a1", [300, 125, 160, 125], { bindEnd: b })]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "translateShapes", ids: ["r1"], dx: 100, dy: 0 });
+    s = drawReducer(s, { type: "endGesture" });
+    const seg = s.shapes.find((x) => x.id === "a1") as Shape & { points: number[] };
+    // rect center now (225,125); the free other end is still at 300 (to the right),
+    // so the endpoint keeps its +35 right offset → 225+35 = 260.
+    expect(seg.points[2]).toBeCloseTo(260);
+  });
+
+  it("containedIds returns shapes fully inside a container (area shapes only)", () => {
+    const big = box("big", { x: 0, y: 0, width: 200, height: 200 });
+    const small = box("small", { x: 20, y: 20, width: 30, height: 30 });
+    const outside = box("out", { x: 300, y: 300, width: 10, height: 10 });
+    expect(containedIds([big, small, outside], ["big"])).toEqual(["small"]);
+    expect(containedIds([big, small, outside], ["small"])).toEqual([]); // small contains nothing
+  });
+});
+
+describe("shape-to-shape attachment", () => {
+  const attachOf = (sh: Shape) => (sh as Shape & { attach?: { kind: string; ax?: number; ay?: number; dx?: number } }).attach;
+
+  it("attachAt binds an edge-touching rect (box anchor on the near side), not a centered-inside one", () => {
+    const parent = box("p", { x: 0, y: 0, width: 100, height: 100 });
+    const rightChild = box("c", { x: 100, y: 40, width: 20, height: 20 }); // touching the right edge, v-centered
+    const a = attachAt(rightChild, [parent])!;
+    expect(a).toMatchObject({ id: "p", kind: "box", ax: 1, ay: 0.5, dx: 10, dy: 0 });
+    const insideChild = box("c2", { x: 40, y: 40, width: 20, height: 20 }); // centered inside → resting, not attached
+    expect(attachAt(insideChild, [parent])).toBeUndefined();
+  });
+
+  it("attachAt detects a child sitting just INSIDE a parent's edge (edge proximity, not center band)", () => {
+    const parent = box("p", { x: 0, y: 0, width: 200, height: 100 });
+    // right edge at 180, near the parent's right (200); center 165 is only rx=0.83 — a
+    // wider child near the edge that the old center-band (>0.8 of *center*) would miss.
+    const insideRight = box("c", { x: 150, y: 42, width: 30, height: 16 });
+    expect(attachAt(insideRight, [parent])).toMatchObject({ id: "p", kind: "box", ax: 1 });
+    // genuinely centered inside → no attach (plain containment)
+    const centered = box("c2", { x: 90, y: 42, width: 20, height: 16 });
+    expect(attachAt(centered, [parent])).toBeUndefined();
+  });
+
+  it("a shape resting DEEP inside a large parent is not attached (mere containment, no bind/highlight)", () => {
+    const parent = box("p", { x: 0, y: 0, width: 600, height: 400 }); // large
+    // 100px in from the left/top edges — well clear of any border. The old
+    // parent-proportional band (25% = 150px) wrongly pinned this to the left edge.
+    const resting = box("c", { x: 100, y: 100, width: 40, height: 40 });
+    expect(attachAt(resting, [parent])).toBeUndefined();
+    // still binds when actually dragged snug against a border (within near-touch)
+    const snug = box("c2", { x: 10, y: 180, width: 40, height: 40 }); // left edge 10px from parent left
+    expect(attachAt(snug, [parent])).toMatchObject({ id: "p", kind: "box", ax: 0 });
+  });
+
+  it("nearestEdgeBindableId glows near a border but NOT the deep interior (box-tool hover)", () => {
+    const p = box("p", { x: 0, y: 0, width: 400, height: 300 });
+    expect(nearestEdgeBindableId({ x: 200, y: 150 }, [p], "")).toBeUndefined(); // dead center → no glow
+    expect(nearestEdgeBindableId({ x: 8, y: 150 }, [p], "")).toBe("p"); // 8px inside the left border → glow
+    expect(nearestEdgeBindableId({ x: -10, y: 150 }, [p], "")).toBe("p"); // 10px outside → glow
+    expect(nearestEdgeBindableId({ x: -40, y: 150 }, [p], "")).toBeUndefined(); // well outside → no glow
+    // contrast: the interior-inclusive predicate DOES glow at the center
+    expect(nearestBindableId({ x: 200, y: 150 }, [p], "")).toBe("p");
+  });
+
+  it("attachAt uses a radial anchor for an ellipse parent", () => {
+    const ell = { id: "e", type: "ellipse", stroke: "#fff", strokeWidth: 3, x: 0, y: 0, width: 100, height: 100 } as Shape;
+    const child = box("c", { x: 100, y: 40, width: 20, height: 20 }); // right of the ellipse
+    const a = attachAt(child, [ell]) as { kind: string; angle: number };
+    expect(a.kind).toBe("radial");
+    expect(a.angle).toBeCloseTo(0); // to the right of center
+  });
+
+  it("a right-attached child follows the parent on MOVE — via the size-gated cluster (new contract)", () => {
+    // NEW LAW (§2.2): followers ride by INCLUSION in the translated ids (the view
+    // passes moveClusterIds), not by attachment reflow. The parent (10000) is
+    // heavier than the child (400) → the child is in the cluster and moves.
+    let s = seeded([box("p", { x: 0, y: 0, width: 100, height: 100 }), box("c", { x: 100, y: 40, width: 20, height: 20 })]);
+    s = drawReducer(s, { type: "reattach", ids: ["c"] }); // attach c to p's right side
+    expect(attachOf(s.shapes.find((x) => x.id === "c")!)).toMatchObject({ id: "p", ax: 1 });
+    s = drawReducer(s, { type: "beginGesture" });
+    const ids = moveClusterIds(s.shapes, ["p"]);
+    expect(new Set(ids)).toEqual(new Set(["p", "c"]));
+    s = drawReducer(s, { type: "translateShapes", ids, dx: 50, dy: 0 });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.shapes.find((x) => x.id === "c")).toMatchObject({ x: 150 }); // followed +50
+  });
+
+  it("reflowAttachments makes a right-attached child follow the parent's RIGHT RESIZE", () => {
+    let s = seeded([box("p", { x: 0, y: 0, width: 100, height: 100 }), box("c", { x: 100, y: 40, width: 20, height: 20 })]);
+    s = drawReducer(s, { type: "reattach", ids: ["c"] });
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "patchShape", id: "p", patch: { width: 200 } }); // grow the right edge
+    s = drawReducer(s, { type: "endGesture" });
+    // child center was at x=110 (parent.right 100 + gap 10); now parent.right=200 → child center 210 → x=200
+    expect(s.shapes.find((x) => x.id === "c")).toMatchObject({ x: 200 });
+  });
+
+  it("resize drags ATTACHED-inside children with the edge, but leaves contained-not-attached ones in place", () => {
+    const parent = box("p", { x: 0, y: 0, width: 100, height: 100 });
+    // attached just INSIDE the right edge (center 87.5,50), pinned to the right side
+    const attachedInside = { ...box("a", { x: 80, y: 42.5, width: 15, height: 15 }), attach: { id: "p", kind: "box", ax: 1, ay: 0.5, dx: -12.5, dy: 0 } } as Shape;
+    // resting in the CENTER, no attachment
+    const restingCenter = box("c", { x: 42, y: 42, width: 16, height: 16 });
+    let s = seeded([parent, attachedInside, restingCenter]);
+    s = drawReducer(s, { type: "patchShape", id: "p", patch: { width: 200 } }); // grow the right edge 100 → 200
+    // attached child follows the right edge (new right 200 + gap -12.5 → center 187.5 → x 180)
+    expect(s.shapes.find((x) => x.id === "a")).toMatchObject({ x: 180 });
+    // contained-not-attached stays put
+    expect(s.shapes.find((x) => x.id === "c")).toMatchObject({ x: 42, y: 42 });
+  });
+
+  it("a box drawn edge-to-edge with a shape attaches to it (attach-on-draw)", () => {
+    let s = seeded([box("p", { x: 0, y: 0, width: 100, height: 100 })]);
+    s = drawReducer(s, { type: "setTool", tool: "rect" });
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "d", type: "rect", stroke: "#fff", strokeWidth: 3, x: 100, y: 40, width: 0, height: 0 } });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 122, y: 62 } }); // right edge of parent
+    s = drawReducer(s, { type: "endDraw" });
+    const drawn = s.shapes.find((x) => x.id === "d") as Shape & { attach?: { id: string; ax: number } };
+    expect(drawn.attach).toMatchObject({ id: "p", ax: 1 });
+  });
+
+  it("reflowAttachments drops an attachment whose parent is gone", () => {
+    const out = reflowAttachments(
+      [{ ...box("c"), attach: { id: "gone", kind: "box", ax: 1, ay: 0.5, dx: 0, dy: 0 } } as Shape],
+      new Set()
+    );
+    expect(attachOf(out[0])).toBeUndefined();
+  });
+});
+
+describe("image crop", () => {
+  const imageShape = (over: Partial<Shape> = {}): Shape =>
+    ({ id: "i1", type: "image", stroke: "#000", strokeWidth: 1, x: 0, y: 0, width: 200, height: 200, dataBase64: "x", mediaType: "image/png", ...over } as Shape);
+
+  it("cropImage sets the display box + source crop; undo reverts to the full image", () => {
+    let s = seeded([imageShape()]);
+    s = drawReducer(s, { type: "cropImage", id: "i1", box: { x: 10, y: 10, width: 100, height: 100 }, crop: { x: 20, y: 20, width: 100, height: 100 } });
+    expect(s.shapes[0]).toMatchObject({ x: 10, y: 10, width: 100, height: 100, crop: { x: 20, y: 20, width: 100, height: 100 } });
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes[0]).toMatchObject({ x: 0, y: 0, width: 200, height: 200 });
+    expect((s.shapes[0] as Shape & { crop?: unknown }).crop).toBeUndefined();
+  });
+
+  it("cropImage with no crop uncrops (clears it)", () => {
+    let s = seeded([imageShape({ crop: { x: 20, y: 20, width: 50, height: 50 } })]);
+    s = drawReducer(s, { type: "cropImage", id: "i1", box: { x: 0, y: 0, width: 200, height: 200 }, crop: undefined });
+    expect((s.shapes[0] as Shape & { crop?: unknown }).crop).toBeUndefined();
+  });
+});
+
+describe("helpers", () => {
+  it("normalizeBox fixes negative extent", () => {
+    expect(normalizeBox(box("x", { x: 100, y: 100, width: -60, height: -40 }))).toMatchObject({ x: 40, y: 60, width: 60, height: 40 });
+  });
+
+  it("boundingBox covers each shape kind", () => {
+    expect(boundingBox(box("r", { x: 5, y: 5, width: 10, height: 20 }))).toMatchObject({ x: 5, y: 5, width: 10, height: 20 });
+    expect(boundingBox({ id: "l", type: "line", stroke: "#000", strokeWidth: 3, points: [0, 30, 40, 0] })).toMatchObject({ x: 0, y: 0, width: 40, height: 30 });
+    expect(boundingBox({ id: "p", type: "pen", stroke: "#000", strokeWidth: 3, points: [10, 10, 20, 40] })).toMatchObject({ x: 10, y: 10, width: 10, height: 30 });
+  });
+
+  it("toDoc deep-clones shapes (no aliasing into live state)", () => {
+    const s = seeded([box("r1")]);
+    const doc = toDoc(s);
+    (doc.shapes[0] as BoxShape).x = 999;
+    expect((s.shapes[0] as BoxShape).x).toBe(10);
+  });
+
+  it("palette = adaptive ink first, then the content colors", () => {
+    expect(PALETTE[0]).toBe(CONTRAST_INK);
+    expect(PALETTE).toHaveLength(5);
+    expect(isContrastInk(CONTRAST_INK)).toBe(true);
+    expect(isContrastInk("#e5484d")).toBe(false);
+  });
+
+  it("initialDrawState defaults to the adaptive ink and always opens in pen", () => {
+    expect(initialDrawState(undefined, { color: "#abcdef" }).color).toBe("#abcdef");
+    expect(initialDrawState().color).toBe(CONTRAST_INK);
+    expect(initialDrawState({ shapes: [box("r1")], width: 1, height: 1 }).tool).toBe("pen");
+    expect(initialDrawState().tool).toBe("pen");
+    expect(initialDrawState().baseTool).toBe("pen");
+  });
+});
+
+// ── Size-based drag propagation: "largest drags smallest" (moveClusterIds) ──────
+const att = (id: string): Attach => ({ id, kind: "box", ax: 1, ay: 0.5, dx: 0, dy: 0 });
+const clusterOf = (shapes: Shape[], seeds: string[]) => new Set(moveClusterIds(shapes, seeds));
+// square box of a given side, placed on the y=0 row (far apart → no containment)
+const sq = (id: string, x: number, side: number, over: Partial<BoxShape> = {}): BoxShape =>
+  box(id, { x, y: 0, width: side, height: side, ...over });
+
+describe("moveClusterIds — largest drags smallest", () => {
+  it("1. mixed-direction chain L–M–S: the grabbed seed's size gates propagation", () => {
+    const L = sq("L", 0, 200); // area 40000
+    const M = sq("M", 300, 100, { attach: att("L") }); // 10000, M.attach=L
+    const S = sq("S", 500, 40, { attach: att("M") }); // 1600, S.attach=M
+    const shapes = [L, M, S];
+    expect(clusterOf(shapes, ["L"])).toEqual(new Set(["L", "M", "S"])); // big drags all
+    expect(clusterOf(shapes, ["M"])).toEqual(new Set(["M", "S"])); // medium drags smaller
+    expect(clusterOf(shapes, ["S"])).toEqual(new Set(["S"])); // small drags itself
+  });
+
+  it("2. a heavier middle node blocks its subtree", () => {
+    const M = sq("M", 0, 100); // seed 10000
+    const L = sq("L", 1000, 200, { attach: att("M") }); // 40000, edge M–L
+    const S = sq("S", 500, 40, { attach: att("L") }); // 1600, edge L–S
+    expect(clusterOf([M, L, S], ["M"])).toEqual(new Set(["M"])); // L too heavy → S unreachable
+  });
+
+  it("3. equal-weight neighbors come along (either grabbed end)", () => {
+    const A = sq("A", 0, 100);
+    const B = sq("B", 300, 100, { attach: att("A") }); // equal 10000
+    expect(clusterOf([A, B], ["A"])).toEqual(new Set(["A", "B"]));
+    expect(clusterOf([A, B], ["B"])).toEqual(new Set(["A", "B"]));
+  });
+
+  it("4. multi-seed union — a selected big shape moves even beside a tiny seed", () => {
+    const L = sq("L", 0, 200);
+    const M = sq("M", 300, 100, { attach: att("L") });
+    const S = sq("S", 600, 40); // tiny, isolated
+    const shapes = [L, M, S];
+    expect(clusterOf(shapes, ["S"])).toEqual(new Set(["S"]));
+    expect(clusterOf(shapes, ["L"])).toEqual(new Set(["L", "M"]));
+    expect(clusterOf(shapes, ["S", "L"])).toEqual(new Set(["S", "L", "M"])); // union
+  });
+
+  it("5. contained (and contained-of-contained) ride every cluster member", () => {
+    const P = box("P", { x: 0, y: 0, width: 200, height: 200 });
+    const Q = box("Q", { x: 20, y: 20, width: 100, height: 100 }); // inside P
+    const T = box("T", { x: 30, y: 30, width: 20, height: 20 }); // inside Q (& P)
+    expect(clusterOf([P, Q, T], ["P"])).toEqual(new Set(["P", "Q", "T"]));
+  });
+
+  it("6. edge direction is irrelevant to the cluster", () => {
+    const A = box("A", { x: 0, y: 0, width: 100, height: 100 }); // 10000
+    const B = box("B", { x: 300, y: 0, width: 40, height: 40 }); // 1600
+    const fwd = [A, { ...B, attach: att("A") }]; // B.attach=A
+    const rev = [{ ...A, attach: att("B") }, B]; // A.attach=B
+    expect(clusterOf(fwd, ["A"])).toEqual(clusterOf(rev, ["A"]));
+    expect(clusterOf(fwd, ["B"])).toEqual(clusterOf(rev, ["B"]));
+    expect(clusterOf(fwd, ["A"])).toEqual(new Set(["A", "B"]));
+    expect(clusterOf(fwd, ["B"])).toEqual(new Set(["B"]));
+  });
+
+  it("6a. massless scribble: the rect grabs it; grabbing it drags only itself", () => {
+    const R = box("R", { x: 100, y: 100, width: 50, height: 50 }); // 2500
+    const scribble: Shape = {
+      id: "sc",
+      type: "pen",
+      stroke: "#000",
+      strokeWidth: 3,
+      points: [0, 0, 300, 0, 300, 300, 0, 300, 0, 0], // encircling: bbox 300x300 ≥ R
+      attach: att("R"),
+    };
+    const shapes = [R, scribble];
+    expect(clusterWeight(scribble)).toBe(0); // massless
+    expect(clusterOf(shapes, ["R"])).toEqual(new Set(["R", "sc"])); // rect drags the scribble
+    expect(clusterOf(shapes, ["sc"])).toEqual(new Set(["sc"])); // scribble alone
+  });
+
+  it("6b. legacy 2-cycle terminates and returns both", () => {
+    const A = box("A", { x: 0, y: 0, width: 100, height: 100, attach: att("B") });
+    const B = box("B", { x: 300, y: 0, width: 100, height: 100, attach: att("A") });
+    expect(clusterOf([A, B], ["A"])).toEqual(new Set(["A", "B"]));
+  });
+});
+
+describe("drawReducer — move freeze + reattach (crossing vs intra-cluster edges)", () => {
+  const attachOf = (sh?: Shape) => (sh as (Shape & { attach?: Attach }) | undefined)?.attach;
+
+  it("7. a heavier stayer whose edge points INTO the moved set is frozen (not dragged)", () => {
+    // X (40000) is attached to M (1600). Grabbing M drags only {M} (X too heavy).
+    // The freeze must keep X put — today reflow would yank X toward the moved M.
+    const M = box("M", { x: 300, y: 0, width: 40, height: 40 });
+    const X = box("X", { x: 0, y: 0, width: 200, height: 200, attach: att("M") });
+    let s = seeded([M, X]);
+    s = drawReducer(s, { type: "beginGesture" });
+    const ids = moveClusterIds(s.shapes, ["M"]);
+    expect(new Set(ids)).toEqual(new Set(["M"])); // X too heavy → not in the cluster
+    s = drawReducer(s, { type: "translateShapes", ids, dx: 100, dy: 0 });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.shapes.find((x) => x.id === "X")).toMatchObject({ x: 0, y: 0 }); // frozen
+    expect(s.shapes.find((x) => x.id === "M")).toMatchObject({ x: 400 }); // moved +100
+  });
+
+  it("8. an intra-cluster edge is preserved through reattach (regression: latent bug #3)", () => {
+    // Move a glued pair {p,c} rigidly, then reattach the moved set: c.attach must
+    // survive (today it's dropped because candidates exclude the moved set).
+    const p = box("p", { x: 0, y: 0, width: 100, height: 100 });
+    const c = box("c", { x: 100, y: 40, width: 20, height: 20, attach: { id: "p", kind: "box", ax: 1, ay: 0.5, dx: 10, dy: 0 } });
+    let s = seeded([p, c]);
+    s = drawReducer(s, { type: "beginGesture" });
+    const ids = moveClusterIds(s.shapes, ["p"]); // {p,c}
+    s = drawReducer(s, { type: "translateShapes", ids, dx: 200, dy: 0 });
+    s = drawReducer(s, { type: "reattach", ids });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(attachOf(s.shapes.find((x) => x.id === "c"))?.id).toBe("p"); // preserved
+    expect(s.shapes.find((x) => x.id === "c")).toMatchObject({ x: 300 }); // rode along
+  });
+
+  it("9. a crossing edge detaches on drop when dragged far (grab the small one)", () => {
+    const L = box("L", { x: 0, y: 0, width: 100, height: 100 });
+    const S: Shape = { ...box("S", { x: 100, y: 40, width: 20, height: 20 }), attach: { id: "L", kind: "box", ax: 1, ay: 0.5, dx: 10, dy: 0 } } as Shape;
+    let s = seeded([L, S]);
+    s = drawReducer(s, { type: "beginGesture" });
+    const ids = moveClusterIds(s.shapes, ["S"]); // {S} — L too heavy to drag
+    expect(new Set(ids)).toEqual(new Set(["S"]));
+    s = drawReducer(s, { type: "translateShapes", ids, dx: 300, dy: 0 });
+    s = drawReducer(s, { type: "reattach", ids });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(attachOf(s.shapes.find((x) => x.id === "S"))).toBeUndefined(); // detached
+    expect(s.shapes.find((x) => x.id === "L")).toMatchObject({ x: 0 }); // stayer unmoved
+  });
+
+  it("10. a stayer's stale edge is re-evaluated at drop (cleared when it abuts nothing)", () => {
+    // X (heavy) is frozen while M departs; at drop X's stale edge to M is dropped.
+    const M = box("M", { x: 300, y: 0, width: 40, height: 40 });
+    const X = box("X", { x: 0, y: 0, width: 200, height: 200, attach: att("M") });
+    let s = seeded([M, X]);
+    s = drawReducer(s, { type: "beginGesture" });
+    const ids = moveClusterIds(s.shapes, ["M"]); // {M}
+    s = drawReducer(s, { type: "translateShapes", ids, dx: 500, dy: 0 });
+    s = drawReducer(s, { type: "reattach", ids });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(attachOf(s.shapes.find((x) => x.id === "X"))).toBeUndefined(); // stale edge cleared
+    expect(s.shapes.find((x) => x.id === "X")).toMatchObject({ x: 0 }); // never moved
+  });
+
+  it("11. reattach re-glues a still-adjacent parent after a tiny drag (does NOT detach)", () => {
+    const L = box("L", { x: 0, y: 0, width: 100, height: 100 });
+    const S: Shape = { ...box("S", { x: 100, y: 40, width: 20, height: 20 }), attach: { id: "L", kind: "box", ax: 1, ay: 0.5, dx: 10, dy: 0 } } as Shape;
+    let s = seeded([L, S]);
+    s = drawReducer(s, { type: "beginGesture" });
+    const ids = moveClusterIds(s.shapes, ["S"]); // {S}
+    s = drawReducer(s, { type: "translateShapes", ids, dx: 5, dy: 0 }); // still within ATTACH_DIST
+    s = drawReducer(s, { type: "reattach", ids });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(attachOf(s.shapes.find((x) => x.id === "S"))?.id).toBe("L"); // stays glued
+  });
+});
+
+describe("drawReducer — direction-agnostic resize (commitResize / reflowChildrenTo / crop)", () => {
+  const attachOf = (sh?: Shape) => (sh as (Shape & { attach?: Attach }) | undefined)?.attach;
+
+  it("12. an in-edge child follows commitResize of its parent", () => {
+    const P = box("P", { x: 0, y: 0, width: 100, height: 100 });
+    const C = box("C", { x: 100, y: 40, width: 20, height: 20, attach: { id: "P", kind: "box", ax: 1, ay: 0.5, dx: 10, dy: 0 } });
+    let s = seeded([P, C]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "commitResize", id: "P", patch: { width: 180 } });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.shapes.find((x) => x.id === "C")).toMatchObject({ x: 180 }); // center 180+10=190
+  });
+
+  it("13. an OUT-edge neighbor follows resize — the 'attached-from-inside' repro", () => {
+    // P.attach=C (edge stored the 'wrong way'): resizing P must STILL drag C.
+    const P = box("P", { x: 0, y: 0, width: 100, height: 100, attach: { id: "C", kind: "box", ax: 0, ay: 0.5, dx: -50, dy: 0 } });
+    const C = box("C", { x: 100, y: 40, width: 20, height: 20 });
+    let s = seeded([P, C]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "commitResize", id: "P", patch: { width: 180 } });
+    s = drawReducer(s, { type: "endGesture" });
+    expect((s.shapes.find((x) => x.id === "C") as BoxShape).x).toBeCloseTo(180); // followed the moved edge
+    expect(s.shapes.find((x) => x.id === "P")).toMatchObject({ x: 0, width: 180 }); // exactly the resize
+  });
+
+  it("14. commitResize never repositions the resized shape (no snap-back) + refreshes its anchor", () => {
+    const N = box("N", { x: 0, y: 0, width: 100, height: 100 });
+    const S = box("S", { x: 100, y: 40, width: 20, height: 20, attach: { id: "N", kind: "box", ax: 1, ay: 0.5, dx: 10, dy: 0 } });
+    let s = seeded([N, S]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "commitResize", id: "S", patch: { width: 40 } });
+    s = drawReducer(s, { type: "endGesture" });
+    const sNew = s.shapes.find((x) => x.id === "S")!;
+    expect(sNew).toMatchObject({ x: 100, y: 40, width: 40 }); // EXACTLY the patch — no yank-back
+    const a = attachOf(sNew)!;
+    expect(a.id).toBe("N");
+    expect(a.kind === "box" && a.dx).toBeCloseTo(20); // anchor consistent with the new geometry
+  });
+
+  it("15. shrinking a shape away from its neighbor drops the edge", () => {
+    const N = box("N", { x: 0, y: 0, width: 200, height: 200 });
+    // S is pinned to N's right edge but sits INSIDE N (so N is not edge-adjacent to
+    // S → N won't chase); shrink S to N's dead center → the edge must drop.
+    const S = box("S", { x: 170, y: 90, width: 20, height: 20, attach: { id: "N", kind: "box", ax: 1, ay: 0.5, dx: -20, dy: 0 } });
+    let s = seeded([N, S]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "commitResize", id: "S", patch: { x: 90, y: 90, width: 20, height: 20 } });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(attachOf(s.shapes.find((x) => x.id === "S"))).toBeUndefined(); // dropped
+    expect(s.shapes.find((x) => x.id === "N")).toMatchObject({ x: 0, width: 200 }); // N never moved
+  });
+
+  it("16. resizing a container leaves a contained-not-attached shape in place", () => {
+    const P = box("P", { x: 0, y: 0, width: 100, height: 100 });
+    const C = box("C", { x: 42, y: 42, width: 16, height: 16 }); // centered inside, no attach
+    let s = seeded([P, C]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "commitResize", id: "P", patch: { width: 200 } });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.shapes.find((x) => x.id === "C")).toMatchObject({ x: 42, y: 42 });
+  });
+
+  it("17. the synthesized inverted anchor is never persisted (reflowChildrenTo & commitResize)", () => {
+    const P = box("P", { x: 0, y: 0, width: 100, height: 100, attach: { id: "C", kind: "box", ax: 0, ay: 0.5, dx: -50, dy: 0 } });
+    const C = box("C", { x: 100, y: 40, width: 20, height: 20 });
+    let s = seeded([P, C]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "reflowChildrenTo", parentId: "P", box: { x: 0, y: 0, width: 180, height: 100 } });
+    expect(attachOf(s.shapes.find((x) => x.id === "C"))).toBeUndefined(); // synthesis restored
+    s = drawReducer(s, { type: "commitResize", id: "P", patch: { width: 180 } });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(attachOf(s.shapes.find((x) => x.id === "C"))).toBeUndefined();
+  });
+
+  it("18. cropImage: an attached neighbor follows the new box; own anchor refreshed", () => {
+    const I: Shape = {
+      id: "I",
+      type: "image",
+      stroke: "#000",
+      strokeWidth: 1,
+      x: 0,
+      y: 0,
+      width: 200,
+      height: 100,
+      dataBase64: "x",
+      mediaType: "image/png",
+      attach: { id: "R", kind: "box", ax: 0, ay: 0.5, dx: -100, dy: 0 },
+    } as Shape;
+    const R = box("R", { x: 200, y: 40, width: 20, height: 20 });
+    let s = seeded([I, R]);
+    s = drawReducer(s, { type: "cropImage", id: "I", box: { x: 0, y: 0, width: 100, height: 100 }, crop: { x: 0, y: 0, width: 100, height: 100 } });
+    expect((s.shapes.find((x) => x.id === "R") as BoxShape).x).toBeCloseTo(100); // R tracked the new right edge
+    expect(attachOf(s.shapes.find((x) => x.id === "I"))?.id).toBe("R"); // own anchor refreshed
+    expect((s.shapes.find((x) => x.id === "I") as Shape & { crop?: unknown }).crop).toBeTruthy();
+  });
+
+  it("18a. beginGesture→commitResize→endGesture = one history entry; undo restores both shapes", () => {
+    const P = box("P", { x: 0, y: 0, width: 100, height: 100, attach: { id: "C", kind: "box", ax: 0, ay: 0.5, dx: -50, dy: 0 } });
+    const C = box("C", { x: 100, y: 40, width: 20, height: 20 });
+    let s = seeded([P, C]);
+    const before = s.past.length;
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "commitResize", id: "P", patch: { width: 180 } });
+    expect(s.past.length).toBe(before); // history-neutral
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.past.length).toBe(before + 1); // exactly one, from endGesture
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes.find((x) => x.id === "P")).toMatchObject({ width: 100 }); // resized shape
+    expect(s.shapes.find((x) => x.id === "C")).toMatchObject({ x: 100 }); // AND the followed neighbor
+  });
+
+  it("18b. commitResize on TEXT: neighbor follows the derived bbox; no snap-back", () => {
+    const T = text("T", { x: 0, y: 0, text: "hello", fontSize: 20 }); // bbox width ~60
+    const R = box("R", { x: 60, y: 4, width: 16, height: 16, attach: { id: "T", kind: "box", ax: 1, ay: 0.5, dx: 8, dy: 0 } });
+    let s = seeded([T, R]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "commitResize", id: "T", patch: { fontSize: 40 } });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.shapes.find((x) => x.id === "T")).toMatchObject({ fontSize: 40, x: 0 }); // no snap-back
+    expect((s.shapes.find((x) => x.id === "R") as BoxShape).x).toBeCloseTo(120); // bbox 60→120, center 128 → x120
+  });
+
+  it("18c. reflowChildrenTo converges — the neighbor's spot is frame-order-independent (D9)", () => {
+    const mk = () => {
+      const P = box("P", { x: 0, y: 0, width: 100, height: 100, attach: { id: "C", kind: "box", ax: 0, ay: 0.5, dx: -50, dy: 0 } });
+      const C = box("C", { x: 100, y: 40, width: 20, height: 20 });
+      return drawReducer(seeded([P, C]), { type: "beginGesture" });
+    };
+    const finalBox = { x: 0, y: 0, width: 200, height: 100 };
+    let a = mk();
+    a = drawReducer(a, { type: "reflowChildrenTo", parentId: "P", box: { x: 0, y: 0, width: 150, height: 100 } });
+    a = drawReducer(a, { type: "reflowChildrenTo", parentId: "P", box: finalBox });
+    let b = mk();
+    b = drawReducer(b, { type: "reflowChildrenTo", parentId: "P", box: finalBox });
+    const ca = a.shapes.find((x) => x.id === "C") as { x: number; y: number };
+    const cb = b.shapes.find((x) => x.id === "C") as { x: number; y: number };
+    expect(ca.x).toBeCloseTo(cb.x);
+    expect(ca.y).toBeCloseTo(cb.y);
+  });
+});
+
+describe("drawReducer — attach-on-create + paste glue", () => {
+  const attachOf = (sh?: Shape) => (sh as (Shape & { attach?: Attach }) | undefined)?.attach;
+
+  it("19. a pen stroke drawn along a shape edge attaches on release", () => {
+    let s = seeded([box("r", { x: 0, y: 0, width: 100, height: 100 })]);
+    s = drawReducer(s, { type: "setTool", tool: "pen" });
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "pn", type: "pen", stroke: "#fff", strokeWidth: 3, points: [100, 20] } });
+    s = drawReducer(s, { type: "extendFreehand", point: { x: 104, y: 50 } });
+    s = drawReducer(s, { type: "extendFreehand", point: { x: 100, y: 80 } });
+    s = drawReducer(s, { type: "endDraw" });
+    expect(attachOf(s.shapes.find((x) => x.id === "pn"))?.id).toBe("r"); // glued to r's right edge
+    expect(new Set(moveClusterIds(s.shapes, ["r"]))).toEqual(new Set(["r", "pn"])); // rect drags it
+  });
+
+  it("20. addShapes { detectAttach } stamps an edge-adjacent shape, not a centered one; off by default", () => {
+    const p = box("p", { x: 0, y: 0, width: 100, height: 100 });
+    // adjacent to p's right edge + flag → attaches
+    let s = drawReducer(seeded([p]), { type: "addShapes", detectAttach: true, shapes: [text("adj", { x: 100, y: 44, text: "hi", fontSize: 18 })] });
+    expect(attachOf(s.shapes.find((x) => x.id === "adj"))?.id).toBe("p");
+    // centered inside + flag → NOT attached (plain containment)
+    s = drawReducer(seeded([p]), { type: "addShapes", detectAttach: true, shapes: [text("mid", { x: 40, y: 44, text: "hi", fontSize: 18 })] });
+    expect(attachOf(s.shapes.find((x) => x.id === "mid"))).toBeUndefined();
+    // adjacent, WITHOUT the flag → never stamped
+    s = drawReducer(seeded([p]), { type: "addShapes", shapes: [text("noflag", { x: 100, y: 44, text: "hi", fontSize: 18 })] });
+    expect(attachOf(s.shapes.find((x) => x.id === "noflag"))).toBeUndefined();
+  });
+
+  it("21. paste (clonePastedShapes): intra-batch attach + binds remapped & kept; external edges dropped", () => {
+    const P = box("P", { x: 0, y: 0, width: 100, height: 100 });
+    const C = box("C", { x: 100, y: 40, width: 20, height: 20, attach: { id: "P", kind: "box", ax: 1, ay: 0.5, dx: 10, dy: 0 } });
+    const A: Shape = { id: "A", type: "arrow", stroke: "#fff", strokeWidth: 3, points: [200, 50, 100, 50], bindEnd: { id: "P", angle: 0, gap: 5 } };
+    const E = box("E", { x: 400, y: 0, width: 20, height: 20, attach: { id: "outside", kind: "box", ax: 0, ay: 0.5, dx: 0, dy: 0 } });
+    let n = 0;
+    const out = clonePastedShapes([P, C, A, E], 16, 16, () => `new${n++}`);
+    const [Pn, Cn, An, En] = out;
+    expect(Pn.id).toBe("new0");
+    expect(Pn).toMatchObject({ x: 16, y: 16 }); // translated by the offset
+    expect(attachOf(Cn)?.id).toBe("new0"); // intra-batch attach remapped to the copy
+    expect((An as Shape & { bindEnd?: { id: string } }).bindEnd?.id).toBe("new0"); // bind remapped
+    expect(attachOf(En)).toBeUndefined(); // external edge dropped, not re-detected
+  });
+
+  it("21a. pasting a copy at the paste offset does NOT glue it to its original (B1)", () => {
+    const orig = box("orig", { x: 0, y: 0, width: 100, height: 100 });
+    let n = 0;
+    const [copy] = clonePastedShapes([orig], 16, 16, () => `copy${n++}`);
+    expect(attachOf(copy)).toBeUndefined();
+    expect(new Set(moveClusterIds([orig, copy], ["orig"]))).toEqual(new Set(["orig"])); // dragging orig leaves copy
+  });
+
+  it("21b. sequential addShapes without detectAttach never chains attaches (cascade)", () => {
+    let s = seeded([]);
+    s = drawReducer(s, { type: "addShapes", shapes: [box("a1", { x: 0, y: 0, width: 40, height: 40 })] });
+    s = drawReducer(s, { type: "addShapes", shapes: [box("a2", { x: 12, y: 12, width: 40, height: 40 })] });
+    s = drawReducer(s, { type: "addShapes", shapes: [box("a3", { x: 24, y: 24, width: 40, height: 40 })] });
+    expect(s.shapes.every((sh) => !attachOf(sh))).toBe(true);
+  });
+});
+
+// ── Paint order: images are a background layer; vector shapes always above ───────
+const ids = (shapes: Shape[]) => paintOrder(shapes).map((s) => s.id);
+const image = (id: string, over: Partial<Extract<Shape, { type: "image" }>> = {}): Shape => ({
+  id, type: "image", stroke: "#000", strokeWidth: 1, x: 0, y: 0, width: 400, height: 300, dataBase64: "", mediaType: "image/png", ...over,
+});
+
+describe("paintOrder — images beneath, vector shapes on top", () => {
+  it("a small rect paints above a big image (the reported nuance)", () => {
+    const img = image("img", { width: 400, height: 300 });
+    const small = box("r", { x: 20, y: 20, width: 40, height: 40 });
+    expect(ids([small, img])).toEqual(["img", "r"]); // rect on top whatever insertion order
+    expect(ids([img, small])).toEqual(["img", "r"]);
+  });
+
+  it("even a LARGE rect stays above an image", () => {
+    const img = image("img", { width: 100, height: 100 });
+    const big = box("big", { width: 500, height: 500 }); // bigger than the image
+    expect(ids([img, big])).toEqual(["img", "big"]); // shape still on top
+    expect(ids([big, img])).toEqual(["img", "big"]);
+  });
+
+  it("non-image shapes keep DRAW order (not size-sorted among themselves)", () => {
+    const big = box("big", { width: 200, height: 200 });
+    const small = box("small", { width: 30, height: 30 });
+    expect(ids([big, small])).toEqual(["big", "small"]); // drawn big→small: small on top
+    expect(ids([small, big])).toEqual(["small", "big"]); // drawn small→big: big on top
+  });
+
+  it("a stroke keeps draw order relative to other shapes (no forced top)", () => {
+    const scribble: Shape = { id: "sc", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0, 500, 500] };
+    const rect = box("rect", { width: 100, height: 100 });
+    expect(ids([scribble, rect])).toEqual(["sc", "rect"]); // scribble drawn first → below
+    expect(ids([rect, scribble])).toEqual(["rect", "sc"]);
+  });
+
+  it("within the image layer the larger image paints lower", () => {
+    const bigImg = image("big", { width: 400, height: 400 });
+    const smallImg = image("small", { width: 80, height: 80 });
+    const rect = box("r", { width: 50, height: 50 });
+    // both images below the rect; bigger image lowest.
+    expect(ids([smallImg, rect, bigImg])).toEqual(["big", "small", "r"]);
+  });
+
+  it("does not mutate the input array (model keeps insertion order)", () => {
+    const input = [box("a", { width: 20, height: 20 }), image("b", { width: 200, height: 200 })];
+    const before = input.map((s) => s.id);
+    paintOrder(input);
+    expect(input.map((s) => s.id)).toEqual(before); // ["a","b"] unchanged
+  });
+});
+
+describe("drawReducer — one-use tool clusters (arm + cycle + variant memory)", () => {
+  const fresh = () => initialDrawState({ shapes: [], width: 400, height: 300 });
+
+  it("arming a cluster from a base tool selects its remembered variant (defaults)", () => {
+    const s = fresh(); // shapeVariant "rect", lineVariant "arrow"
+    const shape = drawReducer(s, { type: "armCluster", cluster: "shape" });
+    expect(shape.tool).toBe("rect");
+    const line = drawReducer(s, { type: "armCluster", cluster: "line" });
+    expect(line.tool).toBe("arrow");
+  });
+
+  it("re-arming while already armed cycles the variant and remembers it", () => {
+    let s = drawReducer(fresh(), { type: "armCluster", cluster: "shape" }); // rect
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // rect → ellipse
+    expect(s.tool).toBe("ellipse");
+    expect(s.shapeVariant).toBe("ellipse");
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // ellipse → rect (wraps)
+    expect(s.tool).toBe("rect");
+  });
+
+  it("the connector cluster cycles line → arrow → double-arrow → line", () => {
+    let s = fresh();
+    s = drawReducer(s, { type: "setTool", tool: "line" }); // start on line
+    expect(s.lineVariant).toBe("line");
+    s = drawReducer(s, { type: "armCluster", cluster: "line" }); // line → arrow
+    expect(s.tool).toBe("arrow");
+    s = drawReducer(s, { type: "armCluster", cluster: "line" }); // arrow → darrow
+    expect(s.tool).toBe("darrow");
+    expect(s.lineVariant).toBe("darrow");
+    s = drawReducer(s, { type: "armCluster", cluster: "line" }); // darrow → line (wraps)
+    expect(s.tool).toBe("line");
+  });
+
+  it("the remembered variant survives a draw's snap-back to baseTool", () => {
+    // Cycle the shape cluster to ellipse, then draw with it → tool resets, memory stays.
+    let s = drawReducer(fresh(), { type: "armCluster", cluster: "shape" }); // rect
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // ellipse
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "e1", type: "ellipse", stroke: "#000", strokeWidth: 3, x: 0, y: 0, width: 0, height: 0 } });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 40, y: 40 } });
+    s = drawReducer(s, { type: "endDraw" });
+    expect(s.tool).toBe(s.baseTool); // one-use snap-back
+    expect(s.shapeVariant).toBe("ellipse"); // but the choice persists
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" });
+    expect(s.tool).toBe("ellipse"); // re-arm returns to it
+  });
+
+  it("selecting a variant directly (setTool) updates the cluster memory", () => {
+    let s = drawReducer(fresh(), { type: "setTool", tool: "ellipse" });
+    expect(s.shapeVariant).toBe("ellipse");
+    s = drawReducer(s, { type: "setTool", tool: "darrow" });
+    expect(s.lineVariant).toBe("darrow");
+    // Non-variant tools leave the memory untouched.
+    s = drawReducer(s, { type: "setTool", tool: "text" });
+    expect(s.shapeVariant).toBe("ellipse");
+    expect(s.lineVariant).toBe("darrow");
+  });
+
+  it("arming a cluster clears the current selection", () => {
+    let s = initialDrawState({ shapes: [box("r")], width: 400, height: 300 });
+    s = drawReducer(s, { type: "select", ids: ["r"] });
+    s = drawReducer(s, { type: "armCluster", cluster: "line" });
+    expect(s.selectedIds).toEqual([]);
+  });
+
+  it("a double-arrow is an arrow shape with doubleHead, preserved through draw + clone + paste", () => {
+    let s = fresh();
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "d1", type: "arrow", doubleHead: true, stroke: "#000", strokeWidth: 3, points: [0, 0, 0, 0] } });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 50, y: 0 } });
+    s = drawReducer(s, { type: "endDraw" });
+    const drawn = s.shapes.find((x) => x.id === "d1") as Shape & { doubleHead?: boolean };
+    expect(drawn.type).toBe("arrow");
+    expect(drawn.doubleHead).toBe(true);
+    // offset (move) keeps the flag; paste-clone keeps it too.
+    expect((offsetShape(drawn, 5, 5) as { doubleHead?: boolean }).doubleHead).toBe(true);
+    const pasted = clonePastedShapes([drawn], 16, 16, (() => { let n = 0; return () => `p${n++}`; })());
+    expect((pasted[0] as { doubleHead?: boolean }).doubleHead).toBe(true);
+  });
+});
+
+describe("drawReducer — cluster tools retype a matching selection", () => {
+  const ell = (id: string, over: Partial<BoxShape> = {}) => box(id, { type: "ellipse", ...over });
+  const seg = (id: string, type: "line" | "arrow", over: Partial<Shape> = {}): Shape =>
+    ({ id, type, stroke: "#000", strokeWidth: 3, points: [0, 0, 20, 0], ...over } as Shape);
+  const pen = (id: string): Shape => ({ id, type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0, 5, 5] });
+  const armed = (shapes: Shape[], ids: string[], cluster: "shape" | "line", pre?: (s: DrawState) => DrawState) => {
+    let s = initialDrawState({ shapes, width: 400, height: 300 });
+    if (pre) s = pre(s);
+    s = drawReducer(s, { type: "select", ids });
+    return drawReducer(s, { type: "armCluster", cluster });
+  };
+  const typeOf = (s: DrawState, id: string) => s.shapes.find((x) => x.id === id)!.type;
+
+  it("a MIXED shape selection unifies to the cluster's current variant (rect)", () => {
+    const s = armed([box("r"), ell("e")], ["r", "e"], "shape"); // current shapeVariant = rect
+    expect(typeOf(s, "r")).toBe("rect");
+    expect(typeOf(s, "e")).toBe("rect"); // ellipse coerced to current
+    expect(s.selectedIds).toEqual(["r", "e"]); // selection kept
+    expect(s.past.length).toBe(1); // undoable
+    expect(s.tool).toBe("pen"); // tool UNCHANGED — retype does NOT arm a draw tool
+  });
+
+  it("a UNIFORM selection already matching the current variant cycles to the next", () => {
+    const s = armed([box("a"), box("b")], ["a", "b"], "shape"); // both rect == current
+    expect(typeOf(s, "a")).toBe("ellipse");
+    expect(typeOf(s, "b")).toBe("ellipse");
+    expect(s.shapeVariant).toBe("ellipse"); // memory advances too
+  });
+
+  it("a uniform selection differing from the current variant coerces to current (no cycle)", () => {
+    const s = armed([ell("a"), ell("b")], ["a", "b"], "shape"); // both ellipse, current rect
+    expect(typeOf(s, "a")).toBe("rect");
+    expect(typeOf(s, "b")).toBe("rect");
+  });
+
+  it("connectors: unify → cycle through line/arrow/double-arrow, doubleHead tracked", () => {
+    // default lineVariant = arrow. Mixed line+arrow → unify to arrow.
+    let s = armed([seg("l", "line"), seg("a", "arrow")], ["l", "a"], "line");
+    expect(s.shapes.every((x) => x.type === "arrow" && !(x as { doubleHead?: boolean }).doubleHead)).toBe(true);
+    // all arrow == current → next = darrow (arrow + doubleHead).
+    s = drawReducer(s, { type: "armCluster", cluster: "line" });
+    expect(s.lineVariant).toBe("darrow");
+    expect(s.shapes.every((x) => x.type === "arrow" && (x as { doubleHead?: boolean }).doubleHead === true)).toBe(true);
+    // all darrow == current → next = line (doubleHead dropped).
+    s = drawReducer(s, { type: "armCluster", cluster: "line" });
+    expect(s.shapes.every((x) => x.type === "line" && !("doubleHead" in x))).toBe(true);
+  });
+
+  it("a single selected shape cycles its own type", () => {
+    const s = armed([seg("a", "arrow")], ["a"], "line"); // arrow == current → darrow
+    const a = s.shapes[0] as { type: string; doubleHead?: boolean };
+    expect(a.type).toBe("arrow");
+    expect(a.doubleHead).toBe(true);
+  });
+
+  it("retyping preserves geometry through the reducer (box coords survive)", () => {
+    const s = armed([box("r", { x: 12, y: 34, width: 56, height: 78 })], ["r"], "shape");
+    const r = s.shapes[0] as BoxShape;
+    expect(r.type).toBe("ellipse"); // rect == current → cycled
+    expect([r.x, r.y, r.width, r.height]).toEqual([12, 34, 56, 78]); // box untouched
+  });
+
+  it("toClusterVariant preserves points + bindings verbatim (rect↔ellipse, line↔arrow↔darrow)", () => {
+    // Pure conversion — no reflow, so dangling binds are kept (reflow drops them,
+    // which is tested via the reducer path elsewhere).
+    const a = seg("a", "arrow", { points: [1, 2, 3, 4], bindStart: { id: "p", angle: 1, gap: 2 }, bindEnd: { id: "x", angle: 0, gap: 0 } });
+    const dd = toClusterVariant(a, "darrow") as Shape & { points: number[]; doubleHead?: boolean; bindStart?: unknown; bindEnd?: unknown };
+    expect(dd.type).toBe("arrow");
+    expect(dd.doubleHead).toBe(true);
+    expect(dd.points).toEqual([1, 2, 3, 4]);
+    expect(dd.bindStart).toEqual({ id: "p", angle: 1, gap: 2 });
+    expect(dd.bindEnd).toEqual({ id: "x", angle: 0, gap: 0 });
+    // darrow → line drops the head flag but keeps points/binds.
+    const ln = toClusterVariant(dd, "line") as Shape & { doubleHead?: boolean; points: number[] };
+    expect(ln.type).toBe("line");
+    expect("doubleHead" in ln).toBe(false);
+    expect(ln.points).toEqual([1, 2, 3, 4]);
+    // rect → ellipse keeps the box + any attach edge.
+    const rr = box("r", { width: 40, height: 20, attach: { id: "q", kind: "box", ax: 1, ay: 0.5, dx: 0, dy: 0 } });
+    const ee = toClusterVariant(rr, "ellipse") as BoxShape;
+    expect(ee.type).toBe("ellipse");
+    expect([ee.width, ee.height]).toEqual([40, 20]);
+    expect(ee.attach).toEqual({ id: "q", kind: "box", ax: 1, ay: 0.5, dx: 0, dy: 0 });
+  });
+
+  it("a selection NOT wholly in the cluster falls back to arming the draw tool", () => {
+    // rect + pen selected → not all shapes → normal arm (selection cleared, no retype).
+    const s = armed([box("r"), pen("p")], ["r", "p"], "shape");
+    expect(s.tool).toBe("rect"); // armed the draw tool
+    expect(s.selectedIds).toEqual([]);
+    expect(typeOf(s, "r")).toBe("rect"); // unchanged
+    // rect + arrow (spans both clusters) → shape cluster arm falls back too.
+    const s2 = armed([box("r"), seg("a", "arrow")], ["r", "a"], "shape");
+    expect(s2.tool).toBe("rect");
+    expect(s2.selectedIds).toEqual([]);
+  });
+});
+
+describe("arrows/lines bind, never attach (rotation-drift regression)", () => {
+  const arw = (id: string, pts: [number, number, number, number], over: Partial<Shape> = {}): Shape =>
+    ({ id, type: "arrow", stroke: "#fff", strokeWidth: 3, points: pts, ...over } as Shape);
+
+  it("attachAt returns undefined for a line/arrow child even edge-touching a container", () => {
+    const rect = box("b", { x: 100, y: 100, width: 60, height: 60 });
+    // arrow end sits right on the rect's left edge — a box tool WOULD attach here.
+    expect(attachAt(arw("a", [10, 130, 98, 130]), [rect])).toBeUndefined();
+    expect(attachAt({ id: "l", type: "line", stroke: "#000", strokeWidth: 3, points: [10, 130, 98, 130] } as Shape, [rect])).toBeUndefined();
+  });
+
+  it("moving a bound arrow (drop near a shape) never gives it an attach edge", () => {
+    const rect = box("b", { x: 100, y: 100, width: 60, height: 60 });
+    const bindEnd = bindAt({ x: 98, y: 130 }, { x: 10, y: 130 }, [rect], "a")!;
+    let s = initialDrawState({ shapes: [rect, arw("a", [10, 130, 98, 130], { bindEnd })], width: 400, height: 300 });
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "translateShapes", ids: ["a"], dx: 0, dy: -8 });
+    s = drawReducer(s, { type: "reattach", ids: ["a"] });
+    s = drawReducer(s, { type: "endGesture" });
+    const a = s.shapes.find((x) => x.id === "a") as Shape & { attach?: unknown; bindEnd?: unknown };
+    expect(a.attach).toBeUndefined(); // NEVER attaches — it binds
+    expect(a.bindEnd).toBeTruthy(); // bind survives
+  });
+
+  it("moving the target shape clings the bound end without dragging the free end (no drift)", () => {
+    const rect = box("b", { x: 100, y: 100, width: 60, height: 60 }); // center (130,130)
+    const bindEnd = bindAt({ x: 98, y: 130 }, { x: 10, y: 130 }, [rect], "a")!;
+    let s = initialDrawState({ shapes: [rect, arw("a", [10, 130, 98, 130], { bindEnd })], width: 400, height: 300 });
+    // Move ONLY the target (like dragging the shape, arrow not in the move set).
+    for (let i = 0; i < 5; i++) {
+      s = drawReducer(s, { type: "beginGesture" });
+      s = drawReducer(s, { type: "translateShapes", ids: ["b"], dx: 5, dy: 0 });
+      s = drawReducer(s, { type: "reattach", ids: ["b"] });
+      s = drawReducer(s, { type: "endGesture" });
+    }
+    const a = s.shapes.find((x) => x.id === "a") as Shape & { points: number[]; attach?: unknown };
+    expect(a.attach).toBeUndefined();
+    expect(a.points[0]).toBeCloseTo(10); // free end pinned — no rotary drift pulling it
+    expect(a.points[1]).toBeCloseTo(130);
+    // Bound end clings 2px (gap) outside the rect's left edge: rect moved +25 → left edge 125 → 123.
+    expect(a.points[2]).toBeCloseTo(123);
+    expect(a.points[3]).toBeCloseTo(130);
+  });
+});
+
+describe("drawReducer — viewport-scaled thresholds (minSize / distScale)", () => {
+  it("cancelDraw aborts the draft, restores the pre-draw shapes, no history", () => {
+    let s = seeded([box("keep")]);
+    s = drawReducer(s, { type: "beginDraw", shape: box("draft", { x: 200, y: 200, width: 0, height: 0 }) });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 260, y: 240 } });
+    s = drawReducer(s, { type: "cancelDraw" });
+    expect(s.shapes.map((sh) => sh.id)).toEqual(["keep"]);
+    expect(s.draftId).toBeNull();
+    expect(s.gestureBase).toBeNull();
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("cancelDraw without a draft is a no-op", () => {
+    const s = seeded([box("keep")]);
+    expect(drawReducer(s, { type: "cancelDraw" })).toBe(s);
+  });
+
+  it("endDraw minSize drops a draft that would survive the default threshold", () => {
+    // A 60×40 rect is a real shape at scale 1 — but at 0.05x zoom it's a 3-screen-px
+    // accidental drag; the view passes minSize = 4/scale = 80 and it must be dropped.
+    let s = seeded([]);
+    s = drawReducer(s, { type: "beginDraw", shape: box("r1", { x: 0, y: 0, width: 0, height: 0 }) });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 60, y: 40 } });
+    s = drawReducer(s, { type: "endDraw", minSize: 80 });
+    expect(s.shapes).toHaveLength(0);
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("endDraw minSize drops a multi-point pen micro-scribble (bbox under threshold)", () => {
+    let s = seeded([]);
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "p1", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0] } });
+    s = drawReducer(s, { type: "extendFreehand", point: { x: 3, y: 2 } });
+    s = drawReducer(s, { type: "extendFreehand", point: { x: 5, y: 4 } });
+    s = drawReducer(s, { type: "endDraw", minSize: 40 });
+    expect(s.shapes).toHaveLength(0);
+    // …while the default threshold keeps the same stroke (legacy behavior).
+    let k = seeded([]);
+    k = drawReducer(k, { type: "beginDraw", shape: { id: "p1", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0] } });
+    k = drawReducer(k, { type: "extendFreehand", point: { x: 3, y: 2 } });
+    k = drawReducer(k, { type: "endDraw" });
+    expect(k.shapes).toHaveLength(1);
+  });
+
+  it("endDraw distScale widens line-endpoint binding at zoom-out", () => {
+    // Endpoint 60 logical px from the rect: beyond BIND_DISTANCE (22) at scale 1,
+    // but within it on SCREEN at 0.25x zoom (distScale 4 → 88 logical).
+    const target = box("t", { x: 100, y: 100, width: 40, height: 30 });
+    const drawLine = (distScale?: number) => {
+      let s = seeded([target]);
+      s = drawReducer(s, { type: "beginDraw", shape: { id: "l1", type: "line", stroke: "#000", strokeWidth: 3, points: [300, 115, 300, 115] } });
+      s = drawReducer(s, { type: "updateDraw", point: { x: 200, y: 115 } });
+      s = drawReducer(s, { type: "endDraw", distScale });
+      return s.shapes.find((sh) => sh.id === "l1") as Shape & { bindEnd?: { id: string } };
+    };
+    expect(drawLine(undefined).bindEnd).toBeUndefined(); // 60px gap > 22 → no bind
+    expect(drawLine(4).bindEnd?.id).toBe("t"); // 60px gap < 88 → binds
+  });
+
+  it("endDraw distScale widens box attach detection at zoom-out", () => {
+    // A rect drawn 40 logical px right of the target: beyond ATTACH_DIST (16) at
+    // scale 1, within it on screen at 0.25x (distScale 4 → 64 logical).
+    const target = box("t", { x: 0, y: 0, width: 100, height: 100 });
+    const drawRect = (distScale?: number) => {
+      let s = seeded([target]);
+      s = drawReducer(s, { type: "beginDraw", shape: box("r1", { x: 140, y: 20, width: 0, height: 0 }) });
+      s = drawReducer(s, { type: "updateDraw", point: { x: 220, y: 80 } });
+      s = drawReducer(s, { type: "endDraw", distScale });
+      return s.shapes.find((sh) => sh.id === "r1")!;
+    };
+    expect(drawRect(undefined).attach).toBeUndefined();
+    expect(drawRect(4).attach?.id).toBe("t");
+  });
+
+  it("reattach distScale glues a shape dropped near-but-not-touching at zoom-out", () => {
+    const target = box("t", { x: 0, y: 0, width: 100, height: 100 });
+    const mover = box("m", { x: 140, y: 20, width: 40, height: 40 });
+    const run = (distScale?: number) => {
+      let s = seeded([target, mover]);
+      s = drawReducer(s, { type: "beginGesture" });
+      s = drawReducer(s, { type: "reattach", ids: ["m"], distScale });
+      return s.shapes.find((sh) => sh.id === "m")!;
+    };
+    expect(run(undefined).attach).toBeUndefined(); // 40px gap > 16
+    expect(run(4).attach?.id).toBe("t"); // 40px gap < 64
+  });
+
+  it("addShapes distScale scales detectAttach the same way", () => {
+    const target = box("t", { x: 0, y: 0, width: 100, height: 100 });
+    const run = (distScale?: number) => {
+      let s = seeded([target]);
+      s = drawReducer(s, {
+        type: "addShapes",
+        detectAttach: true,
+        distScale,
+        shapes: [text("n", { x: 130, y: 40 })],
+      });
+      return s.shapes.find((sh) => sh.id === "n")!;
+    };
+    expect(run(undefined).attach).toBeUndefined();
+    expect(run(4).attach?.id).toBe("t");
+  });
+
+  it("attachAt / bindAt / nearest* default distances are unchanged (legacy pins)", () => {
+    const target = box("t", { x: 0, y: 0, width: 100, height: 100 });
+    // 10px gap: inside every default range.
+    expect(nearestBindableId({ x: 110, y: 50 }, [target], "")).toBe("t");
+    expect(nearestEdgeBindableId({ x: 110, y: 50 }, [target], "")).toBe("t");
+    // 30px gap: beyond BIND_DISTANCE(22)/EDGE_TOUCH(24) — undefined by default.
+    expect(nearestBindableId({ x: 130, y: 50 }, [target], "")).toBeUndefined();
+    expect(nearestEdgeBindableId({ x: 130, y: 50 }, [target], "")).toBeUndefined();
+    // …but reachable with an explicit dist.
+    expect(nearestBindableId({ x: 130, y: 50 }, [target], "", 40)).toBe("t");
+    expect(nearestEdgeBindableId({ x: 130, y: 50 }, [target], "", 40)).toBe("t");
+  });
+});
+
+describe("contentBounds", () => {
+  it("unions all shape boxes and returns null when empty", async () => {
+    const { contentBounds } = await import("./drawModel.ts");
+    expect(contentBounds([])).toBeNull();
+    const b = contentBounds([box("a", { x: -50, y: 10, width: 40, height: 30 }), box("b", { x: 100, y: -20, width: 10, height: 10 })]);
+    expect(b).toEqual({ x: -50, y: -20, width: 160, height: 60 });
+  });
+});
+
+describe("drawReducer — zoom-glued edges survive resize/crop (distScale on commitResize/cropImage)", () => {
+  // An edge created at zoom-out (large logical gap, screen-adjacent) must not be
+  // silently dropped when the shape is resized or cropped — the same screen-true
+  // judgment reattach uses must apply.
+  const glued = () => {
+    const a = box("A", { x: 0, y: 0, width: 100, height: 100 });
+    // 40px gap: valid glue at distScale 4 (ATTACH_DIST 16 → 64), invalid at 1.
+    const b = box("B", { x: 140, y: 20, width: 40, height: 40, attach: { id: "A", kind: "box", ax: 1, ay: 0, dx: 60, dy: 20 } as Attach });
+    return seeded([a, b]);
+  };
+
+  it("commitResize keeps a zoom-glued attach when given the creating distScale", () => {
+    let s = glued();
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "commitResize", id: "B", patch: { width: 42 }, distScale: 4 });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.shapes.find((sh) => sh.id === "B")!.attach?.id).toBe("A");
+  });
+
+  it("commitResize at default distScale drops the same edge (screen-true at 1x)", () => {
+    let s = glued();
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "commitResize", id: "B", patch: { width: 42 } });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.shapes.find((sh) => sh.id === "B")!.attach).toBeUndefined();
+  });
+
+  it("cropImage keeps a zoom-glued attach when given the creating distScale", () => {
+    const a = box("A", { x: 0, y: 0, width: 100, height: 100 });
+    const img: Shape = { id: "I", type: "image", stroke: "#000", strokeWidth: 1, x: 140, y: 20, width: 40, height: 40, dataBase64: "", mediaType: "image/png", attach: { id: "A", kind: "box", ax: 1, ay: 0, dx: 60, dy: 20 } };
+    let s = seeded([a, img]);
+    s = drawReducer(s, { type: "cropImage", id: "I", box: { x: 140, y: 20, width: 38, height: 38 }, crop: { x: 1, y: 1, width: 30, height: 30 }, distScale: 4 });
+    expect(s.shapes.find((sh) => sh.id === "I")!.attach?.id).toBe("A");
+  });
+});
+
+describe("drawReducer — history is inert while a gesture/draft is in flight", () => {
+  it("undo mid-draft is a no-op (no half-drawn draft can reach the redo stack)", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "beginDraw", shape: box("r1", { width: 0, height: 0 }) });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 60, y: 50 } });
+    s = drawReducer(s, { type: "endDraw" }); // committed rect, past=1
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "p1", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0] } });
+    s = drawReducer(s, { type: "extendFreehand", point: { x: 30, y: 30 } });
+    const held = s;
+    expect(drawReducer(held, { type: "undo" })).toBe(held); // inert mid-draft
+    // Release, then undo/redo behave normally and never resurrect a half-draft.
+    s = drawReducer(s, { type: "endDraw" });
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes.map((sh) => sh.id)).toEqual(["r1"]);
+    s = drawReducer(s, { type: "redo" });
+    expect(s.shapes.map((sh) => sh.id)).toEqual(["r1", "p1"]);
+  });
+
+  it("undo/redo/deleteSelected are inert during a move gesture; endGesture still pushes once", () => {
+    let s = seeded([box("A"), box("B", { x: 200, y: 200 })]);
+    s = drawReducer(s, { type: "select", ids: ["A"] });
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "translateShapes", ids: ["A"], dx: 5, dy: 5 });
+    const held = s;
+    expect(drawReducer(held, { type: "undo" })).toBe(held);
+    expect(drawReducer(held, { type: "redo" })).toBe(held);
+    expect(drawReducer(held, { type: "deleteSelected" })).toBe(held);
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.past).toHaveLength(1); // the move committed exactly once
+    expect(s.shapes.find((sh) => sh.id === "A")).toMatchObject({ x: 15, y: 15 });
+  });
+
+  it("an eraser drag (deleteShapes inside a gesture) is ONE history entry", () => {
+    let s = seeded([box("A"), box("B", { x: 200, y: 200 }), box("C", { x: 300, y: 100 })]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "deleteShapes", ids: ["A"] });
+    s = drawReducer(s, { type: "deleteShapes", ids: ["B"] });
+    s = drawReducer(s, { type: "deleteShapes", ids: ["C"] });
+    expect(s.past).toHaveLength(0); // riding the gesture, no per-hit commits
+    s = drawReducer(s, { type: "endGesture" });
+    expect(s.past).toHaveLength(1); // one entry for the whole swipe
+    expect(s.shapes).toHaveLength(0);
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes.map((sh) => sh.id)).toEqual(["A", "B", "C"]); // one ⌘Z restores all
+  });
+
+  it("a lone deleteShapes (eraser CLICK, no gesture) still commits immediately", () => {
+    let s = seeded([box("A")]);
+    s = drawReducer(s, { type: "deleteShapes", ids: ["A"] });
+    expect(s.shapes).toHaveLength(0);
+    expect(s.past).toHaveLength(1);
+  });
+});
