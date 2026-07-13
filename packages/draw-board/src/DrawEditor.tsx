@@ -101,6 +101,7 @@ export function DrawEditor({
   expanded,
   onToggleExpand,
   viewport,
+  autoFocus = true,
   onNotify,
   imageToData,
 }: {
@@ -125,6 +126,11 @@ export function DrawEditor({
    *  into the image, pan clamped to it). "fixed" restores the legacy
    *  fit-to-container behavior with no camera gestures at all. */
   viewport?: ViewportPolicy;
+  /** Claim keyboard focus on mount (default true — the board is usually opened
+   *  to be drawn on immediately). Pass false when the host directs the first
+   *  keystrokes elsewhere (e.g. naming a freshly created page); the board still
+   *  claims focus on any pointer-down inside it. */
+  autoFocus?: boolean;
   /** User-facing error channel (failed export, rejected image). Defaults to
    *  console.warn — inject the host's toast for real surfacing. */
   onNotify?: (message: string) => void;
@@ -167,7 +173,8 @@ export function DrawEditor({
     if (el && !el.contains(document.activeElement)) el.focus({ preventScroll: true });
   }, []);
   useEffect(() => {
-    rootRef.current?.focus({ preventScroll: true });
+    if (autoFocus) rootRef.current?.focus({ preventScroll: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Persist the live doc (debounced + unmount flush) ────────────────────────
