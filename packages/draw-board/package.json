@@ -1,0 +1,40 @@
+{
+  "name": "@operator/draw-board",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./theme": {
+      "types": "./src/theme.ts",
+      "default": "./src/theme.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage"
+  },
+  "peerDependencies": {
+    "konva": ">=10",
+    "lucide-react": ">=1",
+    "react": ">=18",
+    "react-dom": ">=18",
+    "react-konva": ">=18"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitest/coverage-v8": "^2.1.9",
+    "konva": "^10.3.0",
+    "lucide-react": "^1.17.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-konva": "^19.2.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.9"
+  }
+}

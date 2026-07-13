@@ -15,7 +15,7 @@ import {
   ImagePlus,
   type LucideIcon,
 } from "lucide-react";
-import { IconButton } from "../ui/IconButton.tsx";
+import { IconButton } from "./IconButton.tsx";
 import { CONTRAST_INK, STROKE_WIDTHS, SHAPE_VARIANTS, LINE_VARIANTS, type Tool, type ShapeVariant, type LineVariant } from "./drawModel.ts";
 
 /** The two persistent tools live in a segmented "well" that slides to whichever
@@ -142,10 +142,11 @@ export function DrawToolbar({
   onEraser: () => void;
   /** Open the file picker to add image(s) to the canvas. */
   onUpload: () => void;
-  /** Discard the drawing (close the editor). */
-  onCancel: () => void;
-  /** Flatten + add the drawing to the message. */
-  onAdd: () => void;
+  /** Discard the drawing (close the editor). Omit to hide the button — a host
+   *  that persists continuously (a document editor) has nothing to discard. */
+  onCancel?: () => void;
+  /** Flatten + export the drawing (the attachment flow). Omit to hide. */
+  onAdd?: () => void;
 }) {
   const persistentActive = tool === "select" || tool === "pen";
   const colorIdx = palette.findIndex((c) => c.toLowerCase() === color.toLowerCase());
@@ -328,24 +329,28 @@ export function DrawToolbar({
           >
             <ImagePlus size={16} />
           </button>
-          <button
-            type="button"
-            onClick={onCancel}
-            aria-label="Discard drawing"
-            title="Discard"
-            className="flex h-8 w-8 items-center justify-center rounded-full border border-ink-500 bg-ink-700 text-ink-300 transition-colors hover:bg-ink-600 hover:text-white"
-          >
-            <X size={16} />
-          </button>
-          <button
-            type="button"
-            onClick={onAdd}
-            aria-label="Add to message"
-            title="Add to message"
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-accent-600 text-white shadow-sm transition-colors hover:bg-accent-500 active:bg-accent-700"
-          >
-            <Check size={16} strokeWidth={2.5} />
-          </button>
+          {onCancel && (
+            <button
+              type="button"
+              onClick={onCancel}
+              aria-label="Discard drawing"
+              title="Discard"
+              className="flex h-8 w-8 items-center justify-center rounded-full border border-ink-500 bg-ink-700 text-ink-300 transition-colors hover:bg-ink-600 hover:text-white"
+            >
+              <X size={16} />
+            </button>
+          )}
+          {onAdd && (
+            <button
+              type="button"
+              onClick={onAdd}
+              aria-label="Add to message"
+              title="Add to message"
+              className="flex h-8 w-8 items-center justify-center rounded-full bg-accent-600 text-white shadow-sm transition-colors hover:bg-accent-500 active:bg-accent-700"
+            >
+              <Check size={16} strokeWidth={2.5} />
+            </button>
+          )}
         </div>
       </div>
     </div>

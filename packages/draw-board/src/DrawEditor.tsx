@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent } from "react";
 import { Frame, Maximize2, Minimize2, Minus, Plus } from "lucide-react";
 import type Konva from "konva";
-import { fileToAttachment } from "../../lib/attachments.ts";
-import { useStore } from "../../lib/store.ts";
 import { DrawToolbar } from "./DrawToolbar.tsx";
 import { DrawCanvas } from "./DrawCanvas.tsx";
 import type { CropControl } from "./CropLayer.tsx";
@@ -50,6 +48,29 @@ const PASTE_OFFSET = 16;
  *  active (an HTML textarea can't do the canvas blend). */
 const CONTRAST_OVERLAY = "#ffffff";
 
+/** Raster bytes for an image placed on the board (paste/drop/pick). */
+export interface BoardImageData {
+  dataBase64: string;
+  mediaType: string;
+}
+
+/** Default file→raster reader: plain FileReader, no size policy. A host with
+ *  attachment rules (size caps, mime allowlists) injects its own reader via
+ *  `imageToData` and REJECTS to surface the refusal through `onNotify`. */
+function defaultImageToData(file: File): Promise<BoardImageData> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(new Error(`could not read ${file.name}`));
+    r.onload = () => {
+      const url = String(r.result ?? "");
+      const comma = url.indexOf(",");
+      if (comma < 0) return reject(new Error(`could not read ${file.name}`));
+      resolve({ dataBase64: url.slice(comma + 1), mediaType: file.type || "image/png" });
+    };
+    r.readAsDataURL(file);
+  });
+}
+
 /** An in-progress text edit. `kind` selects the target: a NEW standalone text
  *  (nothing exists in the model until commit — so a stray mouse-up can't tear it
  *  down), an EXISTING text shape, or a shape's bound LABEL. Geometry lives here
@@ -80,12 +101,18 @@ export function DrawEditor({
   expanded,
   onToggleExpand,
   viewport,
+  onNotify,
+  imageToData,
 }: {
   doc: DrawDoc;
   bgImage: HTMLImageElement | null;
   name: string;
-  onCancel: () => void;
-  onSave: (png: File, doc: DrawDoc) => void;
+  /** Discard the drawing (close the editor). Omit to hide the button — a host
+   *  that persists continuously has nothing to discard. */
+  onCancel?: () => void;
+  /** Flatten + export a PNG (the attachment flow). Omit to hide the button —
+   *  `onChange` alone serves document-style hosts. */
+  onSave?: (png: File, doc: DrawDoc) => void;
   /** Live doc changes (debounced) — the host persists them so a sketch survives
    *  closing the board and page reloads. Also flushed once on unmount. */
   onChange?: (doc: DrawDoc) => void;
@@ -98,6 +125,13 @@ export function DrawEditor({
    *  into the image, pan clamped to it). "fixed" restores the legacy
    *  fit-to-container behavior with no camera gestures at all. */
   viewport?: ViewportPolicy;
+  /** User-facing error channel (failed export, rejected image). Defaults to
+   *  console.warn — inject the host's toast for real surfacing. */
+  onNotify?: (message: string) => void;
+  /** File→raster reader for placed images; the injection point for a host's
+   *  attachment policy (size caps, mime allowlists). Defaults to a plain
+   *  FileReader with no policy. */
+  imageToData?: (file: File) => Promise<BoardImageData>;
 }) {
   // Operator is dark-only. The primary ink is adaptive (CONTRAST_INK) — it
   // renders via a `difference` blend in the canvas, so it always contrasts the
@@ -112,6 +146,15 @@ export function DrawEditor({
   const stateRef = useRef(state);
   stateRef.current = state;
   const clipboard = useRef<Shape[]>([]);
+
+  // Host injection points, read through refs so callbacks stay stable.
+  const notifyRef = useRef(onNotify);
+  notifyRef.current = onNotify;
+  const notify = useCallback((message: string) => {
+    (notifyRef.current ?? ((m: string) => console.warn(`draw-board: ${m}`)))(message);
+  }, []);
+  const imageToDataRef = useRef(imageToData);
+  imageToDataRef.current = imageToData;
 
   // ── Focus ownership ─────────────────────────────────────────────────────────
   // The board is a focusable surface: key/paste handlers live on `rootRef` (not
@@ -399,7 +442,7 @@ export function DrawEditor({
   const addImageFile = useCallback(
     async (file: File, cx: number, cy: number, detectAttach = false) => {
       if (!file.type.startsWith("image/")) return;
-      const att = await fileToAttachment(file);
+      const att = await (imageToDataRef.current ?? defaultImageToData)(file);
       const img = new Image();
       await new Promise<void>((res, rej) => {
         img.onload = () => res();
@@ -437,9 +480,9 @@ export function DrawEditor({
   const addImageSafe = useCallback(
     (file: File, cx: number, cy: number, detectAttach = false) =>
       addImageFile(file, cx, cy, detectAttach).catch((e) =>
-        useStore.getState().showToast(`Couldn't add image: ${e instanceof Error ? e.message : e}`)
+        notify(`Couldn't add image: ${e instanceof Error ? e.message : e}`)
       ),
-    [addImageFile]
+    [addImageFile, notify]
   );
   const addTextValue = useCallback(
     (text: string, x: number, y: number) => {
@@ -556,11 +599,10 @@ export function DrawEditor({
   );
 
   // ── Export ──────────────────────────────────────────────────────────────────
-  const showToast = useStore((s) => s.showToast);
   const exporting = useRef(false);
   const exportNow = useCallback(() => {
     const stage = stageRef.current;
-    if (!stage || exporting.current) return; // a double-click must not attach twice
+    if (!stage || !onSave || exporting.current) return; // a double-click must not attach twice
     exporting.current = true;
     const transformers = stage.find("Transformer");
     transformers.forEach((n) => n.hide());
@@ -568,13 +610,13 @@ export function DrawEditor({
     const snapshot = toDoc(stateRef.current);
     exportStagePng(stage, snapshot, sketchFileName(name), { clampCrop: policy !== "infinite" })
       .then((file) => onSave(file, snapshot))
-      .catch((e) => showToast(`Export failed: ${e instanceof Error ? e.message : e}`))
+      .catch((e) => notify(`Export failed: ${e instanceof Error ? e.message : e}`))
       .finally(() => {
         exporting.current = false;
         transformers.forEach((n) => n.show());
         stage.draw();
       });
-  }, [name, onSave, policy, showToast]);
+  }, [name, onSave, policy, notify]);
 
   const save = useCallback(() => {
     if (session) {
@@ -760,7 +802,7 @@ export function DrawEditor({
       onEraser={onEraser}
       onUpload={pickImages}
       onCancel={onCancel}
-      onAdd={save}
+      onAdd={onSave ? save : undefined}
     />
   );
 
@@ -779,7 +821,7 @@ export function DrawEditor({
         ref={areaRef}
         onDragOver={(e) => e.preventDefault()}
         onDrop={onDrop}
-        className="relative min-h-0 flex-1 overflow-hidden bg-ink-950"
+        className="relative min-h-0 flex-1 overflow-hidden bg-ink-900"
       >
         {onToggleExpand && (
           <button
