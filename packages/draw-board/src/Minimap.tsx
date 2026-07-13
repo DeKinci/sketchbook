@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, type ReactElement } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { boundingBox, contentBounds, isContrastInk, type Shape } from "./drawModel.ts";
 import {
   fitView,
@@ -20,6 +20,9 @@ const GHOST_INK = "#f5f5f5";
 const VIEW_COLOR = "#8b5cf6";
 /** Max points per pen ghost — the tiny render needs silhouettes, not fidelity. */
 const PEN_GHOST_POINTS = 24;
+/** Trailing throttle for ghost redraws — the overview may lag a beat; it must
+ *  never cost per-frame O(n) during camera moves outside the content extent. */
+const REDRAW_MS = 66;
 
 /**
  * Schematic overview of the whole board: shape ghosts + the current viewport
@@ -28,8 +31,12 @@ const PEN_GHOST_POINTS = 24;
  * gesture) through the same functional camera funnel every other gesture uses,
  * so policy clamps apply for free.
  *
- * The world mapping is FROZEN while dragging (a moving camera grows/shifts the
- * union rect, which would warp the mapping under the pointer mid-drag).
+ * Ghosts render to a CANVAS with a trailing throttle: an SVG node per shape put
+ * thousands of DOM elements in play on big boards, and remapping them cost every
+ * camera frame. The viewport rectangle stays a live SVG overlay, and the
+ * logical→minimap mapping is exposed as data attributes for tests. The world
+ * mapping FREEZES while dragging (a moving camera grows/shifts the union rect,
+ * which would warp the map under the pointer mid-drag).
  */
 export function Minimap({
   shapes,
@@ -58,12 +65,83 @@ export function Minimap({
   const boardRef = useRef(board);
   boardRef.current = board;
 
-  const svgRef = useRef<SVGSVGElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragging = useRef(false);
 
+  // ── Ghost canvas (throttled trailing redraw) ────────────────────────────────
+  const shapesRef = useRef(shapes);
+  shapesRef.current = shapes;
+  const redrawTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const drawGhosts = useCallback(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    if (canvas.width !== MINI_W * dpr) canvas.width = MINI_W * dpr;
+    if (canvas.height !== MINI_H * dpr) canvas.height = MINI_H * dpr;
+    const mm = mRef.current;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, MINI_W, MINI_H);
+    ctx.translate(mm.x, mm.y);
+    ctx.scale(mm.scale, mm.scale);
+    ctx.lineWidth = 1 / mm.scale; // constant 1 screen px
+    ctx.globalAlpha = 0.75;
+    for (const sh of shapesRef.current) {
+      const color = isContrastInk(sh.stroke) ? GHOST_INK : sh.stroke;
+      ctx.strokeStyle = color;
+      if (sh.type === "line" || sh.type === "arrow") {
+        ctx.beginPath();
+        ctx.moveTo(sh.points[0], sh.points[1]);
+        ctx.lineTo(sh.points[2], sh.points[3]);
+        ctx.stroke();
+      } else if (sh.type === "pen") {
+        const n = sh.points.length / 2;
+        const step = Math.max(1, Math.ceil(n / PEN_GHOST_POINTS));
+        ctx.beginPath();
+        ctx.moveTo(sh.points[0], sh.points[1]);
+        for (let i = step; i < n; i += step) ctx.lineTo(sh.points[i * 2], sh.points[i * 2 + 1]);
+        ctx.lineTo(sh.points[(n - 1) * 2], sh.points[(n - 1) * 2 + 1]);
+        ctx.stroke();
+      } else if (sh.type === "ellipse") {
+        const b = boundingBox(sh);
+        ctx.beginPath();
+        ctx.ellipse(b.x + b.width / 2, b.y + b.height / 2, b.width / 2, b.height / 2, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        const b = boundingBox(sh);
+        if (sh.type === "image") {
+          ctx.fillStyle = color;
+          ctx.globalAlpha = 0.2;
+          ctx.fillRect(b.x, b.y, b.width, b.height);
+          ctx.globalAlpha = 0.75;
+        }
+        ctx.strokeRect(b.x, b.y, b.width, b.height);
+      }
+    }
+  }, []);
+  const scheduleRedraw = useCallback(() => {
+    if (redrawTimer.current) return;
+    redrawTimer.current = setTimeout(() => {
+      redrawTimer.current = null;
+      drawGhosts();
+    }, REDRAW_MS);
+  }, [drawGhosts]);
+  useEffect(() => {
+    scheduleRedraw();
+  }, [shapes, m.x, m.y, m.scale, scheduleRedraw]);
+  useEffect(() => {
+    drawGhosts(); // first paint immediately
+    return () => {
+      if (redrawTimer.current) clearTimeout(redrawTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Interaction ─────────────────────────────────────────────────────────────
   const centerCameraAt = useCallback(
     (clientX: number, clientY: number) => {
-      const r = svgRef.current?.getBoundingClientRect();
+      const r = rootRef.current?.getBoundingClientRect();
       if (!r) return;
       const pt = screenToLogical(mRef.current, { x: clientX - r.left, y: clientY - r.top });
       const b = boardRef.current;
@@ -73,13 +151,13 @@ export function Minimap({
   );
 
   const onPointerDown = useCallback(
-    (e: React.PointerEvent<SVGSVGElement>) => {
+    (e: React.PointerEvent<HTMLDivElement>) => {
       e.preventDefault();
       e.stopPropagation();
       dragging.current = true;
       dragWorld.current = liveWorld; // freeze the mapping for the whole gesture
       try {
-        svgRef.current?.setPointerCapture(e.pointerId);
+        rootRef.current?.setPointerCapture(e.pointerId);
       } catch {
         // Synthetic events carry no active pointer — capture is best-effort.
       }
@@ -88,7 +166,7 @@ export function Minimap({
     [centerCameraAt, liveWorld]
   );
   const onPointerMove = useCallback(
-    (e: React.PointerEvent<SVGSVGElement>) => {
+    (e: React.PointerEvent<HTMLDivElement>) => {
       if (dragging.current) centerCameraAt(e.clientX, e.clientY);
     },
     [centerCameraAt]
@@ -98,93 +176,38 @@ export function Minimap({
     dragWorld.current = null;
   }, []);
 
-  const ghost = (sh: Shape) => {
-    const color = isContrastInk(sh.stroke) ? GHOST_INK : sh.stroke;
-    if (sh.type === "line" || sh.type === "arrow") {
-      const [x1, y1, x2, y2] = sh.points;
-      return (
-        <line key={sh.id} data-minimap-ghost x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.75} />
-      );
-    }
-    if (sh.type === "pen") {
-      const n = sh.points.length / 2;
-      const step = Math.max(1, Math.ceil(n / PEN_GHOST_POINTS));
-      const pts: string[] = [];
-      for (let i = 0; i < n; i += step) pts.push(`${sh.points[i * 2]},${sh.points[i * 2 + 1]}`);
-      const last = (n - 1) * 2;
-      pts.push(`${sh.points[last]},${sh.points[last + 1]}`);
-      return <polyline key={sh.id} data-minimap-ghost points={pts.join(" ")} fill="none" stroke={color} strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.75} />;
-    }
-    const b = boundingBox(sh);
-    if (sh.type === "ellipse") {
-      return (
-        <ellipse key={sh.id} data-minimap-ghost cx={b.x + b.width / 2} cy={b.y + b.height / 2} rx={b.width / 2} ry={b.height / 2} fill="none" stroke={color} strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.75} />
-      );
-    }
-    // rect / text / image → box silhouette (images filled faintly: they're area).
-    return (
-      <rect
-        key={sh.id}
-        data-minimap-ghost
-        x={b.x}
-        y={b.y}
-        width={b.width}
-        height={b.height}
-        fill={sh.type === "image" ? color : "none"}
-        fillOpacity={sh.type === "image" ? 0.2 : undefined}
-        stroke={color}
-        strokeWidth={1}
-        vectorEffect="non-scaling-stroke"
-        opacity={0.75}
-      />
-    );
-  };
-
-  // Ghosts are built in LOGICAL coords and cached PER SHAPE OBJECT (untouched
-  // shapes keep their identity through the reducer): a pen point mid-draw
-  // rebuilds one ghost, not N. The world→minimap mapping is ONE group transform
-  // per frame — mapping per ghost made every pan frame rebuild every SVG node.
-  const ghostCache = useRef(new WeakMap<Shape, ReactElement>());
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const ghosts = useMemo(() => {
-    const cache = ghostCache.current;
-    return shapes.map((sh) => {
-      const hit = cache.get(sh);
-      if (hit) return hit;
-      const el = ghost(sh);
-      cache.set(sh, el);
-      return el;
-    });
-  }, [shapes]);
-
   const vTopLeft = logicalToScreen(m, { x: visible.x, y: visible.y });
 
   return (
-    <svg
-      ref={svgRef}
+    <div
+      ref={rootRef}
       data-minimap
-      width={MINI_W}
-      height={MINI_H}
+      data-mx={m.x}
+      data-my={m.y}
+      data-mscale={m.scale}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
-      className="block cursor-pointer touch-none select-none"
+      className="relative block cursor-pointer touch-none select-none"
+      style={{ width: MINI_W, height: MINI_H }}
       role="img"
       aria-label="Board overview — click or drag to move the view"
     >
-      <g transform={`translate(${m.x} ${m.y}) scale(${m.scale})`}>{ghosts}</g>
-      <rect
-        data-minimap-view
-        x={vTopLeft.x}
-        y={vTopLeft.y}
-        width={visible.width * m.scale}
-        height={visible.height * m.scale}
-        fill={`${VIEW_COLOR}22`}
-        stroke={VIEW_COLOR}
-        strokeWidth={1.5}
-        rx={2}
-      />
-    </svg>
+      <canvas ref={canvasRef} style={{ width: MINI_W, height: MINI_H, display: "block" }} />
+      <svg width={MINI_W} height={MINI_H} className="pointer-events-none absolute inset-0">
+        <rect
+          data-minimap-view
+          x={vTopLeft.x}
+          y={vTopLeft.y}
+          width={visible.width * m.scale}
+          height={visible.height * m.scale}
+          fill={`${VIEW_COLOR}22`}
+          stroke={VIEW_COLOR}
+          strokeWidth={1.5}
+          rx={2}
+        />
+      </svg>
+    </div>
   );
 }

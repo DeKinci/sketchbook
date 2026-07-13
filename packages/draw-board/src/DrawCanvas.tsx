@@ -3,6 +3,7 @@ import type Konva from "konva";
 import type { KonvaEventObject } from "konva/lib/Node.js";
 import { Stage, Layer, Rect, Ellipse, Line, Arrow, Text, Image as KonvaImage, Group, Label, Tag, Transformer } from "react-konva";
 import { CropLayer, type CropControl } from "./CropLayer.tsx";
+import { SpatialIndex } from "./spatialIndex.ts";
 import {
   nearestBindableId,
   nearestEdgeBindableId,
@@ -38,6 +39,8 @@ import {
  *  lone one of these). Lines/pen strokes are move-only in v1. */
 const RESIZABLE = new Set(["rect", "ellipse", "text", "image"]);
 const SELECT_COLOR = "#8b5cf6";
+/** Widest glue distance (bind/attach/edge-touch) — the candidate-query pad. */
+const GLUE_PAD = 24; // = EDGE_TOUCH, the largest of the three
 
 /** Distance from a point to a line segment (for stroke hit-testing). */
 function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
@@ -156,6 +159,14 @@ export function DrawCanvas({
   const marqueeStart = useRef<{ x: number; y: number } | null>(null);
   const moveRef = useRef<{ last: { x: number; y: number }; ids: string[] } | null>(null);
   const erasing = useRef(false);
+
+  // Spatial index over shape bboxes — every "what's here" query (culling, hit
+  // tests, glue candidates) goes through it instead of scanning all N shapes.
+  // Identity-diffed per render: O(changed) real work per edit frame.
+  const indexRef = useRef<SpatialIndex | null>(null);
+  if (!indexRef.current) indexRef.current = new SpatialIndex();
+  indexRef.current.update(state.shapes);
+  const index = indexRef.current;
 
   // The camera scale, and the screen→logical factor for every UX threshold.
   const vs = view.scale;
@@ -413,7 +424,9 @@ export function DrawCanvas({
   const smallestAt = (pt: { x: number; y: number }): Shape | null => {
     let bestStroke: Shape | null = null;
     let bestArea: Shape | null = null;
-    for (const sh of shapes) {
+    // Local candidates only: pad covers the widest stroke tolerance.
+    const pad = Math.max(sPx(6), 10) + 6;
+    for (const sh of index.queryPoint(pt, pad)) {
       if (sh.type === "line" || sh.type === "arrow" || sh.type === "pen") {
         if (onStroke(sh, pt) && (!bestStroke || area(sh) < area(bestStroke))) bestStroke = sh;
       } else if (inBox(sh, pt) && (!bestArea || area(sh) < area(bestArea))) {
@@ -447,7 +460,13 @@ export function DrawCanvas({
       marqueeStart.current = null;
       setMarquee(null);
       if (Math.abs(box.width) >= sPx(3) || Math.abs(box.height) >= sPx(3)) {
-        dispatch({ type: "select", ids: shapesInMarquee(shapes, box) });
+        const m = {
+          x: box.width < 0 ? box.x + box.width : box.x,
+          y: box.height < 0 ? box.y + box.height : box.y,
+          width: Math.abs(box.width),
+          height: Math.abs(box.height),
+        };
+        dispatch({ type: "select", ids: shapesInMarquee(index.query(m), box) });
       }
       return;
     }
@@ -710,32 +729,35 @@ export function DrawCanvas({
   // any binding tool in hand. All glue distances are zoom-scaled (screen-true).
   const bindHighlights = new Set<string>();
   const draft = state.draftId ? shapes.find((s) => s.id === state.draftId) : null;
+  // Glue-range candidate pool around a box: the widest glue distance, zoom-scaled.
+  const glueNear = (b: Box) => index.query({ x: b.x - GLUE_PAD * sPx(1), y: b.y - GLUE_PAD * sPx(1), width: b.width + 2 * GLUE_PAD * sPx(1), height: b.height + 2 * GLUE_PAD * sPx(1) });
   if (draft && (draft.type === "line" || draft.type === "arrow")) {
-    const rest = shapes.filter((s) => s.id !== draft.id);
     for (const end of [
       { x: draft.points[0], y: draft.points[1] },
       { x: draft.points[2], y: draft.points[3] },
     ]) {
-      const id = nearestBindableId(end, rest, draft.id, BIND_DISTANCE * sPx(1));
+      const near = index.queryPoint(end, BIND_DISTANCE * sPx(1)).filter((s) => s.id !== draft.id);
+      const id = nearestBindableId(end, near, draft.id, BIND_DISTANCE * sPx(1));
       if (id) bindHighlights.add(id);
     }
   } else if (draft && (draft.type === "rect" || draft.type === "ellipse")) {
-    const at = attachAt(draft, shapes, sPx(1));
+    const at = attachAt(draft, glueNear(boundingBox(draft)), sPx(1));
     if (at) bindHighlights.add(at.id);
   } else if (draft && draft.type === "pen") {
     // A scribble drawn along a shape's edge attaches on release — preview it too.
-    const at = attachAt(draft, shapes.filter((s) => s.id !== draft.id), sPx(1));
+    const at = attachAt(draft, glueNear(boundingBox(draft)).filter((s) => s.id !== draft.id), sPx(1));
     if (at) bindHighlights.add(at.id);
   } else if (!state.draftId && hover) {
     // Pre-draw hover preview. A box tool (rect/ellipse) binds only edge-to-edge, so
     // it glows a shape ONLY near its border — hovering the deep interior is mere
     // containment, no bind. A line/arrow endpoint DOES bind anywhere inside a shape,
     // so it keeps the bbox-interior test.
+    const hoverNear = index.queryPoint(hover, GLUE_PAD * sPx(1));
     const id =
       tool === "rect" || tool === "ellipse"
-        ? nearestEdgeBindableId(hover, shapes, "", EDGE_TOUCH * sPx(1))
+        ? nearestEdgeBindableId(hover, hoverNear, "", EDGE_TOUCH * sPx(1))
         : tool === "line" || tool === "arrow" || tool === "darrow"
-          ? nearestBindableId(hover, shapes, "", BIND_DISTANCE * sPx(1))
+          ? nearestBindableId(hover, hoverNear, "", BIND_DISTANCE * sPx(1))
           : undefined;
     if (id) bindHighlights.add(id);
   }
@@ -747,7 +769,7 @@ export function DrawCanvas({
     for (const id of moveRef.current.ids) {
       const sh = shapes.find((s) => s.id === id);
       if (!sh || (sh.attach && moving.has(sh.attach.id))) continue;
-      const at = attachAt(sh, shapes.filter((o) => !moving.has(o.id)), sPx(1));
+      const at = attachAt(sh, glueNear(boundingBox(sh)).filter((o) => !moving.has(o.id)), sPx(1));
       if (at) bindHighlights.add(at.id);
     }
   }
@@ -806,13 +828,51 @@ export function DrawCanvas({
   const cullKey = renderAll ? "all" : `${cullWindow.x}:${cullWindow.y}:${cullWindow.width}:${cullWindow.height}`;
   const renderShapes = useMemo(() => {
     if (renderAll) return shapes;
-    const cw = cullWindow;
-    return shapes.filter((sh) => {
-      const b = boundingBox(sh);
-      return b.x < cw.x + cw.width && b.x + b.width > cw.x && b.y < cw.y + cw.height && b.y + b.height > cw.y;
-    });
+    // Grid query finds the members; the identity-Set filter keeps the shapes
+    // array's INSERTION order (paintOrder's z-rules depend on it).
+    const inWindow = new Set(index.query(cullWindow));
+    if (inWindow.size === shapes.length) return shapes;
+    return shapes.filter((sh) => inWindow.has(sh));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shapes, cullKey]);
+
+  // ── Gesture layer split ──────────────────────────────────────────────────────
+  // During a CONTENT gesture (drag/draw/erase/resize — the reducer holds a
+  // gestureBase), shapes fall into two layers: STATIC (identity preserved since
+  // gesture start — cacheable as one bitmap) and DYNAMIC (new identities from
+  // this gesture's edits, plus the selection: a Transformer target moves at the
+  // Konva level without a model identity change). The rest of the board then
+  // costs one bitmap per frame while only the moving handful re-rasterizes.
+  const contentGesture = state.gestureBase !== null || state.draftId !== null;
+  const baseSet = useMemo(() => new Set<Shape>(state.gestureBase ?? []), [state.gestureBase]);
+  const splitRef = useRef<{ stat: Shape[]; dyn: Shape[] }>({ stat: [], dyn: [] });
+  const { stat: staticShapes, dyn: dynamicShapes } = useMemo(() => {
+    let stat: Shape[];
+    let dyn: Shape[];
+    if (!contentGesture) {
+      stat = renderShapes;
+      dyn = [];
+    } else {
+      stat = [];
+      dyn = [];
+      for (const sh of renderShapes) {
+        if (baseSet.has(sh) && !selected.has(sh.id)) stat.push(sh);
+        else dyn.push(sh);
+      }
+    }
+    // STABLE identities: renderShapes is a fresh array every edit frame, but the
+    // static membership rarely changes mid-gesture — returning the previous
+    // arrays keeps the static layer's children (and its bitmap cache) untouched.
+    const prev = splitRef.current;
+    const same = (a: Shape[], b: Shape[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+    const out = {
+      stat: same(stat, prev.stat) ? prev.stat : stat,
+      dyn: same(dyn, prev.dyn) ? prev.dyn : dyn,
+    };
+    splitRef.current = out;
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderShapes, contentGesture, baseSet, selectedIds]);
 
   // Bitmap-cache management, imperative and conservative: caching costs a full
   // draw + a multi-MB canvas alloc, so it only happens when it PAYS (a big
@@ -820,11 +880,13 @@ export function DrawCanvas({
   // region or needs meaningfully sharper pixels — never per frame.
   const CACHE_MIN_NODES = 600;
   const CACHE_MIN_INTERVAL_MS = 150;
-  const cacheState = useRef<{ region: Box; scale: number; at: number } | null>(null);
+  const cacheState = useRef<{ region: Box; scale: number; at: number; content: Shape[] } | null>(null);
   useEffect(() => {
     const layer = layerRef.current;
     if (!layer) return;
-    const active = camGesture && !renderAll && !croppingId && renderShapes.length >= CACHE_MIN_NODES;
+    // Cache the STATIC layer during camera gestures AND content gestures — in
+    // both, its pixels are camera-transformed but otherwise frozen.
+    const active = (camGesture || contentGesture) && !renderAll && !croppingId && staticShapes.length >= CACHE_MIN_NODES;
     if (!active) {
       if (cacheState.current) {
         cacheState.current = null;
@@ -834,6 +896,9 @@ export function DrawCanvas({
       return;
     }
     const c = cacheState.current;
+    // A membership change (an erase removed a static shape) invalidates the
+    // bitmap NOW — a throttle here would show ghosts of deleted content.
+    const contentSame = c && c.content === staticShapes;
     const inRegion =
       c &&
       visible.x >= c.region.x &&
@@ -843,17 +908,17 @@ export function DrawCanvas({
     // Tolerate soft pixels while zooming in up to 1.5× past the cached scale and
     // any amount of zoom-out (the bitmap only gains oversampling that way).
     const scaleOk = c && vs <= c.scale * 1.5;
-    if (inRegion && scaleOk) return;
+    if (contentSame && inRegion && scaleOk) return;
     // SHARPNESS refreshes are throttled (the scaled bitmap carries the gesture a
-    // beat longer); a region EXIT recaches immediately — blank edges are worse.
-    if (c && inRegion && performance.now() - c.at < CACHE_MIN_INTERVAL_MS) return;
+    // beat longer); a region EXIT or content change recaches immediately.
+    if (c && contentSame && inRegion && performance.now() - c.at < CACHE_MIN_INTERVAL_MS) return;
     const region = padBox(visible, Math.max(visible.width, visible.height)); // ≈3× viewport
     const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
     layer.cache({ x: region.x, y: region.y, width: region.width, height: region.height, pixelRatio: vs * dpr });
-    cacheState.current = { region, scale: vs, at: performance.now() };
+    cacheState.current = { region, scale: vs, at: performance.now(), content: staticShapes };
     layer.batchDraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [camGesture, view.x, view.y, vs, renderAll, croppingId, renderShapes]);
+  }, [camGesture, contentGesture, view.x, view.y, vs, renderAll, croppingId, staticShapes]);
   // Unmount: leave no dangling bitmap.
   useEffect(() => {
     return () => {
@@ -939,16 +1004,19 @@ export function DrawCanvas({
             }
           }
   };
-  const shapeNodes = useMemo(() => {
+  const nodesFor = (list: Shape[]) => {
     const cache = shapeElCache.current;
-    return paintOrder(renderShapes).map((sh) => {
+    return paintOrder(list).map((sh) => {
       if (cache.has(sh)) return cache.get(sh)!;
       const el = buildShapeEl(sh);
       cache.set(sh, el);
       return el;
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renderShapes, imgEls, editingId, croppingId]);
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const staticShapeNodes = useMemo(() => nodesFor(staticShapes), [staticShapes, imgEls, editingId, croppingId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const dynamicShapeNodes = useMemo(() => nodesFor(dynamicShapes), [dynamicShapes, imgEls, editingId, croppingId]);
   const buildLabelEl = (sh: Shape): React.ReactElement | null => {
     return ((sh) => {
         if (!sh.label || sh.id === editingLabelId) return null;
@@ -994,16 +1062,19 @@ export function DrawCanvas({
         );
       })(sh);
   };
-  const labelNodes = useMemo(() => {
+  const labelsFor = (list: Shape[]) => {
     const cache = labelElCache.current;
-    return renderShapes.map((sh) => {
+    return list.map((sh) => {
       if (cache.has(sh)) return cache.get(sh)!;
       const el = buildLabelEl(sh);
       cache.set(sh, el);
       return el;
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renderShapes, editingLabelId]);
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const staticLabelNodes = useMemo(() => labelsFor(staticShapes), [staticShapes, editingLabelId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const dynamicLabelNodes = useMemo(() => labelsFor(dynamicShapes), [dynamicShapes, editingLabelId]);
 
   return (
     <Stage
@@ -1045,9 +1116,15 @@ export function DrawCanvas({
             The whole element array is MEMOIZED (below): a camera pan re-renders
             the Stage transform only — rebuilding N shape elements per wheel frame
             was the board's scaling wall. */}
-        {shapeNodes}
+        {staticShapeNodes}
+        {staticLabelNodes}
+      </Layer>
 
-        {labelNodes}
+      {/* DYNAMIC layer: the live gesture's shapes + all chrome. Stays tiny per
+          frame while the static layer above rides its bitmap cache. */}
+      <Layer>
+        {dynamicShapeNodes}
+        {dynamicLabelNodes}
 
         {/* Bind highlight — glows a shape while a line/arrow endpoint hovers it.
             Chrome is drawn at constant SCREEN size (offsets/strokes ÷ zoom). */}
