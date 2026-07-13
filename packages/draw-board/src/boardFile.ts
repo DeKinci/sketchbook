@@ -14,8 +14,17 @@ import { exportSvg, readSvgDoc, type SvgExportOptions } from "./svgExport.ts";
 
 const PAYLOAD_KIND = "draw-board";
 
-function payload(doc: DrawDoc): string {
+/** The board-doc JSON envelope — also usable as a clipboard TEXT representation
+ *  (Chromium sanitizes clipboard images and strips PNG text chunks, so a rich
+ *  copy pairs the sanitized image with this payload as text/plain). */
+export function boardPayloadText(doc: DrawDoc): string {
   return JSON.stringify({ v: 1, kind: PAYLOAD_KIND, doc });
+}
+const payload = boardPayloadText;
+
+/** Parse a board-doc envelope from text (clipboard text/plain), or null. */
+export function parseBoardPayload(text: string | null): DrawDoc | null {
+  return parsePayload(text);
 }
 
 function parsePayload(text: string | null): DrawDoc | null {

@@ -28,7 +28,7 @@ import {
   type TextShape,
 } from "./drawModel.ts";
 import { exportStagePng, sketchFileName } from "./exportPng.ts";
-import { exportBoardPng, exportBoardSvg, parseBoardFile } from "./boardFile.ts";
+import { exportBoardPng, exportBoardSvg, parseBoardFile, parseBoardPayload } from "./boardFile.ts";
 import {
   clampBounded,
   clampScale,
@@ -603,6 +603,18 @@ export function DrawEditor({
     (e: ReactClipboardEvent) => {
       if (session) return;
       const items = e.clipboardData?.items ? Array.from(e.clipboardData.items) : [];
+      // A whole-BOARD payload rides text/plain NEXT TO the image (Chromium strips
+      // PNG chunks on the clipboard, so a rich copy pairs representations) — it
+      // must win before the image branch would place the sanitized pixels.
+      if (onImportBoardRef.current) {
+        const clipText = e.clipboardData?.getData("text");
+        const boardDoc = clipText ? parseBoardPayload(clipText) : null;
+        if (boardDoc) {
+          e.preventDefault();
+          onImportBoardRef.current(boardDoc);
+          return;
+        }
+      }
       const imageItem = items.find((it) => it.type.startsWith("image/"));
       if (imageItem) {
         const file = imageItem.getAsFile();

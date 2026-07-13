@@ -14,7 +14,7 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import fs from "node:fs";
-import { readBoardDocFromPngBytes } from "@operator/draw-board";
+import { readBoardDocFromPngBytes, readSvgDoc } from "@operator/draw-board";
 import { createServer, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "tailwindcss";
@@ -200,5 +200,146 @@ test.describe("rich exports + import drop surfaces", () => {
     await expect(page.locator("[data-row-preview]")).toContainText("Untitled");
     await page.mouse.move(10, 400); // leave the row
     await expect(page.locator("[data-row-preview]")).toHaveCount(0);
+  });
+});
+
+test.describe("round-trips: SVG, paste, slim, clipboard copy", () => {
+  test.use({ permissions: ["clipboard-read", "clipboard-write"] });
+
+  /** Paste a file (bytes as base64) onto the focused board via a synthetic
+   *  ClipboardEvent — the PASTE interception path, distinct from drop. */
+  const pasteFile = (page: Page, b64: string, type: string) =>
+    page.evaluate(
+      ([data, ftype]) => {
+        const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+        const dt = new DataTransfer();
+        dt.items.add(new File([bytes], "clip.png", { type: ftype }));
+        (document.activeElement ?? document.body).dispatchEvent(
+          new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true })
+        );
+      },
+      [b64, type] as const
+    );
+
+  test("SVG: download rich → embedded doc verifies → dropping the .svg imports the board", async ({ page }) => {
+    await open(page);
+    await drawStroke(page, { x: 120, y: 120 }, { x: 280, y: 220 });
+    await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length ?? 0).toBeGreaterThan(0);
+    await page.getByRole("button", { name: "More export options" }).click();
+    const downloadP = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download as SVG" }).click();
+    const file = await downloadP;
+    const text = fs.readFileSync((await file.path())!, "utf8");
+    const embedded = readSvgDoc(text);
+    expect(embedded?.shapes.length).toBe(1);
+    // Re-import the SVG through the LIST drop surface.
+    const b64 = Buffer.from(text, "utf8").toString("base64");
+    await page.evaluate(
+      ([data]) => {
+        const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+        const dt = new DataTransfer();
+        dt.items.add(new File([bytes], "untitled.svg", { type: "image/svg+xml" }));
+        const el = document.querySelector("nav")!;
+        el.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+      },
+      [b64] as const
+    );
+    await expect(page.getByRole("button", { name: "untitled", exact: true })).toBeVisible();
+    await expect.poll(async () => (await stored(page)).find((d) => d.name === "untitled")?.doc.shapes.length ?? 0).toBe(1);
+  });
+
+  test("PASTE of a rich PNG onto the board imports it as a board (not a placed image)", async ({ page }) => {
+    await open(page);
+    await drawStroke(page, { x: 140, y: 140 }, { x: 260, y: 200 });
+    await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length ?? 0).toBeGreaterThan(0);
+    const downloadP = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download as PNG" }).click();
+    const bytes = fs.readFileSync((await (await downloadP).path())!);
+    const before = (await stored(page)).length;
+    // Focus the board, paste the rich file.
+    await page.locator(".konvajs-content").click({ position: { x: 400, y: 350 } });
+    await pasteFile(page, bytes.toString("base64"), "image/png");
+    await expect.poll(async () => (await stored(page)).length).toBe(before + 1);
+    const all = await stored(page);
+    expect(all.every((d) => !d.doc.shapes.some((sh) => (sh as { type: string }).type === "image"))).toBe(true);
+  });
+
+  test("SLIM exports carry no doc: the file demotes to a plain image on both surfaces", async ({ page }) => {
+    await open(page);
+    await drawStroke(page, { x: 140, y: 140 }, { x: 260, y: 200 });
+    await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length ?? 0).toBeGreaterThan(0);
+    await page.getByRole("button", { name: "More export options" }).click();
+    const downloadP = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download PNG — slim" }).click();
+    const bytes = fs.readFileSync((await (await downloadP).path())!);
+    expect(readBoardDocFromPngBytes(new Uint8Array(bytes))).toBeNull(); // metadata-free
+    const b64 = bytes.toString("base64");
+    // Over the BOARD → an on-board image SHAPE on the active drawing.
+    await page.locator(".konvajs-content").click({ position: { x: 400, y: 350 } });
+    await pasteFile(page, b64, "image/png");
+    await expect
+      .poll(async () => (await stored(page))[0]?.doc.shapes.filter((sh) => (sh as { type: string }).type === "image").length ?? 0)
+      .toBe(1);
+    // Over the LIST → a new page with the image as BACKGROUND.
+    const before = (await stored(page)).length;
+    await page.evaluate(
+      ([data]) => {
+        const b = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+        const dt = new DataTransfer();
+        dt.items.add(new File([b], "flat.png", { type: "image/png" }));
+        document.querySelector("nav")!.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+      },
+      [b64] as const
+    );
+    await expect.poll(async () => (await stored(page)).length).toBe(before + 1);
+    const page2 = (await stored(page)).find((d) => d.name === "flat") as { doc: { background?: unknown; shapes: unknown[] } } | undefined;
+    expect(page2?.doc.background).toBeTruthy();
+    expect(page2?.doc.shapes).toHaveLength(0);
+  });
+
+  test("COPY as PNG: Chromium strips PNG chunks, so the rich copy pairs pixels with a text payload — pasting restores the board", async ({ page }) => {
+    await open(page);
+    await drawStroke(page, { x: 140, y: 140 }, { x: 260, y: 200 });
+    await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length ?? 0).toBeGreaterThan(0);
+    await page.getByRole("button", { name: "Copy as PNG" }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(async () => {
+          const [item] = await navigator.clipboard.read();
+          return item?.types.includes("image/png") && item.types.includes("text/plain");
+        })
+      )
+      .toBe(true);
+    const { pngB64, text } = await page.evaluate(async () => {
+      const [item] = await navigator.clipboard.read();
+      const blob = await item.getType("image/png");
+      const buf = new Uint8Array(await blob.arrayBuffer());
+      let bin = "";
+      for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+      return { pngB64: btoa(bin), text: await (await item.getType("text/plain")).text() };
+    });
+    // PLATFORM REALITY, pinned: the clipboard PNG is sanitized (chunk stripped)…
+    expect(readBoardDocFromPngBytes(new Uint8Array(Buffer.from(pngB64, "base64")))).toBeNull();
+    // …and the text payload carries the doc instead.
+    expect(JSON.parse(text).kind).toBe("draw-board");
+    // Pasting BOTH representations (what a real ⌘V delivers) imports the board.
+    const before = (await stored(page)).length;
+    await page.locator(".konvajs-content").click({ position: { x: 400, y: 350 } });
+    await page.evaluate(
+      ([data, payload]) => {
+        const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+        const dt = new DataTransfer();
+        dt.items.add(new File([bytes], "clip.png", { type: "image/png" }));
+        dt.setData("text/plain", payload);
+        (document.activeElement ?? document.body).dispatchEvent(
+          new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true })
+        );
+      },
+      [pngB64, text] as const
+    );
+    await expect.poll(async () => (await stored(page)).length).toBe(before + 1);
+    // Imported as a BOARD, not as a pasted image shape.
+    const all = await stored(page);
+    expect(all.every((d) => !d.doc.shapes.some((sh) => (sh as { type: string }).type === "image"))).toBe(true);
   });
 });

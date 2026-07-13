@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Copy, Download } from "lucide-react";
-import type { BoardHandle } from "@operator/draw-board";
+import { boardPayloadText, type BoardHandle } from "@operator/draw-board";
 
 /** Trigger a browser download for a File. */
 function download(file: File): void {
@@ -48,7 +48,15 @@ export function ExportCluster({
     run(rich ? "Copied PNG (board embedded)" : "Copied PNG", async () => {
       const file = await board.current?.exportPng({ rich });
       if (!file) throw new Error("no board");
-      await navigator.clipboard.write([new ClipboardItem({ "image/png": file })]);
+      // Chromium SANITIZES clipboard images (PNG chunks stripped) — a rich copy
+      // pairs the image with the board payload as text/plain, so pasting back
+      // into a board app restores the full board while external apps get pixels.
+      const types: Record<string, Blob> = { "image/png": file };
+      if (rich) {
+        const doc = board.current?.getDoc();
+        if (doc) types["text/plain"] = new Blob([boardPayloadText(doc)], { type: "text/plain" });
+      }
+      await navigator.clipboard.write([new ClipboardItem(types)]);
     });
   const downloadPng = (rich: boolean) =>
     run(rich ? "Downloaded PNG (board embedded)" : "Downloaded PNG", async () => {

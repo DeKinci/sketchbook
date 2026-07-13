@@ -22,7 +22,7 @@ export { useDrawing, newShapeId } from "./useDrawing.ts";
 export { resolveSource, type DrawSource, type ResolvedSource } from "./resolveSource.ts";
 export { DRAW_KEYMAP, type DrawShortcut } from "./keymap.ts";
 export { contentCropLogical, exportScale, exportStagePng, sketchFileName } from "./exportPng.ts";
-export { exportBoardPng, exportBoardSvg, parseBoardFile, readBoardDocFromPngBytes, type BoardPngOptions } from "./boardFile.ts";
+export { exportBoardPng, exportBoardSvg, parseBoardFile, parseBoardPayload, boardPayloadText, readBoardDocFromPngBytes, type BoardPngOptions } from "./boardFile.ts";
 export { exportSvg, readSvgDoc, SVG_META_ID, type SvgExportOptions } from "./svgExport.ts";
 export { BOARD_KEYWORD, embedPngText, readPngText, isPng } from "./pngMeta.ts";
 export { paintShapeGhosts, renderDocThumbnail } from "./ghostPainter.ts";
