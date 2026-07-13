@@ -343,3 +343,23 @@ test.describe("round-trips: SVG, paste, slim, clipboard copy", () => {
     expect(all.every((d) => !d.doc.shapes.some((sh) => (sh as { type: string }).type === "image"))).toBe(true);
   });
 });
+
+test.describe("clipboard fallback", () => {
+  test("blocked clipboard falls back to a DOWNLOAD with an honest toast", async ({ page }) => {
+    await open(page);
+    await drawStroke(page, { x: 140, y: 140 }, { x: 260, y: 200 });
+    // Simulate an unavailable clipboard (insecure LAN context / denied / Firefox).
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        value: { write: () => Promise.reject(new DOMException("denied", "NotAllowedError")) },
+        configurable: true,
+      });
+    });
+    const downloadP = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Copy as PNG" }).click();
+    const file = await downloadP; // the export landed as a file instead
+    const bytes = fs.readFileSync((await file.path())!);
+    expect(readBoardDocFromPngBytes(new Uint8Array(bytes))?.shapes.length).toBe(1); // still rich
+    await expect(page.getByText("Clipboard unavailable here — downloaded instead")).toBeVisible();
+  });
+});

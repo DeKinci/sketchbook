@@ -40,41 +40,78 @@ export function ExportCluster({
   const run = (label: string, fn: () => Promise<void>) => {
     setOpen(false);
     void fn()
-      .then(() => onNotify(label))
+      .then(() => label && onNotify(label))
       .catch((e) => onNotify(`Export failed: ${e instanceof Error ? e.message : e}`));
   };
 
-  const copyPng = (rich: boolean) =>
-    run(rich ? "Copied PNG (board embedded)" : "Copied PNG", async () => {
-      const file = await board.current?.exportPng({ rich });
-      if (!file) throw new Error("no board");
-      // Chromium SANITIZES clipboard images (PNG chunks stripped) — a rich copy
-      // pairs the image with the board payload as text/plain, so pasting back
-      // into a board app restores the full board while external apps get pixels.
-      const types: Record<string, Blob> = { "image/png": file };
-      if (rich) {
-        const doc = board.current?.getDoc();
-        if (doc) types["text/plain"] = new Blob([boardPayloadText(doc)], { type: "text/plain" });
+  const makePng = async (rich: boolean) => {
+    const file = await board.current?.exportPng({ rich });
+    if (!file) throw new Error("no board");
+    return file;
+  };
+  const makeSvg = (rich: boolean) => {
+    const file = board.current?.exportSvg({ rich });
+    if (!file) throw new Error("no board");
+    return file;
+  };
+
+  const copyPng = (rich: boolean) => {
+    setOpen(false);
+    // Safari voids the user activation at the first await — the ClipboardItem
+    // must be constructed SYNCHRONOUSLY inside the gesture, with PROMISES as
+    // payloads. The export starts immediately and feeds both paths.
+    const pngPromise: Promise<Blob> = makePng(rich);
+    void (async () => {
+      try {
+        const types: Record<string, Blob | Promise<Blob>> = { "image/png": pngPromise };
+        if (rich) {
+          const doc = board.current?.getDoc();
+          // Chromium sanitizes clipboard images (PNG chunks stripped) — the rich
+          // copy pairs the pixels with the board payload as text/plain.
+          if (doc) types["text/plain"] = new Blob([boardPayloadText(doc)], { type: "text/plain" });
+        }
+        await navigator.clipboard.write([new ClipboardItem(types as Record<string, Blob>)]);
+        onNotify(rich ? "Copied PNG (board embedded)" : "Copied PNG");
+      } catch {
+        // Clipboard legitimately unavailable (insecure LAN context, Firefox's
+        // partial ClipboardItem, denied permission) — never strand the export.
+        try {
+          download((await pngPromise) as File);
+          onNotify("Clipboard unavailable here — downloaded instead");
+        } catch (e) {
+          onNotify(`Export failed: ${e instanceof Error ? e.message : e}`);
+        }
       }
-      await navigator.clipboard.write([new ClipboardItem(types)]);
-    });
+    })();
+  };
+
+  const copySvg = (rich: boolean) => {
+    setOpen(false);
+    void (async () => {
+      let file: File;
+      try {
+        file = makeSvg(rich);
+      } catch (e) {
+        onNotify(`Export failed: ${e instanceof Error ? e.message : e}`);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(await file.text());
+        onNotify(rich ? "Copied SVG (board embedded)" : "Copied SVG");
+      } catch {
+        download(file);
+        onNotify("Clipboard unavailable here — downloaded instead");
+      }
+    })();
+  };
+
   const downloadPng = (rich: boolean) =>
     run(rich ? "Downloaded PNG (board embedded)" : "Downloaded PNG", async () => {
-      const file = await board.current?.exportPng({ rich });
-      if (!file) throw new Error("no board");
-      download(file);
-    });
-  const copySvg = (rich: boolean) =>
-    run(rich ? "Copied SVG (board embedded)" : "Copied SVG", async () => {
-      const file = board.current?.exportSvg({ rich });
-      if (!file) throw new Error("no board");
-      await navigator.clipboard.writeText(await file.text());
+      download(await makePng(rich));
     });
   const downloadSvg = (rich: boolean) =>
     run(rich ? "Downloaded SVG (board embedded)" : "Downloaded SVG", async () => {
-      const file = board.current?.exportSvg({ rich });
-      if (!file) throw new Error("no board");
-      download(file);
+      download(makeSvg(rich));
     });
 
   const chip =
