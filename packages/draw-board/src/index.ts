@@ -19,6 +19,7 @@ export { DrawToolbar } from "./DrawToolbar.tsx";
 export { CropLayer, type CropControl } from "./CropLayer.tsx";
 export { useDrawing, newShapeId } from "./useDrawing.ts";
 export { resolveSource, type DrawSource, type ResolvedSource } from "./resolveSource.ts";
+export { DRAW_KEYMAP, type DrawShortcut } from "./keymap.ts";
 export { contentCropLogical, exportScale, exportStagePng, sketchFileName } from "./exportPng.ts";
 export * from "./viewport.ts";
 export * from "./drawModel.ts";

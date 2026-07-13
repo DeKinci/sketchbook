@@ -644,6 +644,8 @@ export function DrawEditor({
   // Bound to the board ROOT (not window): tool/edit hotkeys fire only while the board
   // holds focus, so keys typed into the composer never reach it (and vice versa). Esc
   // still steps back tool→selection and, at the base, bubbles to the host (collapse).
+  // Adding/changing a key here? Mirror it in keymap.ts (the published reference
+  // hosts render in their shortcut lists).
   const onKeyDown = useCallback(
     (e: ReactKeyboardEvent) => {
       if (session) return;
