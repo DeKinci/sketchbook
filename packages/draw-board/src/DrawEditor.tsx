@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent } from "react";
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent } from "react";
 import { flushSync } from "react-dom";
 import { Frame, Maximize2, Minimize2, Minus, Plus } from "lucide-react";
 import type Konva from "konva";
@@ -28,6 +28,7 @@ import {
   type TextShape,
 } from "./drawModel.ts";
 import { exportStagePng, sketchFileName } from "./exportPng.ts";
+import { exportBoardPng, exportBoardSvg, parseBoardFile } from "./boardFile.ts";
 import {
   clampBounded,
   clampScale,
@@ -74,6 +75,18 @@ function defaultImageToData(file: File): Promise<BoardImageData> {
   });
 }
 
+/** Imperative surface for host-level export UI (the standalone app's toolbar
+ *  buttons). Everything here is OPT-IN — hosts that never take the ref (the
+ *  Operator dock) get the unchanged attachment flow. */
+export interface BoardHandle {
+  /** Flatten to PNG; `rich` (default true) embeds the doc for re-import. */
+  exportPng(opts?: { rich?: boolean }): Promise<File | null>;
+  /** Serialize to SVG; `rich` (default true) embeds the doc. */
+  exportSvg(opts?: { rich?: boolean }): File;
+  /** The live doc snapshot. */
+  getDoc(): DrawDoc;
+}
+
 /** An in-progress text edit. `kind` selects the target: a NEW standalone text
  *  (nothing exists in the model until commit — so a stray mouse-up can't tear it
  *  down), an EXISTING text shape, or a shape's bound LABEL. Geometry lives here
@@ -108,6 +121,9 @@ export function DrawEditor({
   minimap = false,
   onNotify,
   imageToData,
+  boardRef,
+  toolbarExtra,
+  onImportBoard,
 }: {
   doc: DrawDoc;
   bgImage: HTMLImageElement | null;
@@ -146,6 +162,14 @@ export function DrawEditor({
    *  attachment policy (size caps, mime allowlists). Defaults to a plain
    *  FileReader with no policy. */
   imageToData?: (file: File) => Promise<BoardImageData>;
+  /** Imperative export surface (see {@link BoardHandle}). */
+  boardRef?: React.Ref<BoardHandle>;
+  /** Host controls rendered at the far right of the toolbar's action cluster. */
+  toolbarExtra?: React.ReactNode;
+  /** When set, pasted/dropped image files are probed for an embedded board doc
+   *  (rich PNG/SVG) FIRST — a board file always imports as a board, never as a
+   *  placed image, wherever it lands. Absent (Operator): no probing at all. */
+  onImportBoard?: (doc: DrawDoc) => void;
 }) {
   // Operator is dark-only. The primary ink is adaptive (CONTRAST_INK) — it
   // renders via a `difference` blend in the canvas, so it always contrasts the
@@ -169,6 +193,8 @@ export function DrawEditor({
   }, []);
   const imageToDataRef = useRef(imageToData);
   imageToDataRef.current = imageToData;
+  const onImportBoardRef = useRef(onImportBoard);
+  onImportBoardRef.current = onImportBoard;
 
   // ── Focus ownership ─────────────────────────────────────────────────────────
   // The board is a focusable surface: key/paste handlers live on `rootRef` (not
@@ -582,9 +608,19 @@ export function DrawEditor({
         const file = imageItem.getAsFile();
         if (file) {
           e.preventDefault();
-          // A single system-pasted image is one piece of new content → auto-attach.
           const c = pastePoint();
-          void addImageSafe(file, c.x, c.y, true);
+          void (async () => {
+            // A board FILE always imports as a board (host opt-in), wherever it
+            // lands; a plain image places as an auto-attaching shape.
+            if (onImportBoardRef.current) {
+              const boardDoc = await parseBoardFile(file);
+              if (boardDoc) {
+                onImportBoardRef.current(boardDoc);
+                return;
+              }
+            }
+            await addImageSafe(file, c.x, c.y, true);
+          })();
           return;
         }
       }
@@ -626,8 +662,21 @@ export function DrawEditor({
           ? screenToLogical(v, { x: e.clientX - rect.left, y: e.clientY - rect.top })
           : viewCenterLogical();
       // Only a lone dropped image auto-attaches; a multi-file cascade (fixed +12
-      // offsets, within ATTACH_DIST) must NOT chain-glue into a stack.
-      files.forEach((f, i) => void addImageSafe(f, drop.x + i * 12, drop.y + i * 12, files.length === 1));
+      // offsets, within ATTACH_DIST) must NOT chain-glue into a stack. A board
+      // FILE among them always imports as a board instead (host opt-in).
+      files.forEach(
+        (f, i) =>
+          void (async () => {
+            if (onImportBoardRef.current) {
+              const boardDoc = await parseBoardFile(f);
+              if (boardDoc) {
+                onImportBoardRef.current(boardDoc);
+                return;
+              }
+            }
+            await addImageSafe(f, drop.x + i * 12, drop.y + i * 12, files.length === 1);
+          })()
+      );
     },
     [addImageSafe, viewCenterLogical]
   );
@@ -686,29 +735,55 @@ export function DrawEditor({
   // True while an export renders: disables viewport culling so the whole plane
   // is in the layer for the snapshot.
   const [renderAll, setRenderAll] = useState(false);
-  const exportNow = useCallback(() => {
-    const stage = stageRef.current;
-    if (!stage || !onSave || exporting.current) return; // a double-click must not attach twice
-    exporting.current = true;
-    // Normal frames CULL to the viewport and may hold a gesture bitmap cache —
-    // the export needs every shape live in the layer. flushSync mounts the full
-    // set synchronously; caches are cleared before the deterministic transform.
-    flushSync(() => setRenderAll(true));
-    stage.getLayers().forEach((l) => l.clearCache());
-    const transformers = stage.find("Transformer");
-    transformers.forEach((n) => n.hide());
-    stage.draw();
-    const snapshot = toDoc(stateRef.current);
-    exportStagePng(stage, snapshot, sketchFileName(name), { clampCrop: policy !== "infinite" })
-      .then((file) => onSave(file, snapshot))
-      .catch((e) => notify(`Export failed: ${e instanceof Error ? e.message : e}`))
-      .finally(() => {
+  /** Run a stage-snapshot export with the full ceremony: single-flight guard,
+   *  culling disabled (flushSync mounts every shape), caches cleared, chrome
+   *  hidden, everything restored after. Null when an export is already running. */
+  const withExportStage = useCallback(
+    async <T,>(fn: (stage: Konva.Stage, snapshot: DrawDoc) => Promise<T>): Promise<T | null> => {
+      const stage = stageRef.current;
+      if (!stage || exporting.current) return null;
+      exporting.current = true;
+      flushSync(() => setRenderAll(true));
+      stage.getLayers().forEach((l) => l.clearCache());
+      const transformers = stage.find("Transformer");
+      transformers.forEach((n) => n.hide());
+      stage.draw();
+      try {
+        return await fn(stage, toDoc(stateRef.current));
+      } catch (e) {
+        notify(`Export failed: ${e instanceof Error ? e.message : e}`);
+        return null;
+      } finally {
         exporting.current = false;
         setRenderAll(false);
         transformers.forEach((n) => n.show());
         stage.draw();
-      });
-  }, [name, onSave, policy, notify]);
+      }
+    },
+    [notify]
+  );
+
+  const exportNow = useCallback(() => {
+    if (!onSave) return;
+    void withExportStage(async (stage, snapshot) => {
+      const file = await exportStagePng(stage, snapshot, sketchFileName(name), { clampCrop: policy !== "infinite" });
+      onSave(file, snapshot);
+    });
+  }, [name, onSave, policy, withExportStage]);
+
+  // Imperative export surface for host toolbars (standalone app). Opt-in.
+  useImperativeHandle(
+    boardRef,
+    (): BoardHandle => ({
+      exportPng: (opts) =>
+        withExportStage((stage, snapshot) =>
+          exportBoardPng(stage, snapshot, sketchFileName(name), { rich: opts?.rich, clampCrop: policy !== "infinite" })
+        ),
+      exportSvg: (opts) => exportBoardSvg(toDoc(stateRef.current), name || "board", { rich: opts?.rich }),
+      getDoc: () => toDoc(stateRef.current),
+    }),
+    [name, policy, withExportStage, boardRef]
+  );
 
   const save = useCallback(() => {
     if (session) {
@@ -897,6 +972,7 @@ export function DrawEditor({
       onUpload={pickImages}
       onCancel={onCancel}
       onAdd={onSave ? save : undefined}
+      extra={toolbarExtra}
     />
   );
 

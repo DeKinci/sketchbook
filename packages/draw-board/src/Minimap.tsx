@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
-import { boundingBox, contentBounds, isContrastInk, type Shape } from "./drawModel.ts";
+import { contentBounds, type Shape } from "./drawModel.ts";
+import { paintShapeGhosts } from "./ghostPainter.ts";
 import {
   fitView,
   logicalToScreen,
@@ -14,12 +15,8 @@ import {
 
 const MINI_W = 168;
 const MINI_H = 112;
-/** Ghost color for the adaptive contrast ink (the minimap has a fixed dark bg). */
-const GHOST_INK = "#f5f5f5";
 /** Matches the board's selection/viewport chrome hue. */
 const VIEW_COLOR = "#8b5cf6";
-/** Max points per pen ghost — the tiny render needs silhouettes, not fidelity. */
-const PEN_GHOST_POINTS = 24;
 /** Trailing throttle for ghost redraws — the overview may lag a beat; it must
  *  never cost per-frame O(n) during camera moves outside the content extent. */
 const REDRAW_MS = 66;
@@ -87,38 +84,7 @@ export function Minimap({
     ctx.scale(mm.scale, mm.scale);
     ctx.lineWidth = 1 / mm.scale; // constant 1 screen px
     ctx.globalAlpha = 0.75;
-    for (const sh of shapesRef.current) {
-      const color = isContrastInk(sh.stroke) ? GHOST_INK : sh.stroke;
-      ctx.strokeStyle = color;
-      if (sh.type === "line" || sh.type === "arrow") {
-        ctx.beginPath();
-        ctx.moveTo(sh.points[0], sh.points[1]);
-        ctx.lineTo(sh.points[2], sh.points[3]);
-        ctx.stroke();
-      } else if (sh.type === "pen") {
-        const n = sh.points.length / 2;
-        const step = Math.max(1, Math.ceil(n / PEN_GHOST_POINTS));
-        ctx.beginPath();
-        ctx.moveTo(sh.points[0], sh.points[1]);
-        for (let i = step; i < n; i += step) ctx.lineTo(sh.points[i * 2], sh.points[i * 2 + 1]);
-        ctx.lineTo(sh.points[(n - 1) * 2], sh.points[(n - 1) * 2 + 1]);
-        ctx.stroke();
-      } else if (sh.type === "ellipse") {
-        const b = boundingBox(sh);
-        ctx.beginPath();
-        ctx.ellipse(b.x + b.width / 2, b.y + b.height / 2, b.width / 2, b.height / 2, 0, 0, Math.PI * 2);
-        ctx.stroke();
-      } else {
-        const b = boundingBox(sh);
-        if (sh.type === "image") {
-          ctx.fillStyle = color;
-          ctx.globalAlpha = 0.2;
-          ctx.fillRect(b.x, b.y, b.width, b.height);
-          ctx.globalAlpha = 0.75;
-        }
-        ctx.strokeRect(b.x, b.y, b.width, b.height);
-      }
-    }
+    paintShapeGhosts(ctx, shapesRef.current);
   }, []);
   const scheduleRedraw = useCallback(() => {
     if (redrawTimer.current) return;

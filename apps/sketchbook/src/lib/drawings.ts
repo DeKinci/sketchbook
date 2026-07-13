@@ -36,6 +36,28 @@ export function createDrawing(list: Drawing[], now = Date.now()): { list: Drawin
   return { list: [...list, created], created };
 }
 
+/** First free variant of `base` ("Plan", "Plan 2", …). */
+export function uniquifyName(list: Drawing[], base: string): string {
+  const taken = new Set(list.map((d) => d.name));
+  const stem = base.trim() || "Untitled";
+  if (!taken.has(stem)) return stem;
+  for (let n = 2; ; n++) {
+    const name = `${stem} ${n}`;
+    if (!taken.has(name)) return name;
+  }
+}
+
+/** Add a drawing with a GIVEN doc (board-file import, image-backed page). */
+export function importDrawing(list: Drawing[], doc: DrawDoc, base: string, now = Date.now()): { list: Drawing[]; created: Drawing } {
+  const created: Drawing = { id: crypto.randomUUID(), name: uniquifyName(list, base), doc, createdAt: now };
+  return { list: [...list, created], created };
+}
+
+/** Sidebar order: newest first (stable for equal stamps — insertion wins). */
+export function displayOrder(list: Drawing[]): Drawing[] {
+  return [...list].sort((a, b) => b.createdAt - a.createdAt);
+}
+
 export function renameDrawing(list: Drawing[], id: string, name: string): Drawing[] {
   const trimmed = name.trim();
   if (!trimmed) return list; // an empty rename is a cancel, not an erase

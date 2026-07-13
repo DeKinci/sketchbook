@@ -13,7 +13,7 @@
  *    them into the host's tailwind config and include this package's `src` in
  *    its `content` globs.
  */
-export { DrawEditor, type BoardImageData } from "./DrawEditor.tsx";
+export { DrawEditor, type BoardImageData, type BoardHandle } from "./DrawEditor.tsx";
 export { DrawCanvas } from "./DrawCanvas.tsx";
 export { DrawToolbar } from "./DrawToolbar.tsx";
 export { CropLayer, type CropControl } from "./CropLayer.tsx";
@@ -22,5 +22,9 @@ export { useDrawing, newShapeId } from "./useDrawing.ts";
 export { resolveSource, type DrawSource, type ResolvedSource } from "./resolveSource.ts";
 export { DRAW_KEYMAP, type DrawShortcut } from "./keymap.ts";
 export { contentCropLogical, exportScale, exportStagePng, sketchFileName } from "./exportPng.ts";
+export { exportBoardPng, exportBoardSvg, parseBoardFile, readBoardDocFromPngBytes, type BoardPngOptions } from "./boardFile.ts";
+export { exportSvg, readSvgDoc, SVG_META_ID, type SvgExportOptions } from "./svgExport.ts";
+export { BOARD_KEYWORD, embedPngText, readPngText, isPng } from "./pngMeta.ts";
+export { paintShapeGhosts, renderDocThumbnail } from "./ghostPainter.ts";
 export * from "./viewport.ts";
 export * from "./drawModel.ts";

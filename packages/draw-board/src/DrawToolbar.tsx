@@ -117,6 +117,7 @@ export function DrawToolbar({
   onUpload,
   onCancel,
   onAdd,
+  extra,
 }: {
   tool: Tool;
   /** The armed selectable tool (select/pen) — the pill's well slides here. */
@@ -147,6 +148,9 @@ export function DrawToolbar({
   onCancel?: () => void;
   /** Flatten + export the drawing (the attachment flow). Omit to hide. */
   onAdd?: () => void;
+  /** Host-supplied controls rendered at the FAR RIGHT of the actions cluster
+   *  (e.g. the standalone app's export buttons). Operator passes nothing. */
+  extra?: React.ReactNode;
 }) {
   const persistentActive = tool === "select" || tool === "pen";
   const colorIdx = palette.findIndex((c) => c.toLowerCase() === color.toLowerCase());
@@ -351,6 +355,7 @@ export function DrawToolbar({
               <Check size={16} strokeWidth={2.5} />
             </button>
           )}
+          {extra}
         </div>
       </div>
     </div>

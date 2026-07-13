@@ -49,3 +49,25 @@ describe("localStorage round-trip", () => {
     expect(loadDrawings()).toEqual([]);
   });
 });
+
+describe("import / ordering", () => {
+  it("importDrawing keeps the given doc and uniquifies the name", async () => {
+    const { importDrawing, uniquifyName } = await import("./drawings.ts");
+    const doc = { shapes: [], width: 10, height: 10 };
+    const { list, created } = importDrawing([d("a", "Plan")], doc, "Plan", 9);
+    expect(created.name).toBe("Plan 2");
+    expect(created.doc).toBe(doc);
+    expect(created.createdAt).toBe(9);
+    expect(list).toHaveLength(2);
+    expect(uniquifyName(list, "  ")).toBe("Untitled");
+  });
+
+  it("displayOrder puts the newest first without mutating the list", async () => {
+    const { displayOrder } = await import("./drawings.ts");
+    const a = { ...d("a", "Old"), createdAt: 1 };
+    const b = { ...d("b", "New"), createdAt: 5 };
+    const list = [a, b];
+    expect(displayOrder(list).map((x) => x.name)).toEqual(["New", "Old"]);
+    expect(list[0]).toBe(a); // untouched
+  });
+});

@@ -13,6 +13,8 @@
  * and the board theme fed explicitly so ink/accent utilities exist).
  */
 import { expect, test, type Page } from "@playwright/test";
+import fs from "node:fs";
+import { readBoardDocFromPngBytes } from "@operator/draw-board";
 import { createServer, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "tailwindcss";
@@ -125,4 +127,78 @@ test("the full story: open → create+name → rename → draw → reload persis
     .toBeGreaterThan(0);
   const final = await stored(page);
   expect(final.find((d) => d.name === "My Plan")!.doc.shapes.length).toBe(1); // untouched
+});
+
+test.describe("rich exports + import drop surfaces", () => {
+  /** Drop a file (bytes given as base64) onto a selector via a synthetic DragEvent. */
+  async function dropFile(page: Page, selector: string, b64: string, name: string, type: string) {
+    await page.evaluate(
+      ([sel, data, fname, ftype]) => {
+        const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+        const dt = new DataTransfer();
+        dt.items.add(new File([bytes], fname, { type: ftype }));
+        const el = document.querySelector(sel)!;
+        el.dispatchEvent(new DragEvent("dragover", { dataTransfer: dt, bubbles: true, cancelable: true }));
+        el.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+      },
+      [selector, b64, name, type] as const
+    );
+  }
+
+  test("download rich PNG → doc embedded → re-imports as a board from EITHER drop surface; plain image over the list becomes a background page", async ({ page }) => {
+    await open(page);
+    await drawStroke(page, { x: 140, y: 140 }, { x: 300, y: 240 });
+    await expect.poll(async () => (await stored(page)).find((d) => d.name === "Untitled")?.doc.shapes.length ?? 0).toBeGreaterThan(0);
+
+    // Download the rich PNG and verify the embedded doc offline.
+    const downloadP = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download as PNG" }).click();
+    const download = await downloadP;
+    const path = await download.path();
+    const bytes = fs.readFileSync(path!);
+    const embedded = readBoardDocFromPngBytes(new Uint8Array(bytes));
+    expect(embedded?.shapes.length).toBe(1);
+    expect((embedded!.shapes[0] as { type: string }).type).toBe("pen");
+    const b64 = bytes.toString("base64");
+
+    // Drop the rich PNG over the LIST → imports as a new board (not an image page).
+    await dropFile(page, "nav", b64, "untitled.png", "image/png");
+    await expect(page.getByRole("button", { name: "untitled", exact: true })).toBeVisible();
+    await expect
+      .poll(async () => (await stored(page)).find((d) => d.name === "untitled")?.doc.shapes.length ?? 0)
+      .toBe(1); // full board recreation, background-free
+
+    // Drop the SAME rich PNG over the BOARD → still imports as a board (board
+    // files always win), never as a placed image shape.
+    const before = (await stored(page)).length;
+    await dropFile(page, ".konvajs-content", b64, "untitled.png", "image/png");
+    await expect.poll(async () => (await stored(page)).length).toBe(before + 1);
+    const all = await stored(page);
+    // No drawing gained an image shape from that drop.
+    expect(all.every((d) => !d.doc.shapes.some((sh) => (sh as { type: string }).type === "image"))).toBe(true);
+
+    // A PLAIN image dropped over the list becomes a new page with a background.
+    const plainB64 = await page.evaluate(() => {
+      const c = document.createElement("canvas");
+      c.width = 80;
+      c.height = 50;
+      const ctx = c.getContext("2d")!;
+      ctx.fillStyle = "#ff0000";
+      ctx.fillRect(0, 0, 80, 50);
+      return c.toDataURL("image/png").split(",")[1];
+    });
+    await dropFile(page, "nav", plainB64, "photo.png", "image/png");
+    await expect(page.getByRole("button", { name: "photo" })).toBeVisible();
+    const withBg = (await stored(page)).find((d) => d.name === "photo") as { doc: { background?: unknown } } | undefined;
+    expect(withBg?.doc.background).toBeTruthy();
+  });
+
+  test("hovering a sidebar row shows the preview popover", async ({ page }) => {
+    await open(page);
+    await page.getByRole("button", { name: "Untitled", exact: true }).hover();
+    await expect(page.locator("[data-row-preview]")).toBeVisible();
+    await expect(page.locator("[data-row-preview]")).toContainText("Untitled");
+    await page.mouse.move(10, 400); // leave the row
+    await expect(page.locator("[data-row-preview]")).toHaveCount(0);
+  });
 });
