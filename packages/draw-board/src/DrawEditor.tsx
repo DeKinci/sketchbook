@@ -3,6 +3,7 @@ import { Frame, Maximize2, Minimize2, Minus, Plus } from "lucide-react";
 import type Konva from "konva";
 import { DrawToolbar } from "./DrawToolbar.tsx";
 import { DrawCanvas } from "./DrawCanvas.tsx";
+import { Minimap } from "./Minimap.tsx";
 import type { CropControl } from "./CropLayer.tsx";
 import { useDrawing, newShapeId } from "./useDrawing.ts";
 import {
@@ -44,6 +45,8 @@ import {
 const FIT_CAP = 6;
 
 const PASTE_OFFSET = 16;
+/** Marker key of the system-clipboard shapes envelope (see `copy`). */
+const SHAPES_ENVELOPE = "application/x-draw-board-shapes";
 /** A concrete color for the text-edit overlay/caret when the adaptive ink is
  *  active (an HTML textarea can't do the canvas blend). */
 const CONTRAST_OVERLAY = "#ffffff";
@@ -102,6 +105,7 @@ export function DrawEditor({
   onToggleExpand,
   viewport,
   autoFocus = true,
+  minimap = false,
   onNotify,
   imageToData,
 }: {
@@ -131,6 +135,10 @@ export function DrawEditor({
    *  keystrokes elsewhere (e.g. naming a freshly created page); the board still
    *  claims focus on any pointer-down inside it. */
   autoFocus?: boolean;
+  /** Show the schematic overview map (bottom-right; click/drag moves the
+   *  camera). Off by default; ignored under the "fixed" policy (no camera to
+   *  navigate). */
+  minimap?: boolean;
   /** User-facing error channel (failed export, rejected image). Defaults to
    *  console.warn — inject the host's toast for real surfacing. */
   onNotify?: (message: string) => void;
@@ -412,21 +420,49 @@ export function DrawEditor({
   }, [session]);
 
   // ── Clipboard (internal drawn shapes) ───────────────────────────────────────
+  const pasteShapes = useCallback(
+    (shapesToPaste: Shape[]) => {
+      // Copy a glued assembly → paste a glued assembly: intra-batch attach/binds are
+      // remapped to the new ids and kept; edges to shapes outside the batch drop. No
+      // attach re-detection (the paste offset is within ATTACH_DIST — detecting would
+      // weld every copy to its original).
+      dispatch({ type: "addShapes", shapes: clonePastedShapes(shapesToPaste, PASTE_OFFSET, PASTE_OFFSET, newShapeId) });
+      dispatch({ type: "setTool", tool: "select" });
+    },
+    [dispatch]
+  );
   const copy = useCallback(() => {
     const sel = new Set(stateRef.current.selectedIds);
     const picked = stateRef.current.shapes.filter((s) => sel.has(s.id)).map(cloneShape);
-    if (picked.length) clipboard.current = picked;
+    if (!picked.length) return;
+    clipboard.current = picked;
+    // ALSO write an envelope to the SYSTEM clipboard. Without this, stale OS
+    // clipboard content (any text/image copied earlier) intercepts the next ⌘V
+    // ahead of the internal fallback — "copy-paste selection doesn't work".
+    // The envelope also makes shape paste work across boards/tabs. Best-effort:
+    // the internal ref still covers a denied clipboard permission.
+    try {
+      void navigator.clipboard?.writeText(JSON.stringify({ [SHAPES_ENVELOPE]: 1, shapes: picked })).catch(() => {});
+    } catch {
+      // Non-secure context / no clipboard API — the internal ref suffices.
+    }
   }, []);
   const pasteInternal = useCallback(() => {
     if (!clipboard.current.length) return false;
-    // Copy a glued assembly → paste a glued assembly: intra-batch attach/binds are
-    // remapped to the new ids and kept; edges to shapes outside the batch drop. No
-    // attach re-detection (the paste offset is within ATTACH_DIST — detecting would
-    // weld every copy to its original).
-    dispatch({ type: "addShapes", shapes: clonePastedShapes(clipboard.current, PASTE_OFFSET, PASTE_OFFSET, newShapeId) });
-    dispatch({ type: "setTool", tool: "select" });
+    pasteShapes(clipboard.current);
     return true;
-  }, [dispatch]);
+  }, [pasteShapes]);
+  /** Parse a system-clipboard text as a shapes envelope; null if it's not one. */
+  const parseEnvelope = useCallback((text: string): Shape[] | null => {
+    if (!text.includes(SHAPES_ENVELOPE)) return null;
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const shapes = parsed?.[SHAPES_ENVELOPE] ? (parsed.shapes as Shape[] | undefined) : undefined;
+      return Array.isArray(shapes) && shapes.length ? shapes : null;
+    } catch {
+      return null;
+    }
+  }, []);
 
   // ── Add an image / text (drop or paste from the system) ─────────────────────
   // Placement is CAMERA-relative: "the middle of the board" means the middle of
@@ -527,6 +563,15 @@ export function DrawEditor({
       }
       const text = e.clipboardData?.getData("text");
       if (text && text.trim()) {
+        // A shapes envelope (this board's own ⌘C, possibly from another board or
+        // tab) pastes as SHAPES — before the plain-text branch could turn the
+        // JSON into a text shape.
+        const shapes = parseEnvelope(text);
+        if (shapes) {
+          e.preventDefault();
+          pasteShapes(shapes);
+          return;
+        }
         e.preventDefault();
         const r = visibleRect();
         addTextValue(text.replace(/\s+$/, ""), r.x + r.width * 0.2, r.y + r.height * 0.3);
@@ -534,7 +579,7 @@ export function DrawEditor({
       }
       if (pasteInternal()) e.preventDefault();
     },
-    [session, addImageSafe, addTextValue, pasteInternal, viewCenterLogical, visibleRect]
+    [session, addImageSafe, addTextValue, pasteInternal, pasteShapes, parseEnvelope, viewCenterLogical, visibleRect]
   );
 
   const onDrop = useCallback(
@@ -938,6 +983,11 @@ export function DrawEditor({
                 >
                   <Frame size={12} />
                 </button>
+              </div>
+            )}
+            {minimap && policy !== "fixed" && (
+              <div className="absolute bottom-2 right-2 z-20 overflow-hidden rounded-lg border border-ink-600 bg-ink-800/80 backdrop-blur">
+                <Minimap shapes={state.shapes} view={view} board={avail} onViewChange={onViewChange} />
               </div>
             )}
           </>

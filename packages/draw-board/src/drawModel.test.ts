@@ -645,11 +645,26 @@ describe("moveClusterIds — largest drags smallest", () => {
     expect(clusterOf([M, L, S], ["M"])).toEqual(new Set(["M"])); // L too heavy → S unreachable
   });
 
-  it("3. equal-weight neighbors come along (either grabbed end)", () => {
+  it("3. equal-weight neighbors DON'T follow — a same-size glued pair must be separable by grabbing either", () => {
+    // (Semantics changed from "equal comes along": that welded same-size pairs
+    // permanently — dragging either moved both, so they could never be pulled
+    // apart. Equals stay independent; multi-select moves them together.)
     const A = sq("A", 0, 100);
     const B = sq("B", 300, 100, { attach: att("A") }); // equal 10000
-    expect(clusterOf([A, B], ["A"])).toEqual(new Set(["A", "B"]));
-    expect(clusterOf([A, B], ["B"])).toEqual(new Set(["A", "B"]));
+    expect(clusterOf([A, B], ["A"])).toEqual(new Set(["A"]));
+    expect(clusterOf([A, B], ["B"])).toEqual(new Set(["B"]));
+  });
+
+  it("3b. two IDENTICAL stacked shapes are separable (equal box ≠ contained)", () => {
+    const A = box("A", { x: 50, y: 50, width: 120, height: 90 });
+    const B = box("B", { x: 50, y: 50, width: 120, height: 90 }); // exact overlay
+    expect(containedIds([A, B], ["A"])).toEqual([]); // proper containment only
+    expect(containedIds([A, B], ["B"])).toEqual([]);
+    expect(clusterOf([A, B], ["A"])).toEqual(new Set(["A"]));
+    expect(clusterOf([A, B], ["B"])).toEqual(new Set(["B"]));
+    // A strictly smaller shape inside still rides (real containment unchanged).
+    const S = box("S", { x: 60, y: 60, width: 40, height: 40 });
+    expect(new Set(containedIds([A, S], ["A"]))).toEqual(new Set(["S"]));
   });
 
   it("4. multi-seed union — a selected big shape moves even beside a tiny seed", () => {
@@ -696,10 +711,15 @@ describe("moveClusterIds — largest drags smallest", () => {
     expect(clusterOf(shapes, ["sc"])).toEqual(new Set(["sc"])); // scribble alone
   });
 
-  it("6b. legacy 2-cycle terminates and returns both", () => {
+  it("6b. legacy 2-cycle terminates (equal sizes stay separable; a lighter cycle partner still rides)", () => {
+    // Equal-size cycle: no follow (same-size pairs must be separable), no hang.
     const A = box("A", { x: 0, y: 0, width: 100, height: 100, attach: att("B") });
     const B = box("B", { x: 300, y: 0, width: 100, height: 100, attach: att("A") });
-    expect(clusterOf([A, B], ["A"])).toEqual(new Set(["A", "B"]));
+    expect(clusterOf([A, B], ["A"])).toEqual(new Set(["A"]));
+    // Unequal cycle: traversal still crosses the cycle edge for a lighter partner.
+    const L = box("L", { x: 0, y: 0, width: 100, height: 100, attach: att("S") });
+    const S = box("S", { x: 300, y: 0, width: 40, height: 40, attach: att("L") });
+    expect(clusterOf([L, S], ["L"])).toEqual(new Set(["L", "S"]));
   });
 });
 

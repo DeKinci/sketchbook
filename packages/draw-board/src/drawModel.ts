@@ -587,8 +587,11 @@ function reflowAll(shapes: Shape[], skip: Set<string>): Shape[] {
 }
 
 /** Ids of shapes fully contained within any of the given container shapes' boxes
- *  (used to drag a container's contents along with it). Only area shapes act as
- *  containers; the containers themselves are excluded. */
+ *  (used to drag a container's contents along with it). Containment is PROPER:
+ *  a box the container's own size is an overlay, not content — two identical
+ *  stacked shapes would otherwise contain each other symmetrically and weld
+ *  forever (dragging either moved both; they could never be pulled apart).
+ *  Only area shapes act as containers; the containers themselves are excluded. */
 export function containedIds(shapes: Shape[], containerIds: string[]): string[] {
   const boxes = containerIds
     .map((id) => shapes.find((s) => s.id === id))
@@ -600,7 +603,16 @@ export function containedIds(shapes: Shape[], containerIds: string[]): string[] 
   for (const sh of shapes) {
     if (set.has(sh.id)) continue;
     const b = boundingBox(sh);
-    if (boxes.some((A) => b.x >= A.x && b.y >= A.y && b.x + b.width <= A.x + A.width && b.y + b.height <= A.y + A.height)) {
+    if (
+      boxes.some(
+        (A) =>
+          b.x >= A.x &&
+          b.y >= A.y &&
+          b.x + b.width <= A.x + A.width &&
+          b.y + b.height <= A.y + A.height &&
+          (b.width < A.width - CLUSTER_EPS || b.height < A.height - CLUSTER_EPS)
+      )
+    ) {
       out.push(sh.id);
     }
   }
@@ -611,8 +623,8 @@ export function containedIds(shapes: Shape[], containerIds: string[]): string[] 
  *  (pen/line/arrow — massless followers that never pull), else bounding-box area.
  *  Raw bbox area would misclassify an ENCIRCLING scribble or long diagonal stroke
  *  as "bigger" than the shape it annotates and strand it when that shape is grabbed;
- *  making strokes massless keeps them as pure followers (0 ≤ anything, and a 0
- *  threshold drags only other massless neighbors). Text keeps its bbox weight. */
+ *  making strokes massless keeps them as pure followers (0 < any area weight;
+ *  a stroke seed pulls nothing). Text keeps its bbox weight. */
 export function clusterWeight(sh: Shape): number {
   if (sh.type === "pen" || sh.type === "line" || sh.type === "arrow") return 0;
   const b = boundingBox(sh);
@@ -690,8 +702,11 @@ const CLUSTER_EPS = 1e-6;
  * smallest"):
  *  - every seed always moves (grabbing = precedence — selection overrides size);
  *  - from each seed, BFS over the UNDIRECTED attach graph, crossing into a
- *    neighbor iff `clusterWeight(neighbor) <= clusterWeight(seed) + eps` — a
- *    heavier node blocks its whole subtree (equal weight comes along);
+ *    neighbor iff `clusterWeight(neighbor) < clusterWeight(seed) - eps` — a
+ *    heavier OR EQUAL node blocks its whole subtree. Equal weight staying put is
+ *    load-bearing: if equals followed, a same-size glued pair welded forever
+ *    (dragging either moved both — they could never be pulled apart). Move a
+ *    same-size pair together by multi-selecting it.
  *  - plus everything geometrically contained in any dragged container.
  * BFS is per-seed with its own threshold + its own visited set (a node rejected
  * for a small seed must still be reachable from a bigger seed; the visited set
@@ -705,7 +720,7 @@ export function moveClusterIds(shapes: Shape[], seedIds: string[]): string[] {
     const seed = byId.get(seedId);
     if (!seed) continue;
     cluster.add(seedId);
-    const threshold = clusterWeight(seed) + CLUSTER_EPS;
+    const threshold = clusterWeight(seed) - CLUSTER_EPS;
     const visited = new Set<string>([seedId]);
     const queue = [seedId];
     while (queue.length) {
@@ -714,7 +729,7 @@ export function moveClusterIds(shapes: Shape[], seedIds: string[]): string[] {
         if (visited.has(nb)) continue;
         visited.add(nb); // mark even if blocked → a heavier node blocks its subtree
         const nbShape = byId.get(nb);
-        if (nbShape && clusterWeight(nbShape) <= threshold) {
+        if (nbShape && clusterWeight(nbShape) < threshold) {
           cluster.add(nb);
           queue.push(nb);
         }

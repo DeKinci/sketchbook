@@ -167,6 +167,7 @@ export default function App() {
           name={active.name}
           onChange={(doc) => mutate((list) => updateDoc(list, active.id, doc))}
           onNotify={notify}
+          minimap
           // A freshly created page mounts alongside its rename input — the board
           // must not steal the name's first keystrokes. (Read at mount only.)
           autoFocus={renamingId === null}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
 import type { KonvaEventObject } from "konva/lib/Node.js";
 import { Stage, Layer, Rect, Ellipse, Line, Arrow, Text, Image as KonvaImage, Group, Label, Tag, Transformer } from "react-konva";
@@ -723,50 +723,24 @@ export function DrawCanvas({
   // extent (the latter padded past the export trim so a flattened PNG never
   // catches a transparent corner).
   const visible = visibleLogicalRect(view, stageSize);
-  const infiniteBg = policy === "infinite" ? (() => {
-    const vis = padBox(visible, sPx(8));
-    const content = contentBounds(shapes);
-    return content ? unionBox(vis, padBox(content, 40)) : vis;
-  })() : null;
+  // Content extent cached on the shapes array identity — recomputing O(n) per
+  // camera frame made panning the slowest gesture at high shape counts.
+  const content = useMemo(() => contentBounds(shapes), [shapes]);
+  const infiniteBg = policy === "infinite"
+    ? (() => {
+        const vis = padBox(visible, sPx(8));
+        return content ? unionBox(vis, padBox(content, 40)) : vis;
+      })()
+    : null;
 
-  return (
-    <Stage
-      ref={stageRef}
-      width={stageSize.w}
-      height={stageSize.h}
-      x={view.x}
-      y={view.y}
-      scaleX={vs}
-      scaleY={vs}
-      onMouseDown={onStageDown}
-      onMouseMove={onStageMove}
-      onMouseUp={onStageUp}
-      onMouseLeave={() => setHover(null)}
-      onDblClick={onStageDblClick}
-      onContextMenu={(e) => e.evt.preventDefault()}
-      onWheel={onWheel}
-      onTouchStart={onTouchStart}
-      onTouchMove={onTouchMove}
-      onTouchEnd={onTouchEnd}
-      onDblTap={onStageDblClick}
-      style={{ cursor, touchAction: "none" }}
-    >
-      <Layer>
-        {/* Opaque background so the exported PNG is legible: the annotated image,
-            or the board surface. Non-listening so clicks on it count as "empty
-            canvas". */}
-        {infiniteBg ? (
-          <Rect x={infiniteBg.x} y={infiniteBg.y} width={infiniteBg.width} height={infiniteBg.height} fill={bgColor} listening={false} />
-        ) : bgImage ? (
-          <KonvaImage image={bgImage} width={state.width} height={state.height} listening={false} />
-        ) : (
-          <Rect x={0} y={0} width={state.width} height={state.height} fill={bgColor} listening={false} />
-        )}
-
-        {/* Images are a background layer; every vector shape paints above them (a
-            small rect glued behind a big image shows). Non-images keep draw order.
-            Konva/hit-testing use ids, not child order, so this is purely visual. */}
-        {paintOrder(shapes).map((sh) => {
+  // Shape + label element arrays, cached on CONTENT identity (plus zoom for the
+  // screen-true hit widths). A camera pan changes only the Stage transform, so
+  // per-wheel-frame element rebuilding — O(n) React reconciliation — is skipped
+  // entirely; Konva just redraws. (inkFor reads the luminance map by ref: any
+  // backdrop change also changes `shapes`/`imgEls`, so the memo re-fires.)
+  const shapeNodes = useMemo(
+    () =>
+      paintOrder(shapes).map((sh) => {
           if (sh.id === editingId && sh.type === "text") return null; // hidden under the textarea
           // Adaptive ink resolves to a solid color contrasting the background
           // under the shape; other scribbles never affect it.
@@ -824,58 +798,102 @@ export function DrawCanvas({
               return <KonvaImage key={sh.id} {...common(sh)} image={img} x={sh.x} y={sh.y} width={sh.width} height={sh.height} crop={sh.crop} />;
             }
           }
-        })}
-
-        {/* Bound labels. On a STROKE shape (line/arrow/pen) the label used to be tiny
-            same-colored text sitting on the stroke — unreadable. So stroke labels get a
-            readable chip: an opaque rounded tag at the stroke midpoint with the text in
-            its OWN hue (bright for adaptive ink), independent of the background it floats
-            over. Area shapes keep the plain centered label (legible on the unfilled
-            interior). */}
-        {shapes.map((sh) => {
-          if (!sh.label || sh.id === editingLabelId) return null;
-          const b = boundingBox(sh);
-          if (sh.type === "line" || sh.type === "arrow" || sh.type === "pen") {
-            const mid =
-              sh.type === "pen"
-                ? { x: b.x + b.width / 2, y: b.y + b.height / 2 }
-                : { x: (sh.points[0] + sh.points[2]) / 2, y: (sh.points[1] + sh.points[3]) / 2 };
-            const fs = 15;
-            const pad = 5;
-            const ink = isContrastInk(sh.stroke) ? "#f5f5f5" : sh.stroke;
-            // Approx chip size to center it on the midpoint (Konva Label anchors top-left).
-            const w = Math.max(8, sh.label.length * fs * 0.58) + pad * 2;
-            const h = fs * 1.16 + pad * 2;
-            return (
-              <Label key={`label-${sh.id}`} x={mid.x} y={mid.y} offsetX={w / 2} offsetY={h / 2} listening={false}>
-                <Tag
-                  fill="rgba(20,20,24,0.85)"
-                  cornerRadius={5}
-                  stroke="rgba(245,245,245,0.16)"
-                  strokeWidth={1}
-                  shadowColor="#000000"
-                  shadowBlur={5}
-                  shadowOpacity={0.45}
-                />
-                <Text text={sh.label} fontSize={fs} fontStyle="500" fill={ink} padding={pad} align="center" />
-              </Label>
-            );
-          }
-          const fs = labelFont(b);
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shapes, imgEls, editingId, croppingId, vs]
+  );
+  const labelNodes = useMemo(
+    () =>
+      shapes.map((sh) => {
+        if (!sh.label || sh.id === editingLabelId) return null;
+        const b = boundingBox(sh);
+        if (sh.type === "line" || sh.type === "arrow" || sh.type === "pen") {
+          const mid =
+            sh.type === "pen"
+              ? { x: b.x + b.width / 2, y: b.y + b.height / 2 }
+              : { x: (sh.points[0] + sh.points[2]) / 2, y: (sh.points[1] + sh.points[3]) / 2 };
+          const fs = 15;
+          const pad = 5;
+          const ink = isContrastInk(sh.stroke) ? "#f5f5f5" : sh.stroke;
+          const w = Math.max(8, sh.label.length * fs * 0.58) + pad * 2;
+          const h = fs * 1.16 + pad * 2;
           return (
-            <Text
-              key={`label-${sh.id}`}
-              x={b.x}
-              y={b.y + b.height / 2 - fs * 0.6}
-              width={b.width}
-              text={sh.label}
-              fontSize={fs}
-              fill={inkFor(sh)}
-              align="center"
-              listening={false}
-            />
+            <Label key={`label-${sh.id}`} x={mid.x} y={mid.y} offsetX={w / 2} offsetY={h / 2} listening={false}>
+              <Tag
+                fill="rgba(20,20,24,0.85)"
+                cornerRadius={5}
+                stroke="rgba(245,245,245,0.16)"
+                strokeWidth={1}
+                shadowColor="#000000"
+                shadowBlur={5}
+                shadowOpacity={0.45}
+              />
+              <Text text={sh.label} fontSize={15} fontStyle="500" fill={ink} padding={5} align="center" />
+            </Label>
           );
-        })}
+        }
+        const fs = labelFont(b);
+        return (
+          <Text
+            key={`label-${sh.id}`}
+            x={b.x}
+            y={b.y + b.height / 2 - fs * 0.6}
+            width={b.width}
+            text={sh.label}
+            fontSize={fs}
+            fill={inkFor(sh)}
+            align="center"
+            listening={false}
+          />
+        );
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shapes, editingLabelId]
+  );
+
+  return (
+    <Stage
+      ref={stageRef}
+      width={stageSize.w}
+      height={stageSize.h}
+      x={view.x}
+      y={view.y}
+      scaleX={vs}
+      scaleY={vs}
+      onMouseDown={onStageDown}
+      onMouseMove={onStageMove}
+      onMouseUp={onStageUp}
+      onMouseLeave={() => setHover(null)}
+      onDblClick={onStageDblClick}
+      onContextMenu={(e) => e.evt.preventDefault()}
+      onWheel={onWheel}
+      onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}
+      onDblTap={onStageDblClick}
+      style={{ cursor, touchAction: "none" }}
+    >
+      <Layer>
+        {/* Opaque background so the exported PNG is legible: the annotated image,
+            or the board surface. Non-listening so clicks on it count as "empty
+            canvas". */}
+        {infiniteBg ? (
+          <Rect x={infiniteBg.x} y={infiniteBg.y} width={infiniteBg.width} height={infiniteBg.height} fill={bgColor} listening={false} />
+        ) : bgImage ? (
+          <KonvaImage image={bgImage} width={state.width} height={state.height} listening={false} />
+        ) : (
+          <Rect x={0} y={0} width={state.width} height={state.height} fill={bgColor} listening={false} />
+        )}
+
+        {/* Images are a background layer; every vector shape paints above them (a
+            small rect glued behind a big image shows). Non-images keep draw order.
+            Konva/hit-testing use ids, not child order, so this is purely visual.
+            The whole element array is MEMOIZED (below): a camera pan re-renders
+            the Stage transform only — rebuilding N shape elements per wheel frame
+            was the board's scaling wall. */}
+        {shapeNodes}
+
+        {labelNodes}
 
         {/* Bind highlight — glows a shape while a line/arrow endpoint hovers it.
             Chrome is drawn at constant SCREEN size (offsets/strokes ÷ zoom). */}

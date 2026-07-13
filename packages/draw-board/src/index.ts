@@ -17,6 +17,7 @@ export { DrawEditor, type BoardImageData } from "./DrawEditor.tsx";
 export { DrawCanvas } from "./DrawCanvas.tsx";
 export { DrawToolbar } from "./DrawToolbar.tsx";
 export { CropLayer, type CropControl } from "./CropLayer.tsx";
+export { Minimap } from "./Minimap.tsx";
 export { useDrawing, newShapeId } from "./useDrawing.ts";
 export { resolveSource, type DrawSource, type ResolvedSource } from "./resolveSource.ts";
 export { DRAW_KEYMAP, type DrawShortcut } from "./keymap.ts";
