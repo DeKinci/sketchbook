@@ -1081,7 +1081,11 @@ export function DrawEditor({
               />
             )}
             {policy !== "fixed" && (
-              <div className="absolute bottom-2 left-2 z-20 flex items-center gap-0.5 rounded-full border border-ink-600 bg-ink-800/80 px-1 py-0.5 text-ink-300 backdrop-blur">
+              <div
+                className={`absolute bottom-2 left-2 z-10 flex items-center gap-0.5 rounded-full border border-ink-600 bg-ink-800/80 px-1 py-0.5 text-ink-300 backdrop-blur${
+                  state.gestureBase ? " pointer-events-none" : ""
+                }`}
+              >
                 <button
                   type="button"
                   onClick={() => zoomStep(-1)}
@@ -1121,7 +1125,15 @@ export function DrawEditor({
               </div>
             )}
             {minimap && policy !== "fixed" && (
-              <div className="absolute bottom-2 right-2 z-20 overflow-hidden rounded-lg border border-ink-600 bg-ink-800/80 backdrop-blur">
+              // pointer-events-none while a content gesture is LIVE: a stroke or
+              // drag crossing the overlay must keep flowing to the stage — the
+              // minimap swallowing the mouseup stranded the draft (and its
+              // pointerdown would teleport the camera mid-stroke).
+              <div
+                className={`absolute bottom-2 right-2 z-10 overflow-hidden rounded-lg border border-ink-600 bg-ink-800/80 backdrop-blur${
+                  state.gestureBase ? " pointer-events-none" : ""
+                }`}
+              >
                 <Minimap shapes={state.shapes} view={view} board={avail} onViewChange={onViewChange} />
               </div>
             )}

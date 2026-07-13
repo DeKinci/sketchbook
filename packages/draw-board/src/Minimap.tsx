@@ -99,7 +99,14 @@ export function Minimap({
   useEffect(() => {
     drawGhosts(); // first paint immediately
     return () => {
-      if (redrawTimer.current) clearTimeout(redrawTimer.current);
+      if (redrawTimer.current) {
+        clearTimeout(redrawTimer.current);
+        // MUST null the ref: StrictMode's mount→cleanup→remount otherwise
+        // leaves a dead timer id here, and every future scheduleRedraw
+        // early-returns — the minimap paints once and never again (adds and
+        // deletes silently stop appearing).
+        redrawTimer.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

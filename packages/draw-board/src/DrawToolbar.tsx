@@ -313,7 +313,10 @@ export function DrawToolbar({
 
       {/* History + apply/cancel — absolutely pinned right on desktop (so the tool
           groups stay centered); own row on mobile with history left, actions right. */}
-      <div className="flex items-center gap-2 max-md:order-3 max-md:basis-full max-md:justify-between md:absolute md:right-3 md:top-1/2 md:-translate-y-1/2">
+      {/* z-30: the centering -translate-y creates a stacking context; without an
+          explicit z it sits at auto and any host popover inside (the export
+          menu) gets trapped BELOW the board's z-10 overlays (minimap). */}
+      <div className="z-30 flex items-center gap-2 max-md:order-3 max-md:basis-full max-md:justify-between md:absolute md:right-3 md:top-1/2 md:-translate-y-1/2">
         <div className="flex items-center gap-0.5">
           <IconButton label="Undo (⌘Z)" disabled={!canUndo} onClick={onUndo} className="disabled:opacity-30">
             <Undo2 size={16} />

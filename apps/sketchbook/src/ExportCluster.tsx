@@ -136,7 +136,7 @@ export function ExportCluster({
         <ChevronDown size={14} />
       </button>
       {open && (
-        <div className="absolute bottom-10 right-0 z-30 w-56 overflow-hidden rounded-lg border border-ink-500 bg-ink-700 py-1 text-sm text-ink-100 shadow-xl">
+        <div data-export-menu className="absolute bottom-10 right-0 z-50 w-56 overflow-hidden rounded-lg border border-ink-500 bg-ink-700 py-1 text-sm text-ink-100 shadow-xl">
           {(
             [
               ["Download as SVG", () => downloadSvg(true)],

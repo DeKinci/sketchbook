@@ -363,3 +363,29 @@ test.describe("clipboard fallback", () => {
     await expect(page.getByText("Clipboard unavailable here — downloaded instead")).toBeVisible();
   });
 });
+
+test("export menu stacks ABOVE the minimap (hit-test in the overlap)", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 560 }); // force menu/minimap overlap
+  await open(page);
+  await page.getByRole("button", { name: "More export options" }).click();
+  const menu = (await page.locator("[data-export-menu]").boundingBox())!;
+  const mini = (await page.locator("[data-minimap]").boundingBox())!;
+  const x0 = Math.max(menu.x, mini.x);
+  const y0 = Math.max(menu.y, mini.y);
+  const x1 = Math.min(menu.x + menu.width, mini.x + mini.width);
+  const y1 = Math.min(menu.y + menu.height, mini.y + mini.height);
+  expect(x1).toBeGreaterThan(x0); // the layouts DO overlap at this size…
+  expect(y1).toBeGreaterThan(y0);
+  const topHit = await page.evaluate(
+    ([x, y]) => {
+      const el = document.elementFromPoint(x, y);
+      const chain: string[] = [];
+      for (let e: Element | null = el; e && chain.length < 7; e = e.parentElement) {
+        chain.push(`${e.tagName}.${String((e as HTMLElement).className).slice(0, 60)}`);
+      }
+      return { inMenu: !!el?.closest("[data-export-menu]"), inMini: !!el?.closest("[data-minimap]"), chain };
+    },
+    [(x0 + x1) / 2, (y0 + y1) / 2] as const
+  );
+  expect(topHit).toMatchObject({ inMenu: true, inMini: false }); // menu wins the stack
+});
