@@ -97,6 +97,7 @@ export function DrawCanvas({
   onCropApply,
   onCropCancel,
   cropControlRef,
+  renderAll,
   newId,
 }: {
   state: DrawState;
@@ -142,6 +143,9 @@ export function DrawCanvas({
   /** Populated with the live crop apply/cancel while crop mode is open — the
    *  editor's keyboard handler drives it (see {@link CropControl}). */
   cropControlRef?: React.MutableRefObject<CropControl | null>;
+  /** Render EVERY shape regardless of the viewport (export needs the whole
+   *  plane in the layer; normal frames cull to the visible window). */
+  renderAll?: boolean;
   newId: () => string;
 }) {
   const trRef = useRef<Konva.Transformer>(null);
@@ -156,6 +160,10 @@ export function DrawCanvas({
   // The camera scale, and the screen→logical factor for every UX threshold.
   const vs = view.scale;
   const sPx = (px: number) => px / vs;
+  // Handlers embedded in MEMOIZED shape elements read the live scale here — the
+  // elements outlive zooms, so a captured `vs` would go stale.
+  const vsRef = useRef(vs);
+  vsRef.current = vs;
 
   // ── Camera gestures (pan drag / wheel / pinch) ──────────────────────────────
   // Pan drag: INCREMENTAL screen deltas fed through the functional updater — no
@@ -167,6 +175,27 @@ export function DrawCanvas({
   // Pinch: previous frame's touch distance + center.
   const pinchRef = useRef<{ d: number; c: { x: number; y: number } } | null>(null);
 
+  // ── Gesture bitmap cache ─────────────────────────────────────────────────────
+  // While ONLY the camera moves (wheel / pan-drag / pinch), content pixels don't
+  // change — so the layer is cached to one bitmap that the stage transform slides
+  // around, making camera frames O(1) in shape count (Konva's own layer.cache).
+  // Pan/pinch have explicit start/end; wheel is debounced (a quiet 180ms ends the
+  // gesture). The cache clears on settle for a crisp redraw, and zooming while
+  // cached shows the bitmap scaled until then (a 180ms softness, deliberate).
+  const layerRef = useRef<Konva.Layer>(null);
+  const [camGesture, setCamGesture] = useState(false);
+  const wheelIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markWheelGesture = () => {
+    setCamGesture(true);
+    if (wheelIdleTimer.current) clearTimeout(wheelIdleTimer.current);
+    wheelIdleTimer.current = setTimeout(() => {
+      if (!panRef.current && !pinchRef.current) setCamGesture(false);
+    }, 180);
+  };
+  useEffect(() => () => {
+    if (wheelIdleTimer.current) clearTimeout(wheelIdleTimer.current);
+  }, []);
+
   const containerPoint = (e: KonvaEventObject<unknown>, clientX: number, clientY: number) => {
     const rect = e.target.getStage()?.container().getBoundingClientRect();
     return rect ? { x: clientX - rect.left, y: clientY - rect.top } : { x: 0, y: 0 };
@@ -176,15 +205,20 @@ export function DrawCanvas({
     settleGesture(); // a live draft/move/marquee must not keep running under the pan
     panRef.current = { lx: e.evt.clientX, ly: e.evt.clientY };
     setPanActive(true);
+    setCamGesture(true);
   };
   const endPan = () => {
     panRef.current = null;
     setPanActive(false);
+    setCamGesture(false);
   };
 
   const onWheel = (e: KonvaEventObject<WheelEvent>) => {
     if (policy === "fixed") return;
     e.evt.preventDefault();
+    // Bitmap-cache the layer for the scroll — but never while a CONTENT gesture
+    // is live (a mid-stroke wheel would freeze the stroke's growth on screen).
+    if (!state.draftId && !moveRef.current && !erasing.current && !marqueeStart.current) markWheelGesture();
     const pt = containerPoint(e, e.evt.clientX, e.evt.clientY);
     if (e.evt.ctrlKey || e.evt.metaKey) {
       // Trackpad pinches arrive as ctrl+wheel with small deltas; mouse notches are
@@ -214,6 +248,7 @@ export function DrawCanvas({
     }
     const c = containerPoint(e, (t1.clientX + t2.clientX) / 2, (t1.clientY + t2.clientY) / 2);
     pinchRef.current = { d: Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY), c };
+    setCamGesture(true);
   };
 
   const movePinch = (t1: Touch, t2: Touch, e: KonvaEventObject<TouchEvent>) => {
@@ -251,6 +286,7 @@ export function DrawCanvas({
   const shapesRef = useRef(shapes);
   shapesRef.current = shapes;
   const bgLumRef = useRef<{ data: Uint8ClampedArray; w: number; h: number; rect: Box } | null>(null);
+  const [lumEpoch, setLumEpoch] = useState(0);
   const imgSig = shapes
     .filter((s) => s.type === "image")
     .map((s) => `${s.id}:${Math.round((s as { x: number }).x)}:${Math.round((s as { y: number }).y)}:${(s as { width: number }).width | 0}:${(s as { height: number }).height | 0}`)
@@ -295,6 +331,7 @@ export function DrawCanvas({
     } catch {
       bgLumRef.current = null;
     }
+    setLumEpoch((e) => e + 1); // adaptive ink resamples → cached elements stale
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bgImage, imgEls, imgSig, state.width, state.height]);
 
@@ -593,7 +630,10 @@ export function DrawCanvas({
     if (pinchRef.current) {
       // Pinch over once fewer than two fingers remain; the leftover finger is
       // inert until lifted (no accidental stroke from a settling hand).
-      if (e.evt.touches.length < 2) pinchRef.current = null;
+      if (e.evt.touches.length < 2) {
+        pinchRef.current = null;
+        setCamGesture(false);
+      }
       return;
     }
     onStageUp();
@@ -626,22 +666,28 @@ export function DrawCanvas({
     node.scaleX(1);
     node.scaleY(1);
     if (sh.type === "text") {
-      dispatch({ type: "commitResize", id: sh.id, patch: { x: node.x(), y: node.y(), fontSize: Math.max(8, sh.fontSize * sy) }, distScale: sPx(1) });
+      dispatch({ type: "commitResize", id: sh.id, patch: { x: node.x(), y: node.y(), fontSize: Math.max(8, sh.fontSize * sy) }, distScale: 1 / vsRef.current });
     } else if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "image") {
       dispatch({
         type: "commitResize",
         id: sh.id,
         patch: { x: node.x(), y: node.y(), width: Math.max(4, sh.width * sx), height: Math.max(4, sh.height * sy) },
-        distScale: sPx(1), // anchor keep-or-drop judged at the SCREEN's glue range
+        distScale: 1 / vsRef.current, // anchor keep-or-drop judged at the SCREEN's glue range
       });
     }
   };
 
-  // Per-shape props: identity (for the Transformer + hit mapping) and resize
-  // baking. Selection, move, and double-click are all handled at the stage level
-  // (size-based), so shapes are not individually draggable.
+  // Per-shape props: identity (for the Transformer + resize baking). Selection,
+  // move, and double-click are all handled at the stage level (size-based), so
+  // shapes are not individually draggable.
   const common = (sh: Shape) => ({
     id: sh.id,
+    // Content nodes take NO Konva pointer events — hit-testing is manual and
+    // semantic (smallestAt: stroke-over-area priority, smallest-wins, zoom-true
+    // tolerances). listening:false skips Konva's hit-graph render, halving the
+    // per-frame draw work. The Transformer still finds nodes by id (findOne
+    // ignores listening) and its own handles stay listening.
+    listening: false,
     // Keep the stroke a constant width when the Transformer scales a shape —
     // otherwise resizing thickens the outline (Konva scales strokes by default).
     strokeScaleEnabled: false,
@@ -651,7 +697,7 @@ export function DrawCanvas({
     // mid-transform makes the Transformer resize from both sides).
     onTransform: (e: KonvaEventObject<Event>) => {
       const box = liveBox(e, sh);
-      if (box) dispatch({ type: "reflowChildrenTo", parentId: sh.id, box, distScale: sPx(1) });
+      if (box) dispatch({ type: "reflowChildrenTo", parentId: sh.id, box, distScale: 1 / vsRef.current });
     },
     onTransformEnd: (e: KonvaEventObject<Event>) => {
       bakeTransform(e, sh);
@@ -726,6 +772,94 @@ export function DrawCanvas({
   // Content extent cached on the shapes array identity — recomputing O(n) per
   // camera frame made panning the slowest gesture at high shape counts.
   const content = useMemo(() => contentBounds(shapes), [shapes]);
+
+  // ── Viewport culling ─────────────────────────────────────────────────────────
+  // Konva rasterizes every layer node per frame, visible or not — the scaling
+  // wall once a board outgrows the screen. Cull to a window around the visible
+  // rect, QUANTIZED on a power-of-2 "zoom bucket" grid: the memo key survives
+  // pans within half a bucket AND zoom drift within an octave, so almost every
+  // camera frame reuses the culled array (a per-frame key was the thrash that
+  // made zoom slower than no culling at all). Hit-testing, bounds, and the
+  // minimap always use the FULL list — culling is render-only.
+  const bucketRef = useRef<{ bw: number; bh: number } | null>(null);
+  const cullWindow = (() => {
+    // Power-of-2 buckets with HYSTERESIS: a zoom oscillating right at a bucket
+    // boundary must not flip the cull key (and refilter N shapes) every frame —
+    // the previous bucket is kept while the viewport stays within ±10% of it.
+    const rawW = 2 ** Math.ceil(Math.log2(Math.max(1e-6, visible.width)));
+    const rawH = 2 ** Math.ceil(Math.log2(Math.max(1e-6, visible.height)));
+    const prev = bucketRef.current;
+    const bw = prev && visible.width > prev.bw * 0.45 && visible.width <= prev.bw * 1.1 ? prev.bw : rawW;
+    const bh = prev && visible.height > prev.bh * 0.45 && visible.height <= prev.bh * 1.1 ? prev.bh : rawH;
+    bucketRef.current = { bw, bh };
+    const gx = bw / 2;
+    const gy = bh / 2;
+    const x0 = Math.floor((visible.x - bw / 2) / gx) * gx;
+    const y0 = Math.floor((visible.y - bh / 2) / gy) * gy;
+    return {
+      x: x0,
+      y: y0,
+      width: Math.ceil((visible.x + visible.width + bw / 2) / gx) * gx - x0,
+      height: Math.ceil((visible.y + visible.height + bh / 2) / gy) * gy - y0,
+    };
+  })();
+  const cullKey = renderAll ? "all" : `${cullWindow.x}:${cullWindow.y}:${cullWindow.width}:${cullWindow.height}`;
+  const renderShapes = useMemo(() => {
+    if (renderAll) return shapes;
+    const cw = cullWindow;
+    return shapes.filter((sh) => {
+      const b = boundingBox(sh);
+      return b.x < cw.x + cw.width && b.x + b.width > cw.x && b.y < cw.y + cw.height && b.y + b.height > cw.y;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shapes, cullKey]);
+
+  // Bitmap-cache management, imperative and conservative: caching costs a full
+  // draw + a multi-MB canvas alloc, so it only happens when it PAYS (a big
+  // culled set) and only re-fires when the view actually leaves the cached
+  // region or needs meaningfully sharper pixels — never per frame.
+  const CACHE_MIN_NODES = 600;
+  const CACHE_MIN_INTERVAL_MS = 150;
+  const cacheState = useRef<{ region: Box; scale: number; at: number } | null>(null);
+  useEffect(() => {
+    const layer = layerRef.current;
+    if (!layer) return;
+    const active = camGesture && !renderAll && !croppingId && renderShapes.length >= CACHE_MIN_NODES;
+    if (!active) {
+      if (cacheState.current) {
+        cacheState.current = null;
+        layer.clearCache();
+        layer.batchDraw();
+      }
+      return;
+    }
+    const c = cacheState.current;
+    const inRegion =
+      c &&
+      visible.x >= c.region.x &&
+      visible.y >= c.region.y &&
+      visible.x + visible.width <= c.region.x + c.region.width &&
+      visible.y + visible.height <= c.region.y + c.region.height;
+    // Tolerate soft pixels while zooming in up to 1.5× past the cached scale and
+    // any amount of zoom-out (the bitmap only gains oversampling that way).
+    const scaleOk = c && vs <= c.scale * 1.5;
+    if (inRegion && scaleOk) return;
+    // SHARPNESS refreshes are throttled (the scaled bitmap carries the gesture a
+    // beat longer); a region EXIT recaches immediately — blank edges are worse.
+    if (c && inRegion && performance.now() - c.at < CACHE_MIN_INTERVAL_MS) return;
+    const region = padBox(visible, Math.max(visible.width, visible.height)); // ≈3× viewport
+    const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    layer.cache({ x: region.x, y: region.y, width: region.width, height: region.height, pixelRatio: vs * dpr });
+    cacheState.current = { region, scale: vs, at: performance.now() };
+    layer.batchDraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [camGesture, view.x, view.y, vs, renderAll, croppingId, renderShapes]);
+  // Unmount: leave no dangling bitmap.
+  useEffect(() => {
+    return () => {
+      layerRef.current?.clearCache();
+    };
+  }, []);
   const infiniteBg = policy === "infinite"
     ? (() => {
         const vis = padBox(visible, sPx(8));
@@ -733,14 +867,20 @@ export function DrawCanvas({
       })()
     : null;
 
-  // Shape + label element arrays, cached on CONTENT identity (plus zoom for the
-  // screen-true hit widths). A camera pan changes only the Stage transform, so
-  // per-wheel-frame element rebuilding — O(n) React reconciliation — is skipped
-  // entirely; Konva just redraws. (inkFor reads the luminance map by ref: any
-  // backdrop change also changes `shapes`/`imgEls`, so the memo re-fires.)
-  const shapeNodes = useMemo(
-    () =>
-      paintOrder(shapes).map((sh) => {
+  // Shape + label elements, cached PER SHAPE OBJECT (the reducer preserves the
+  // identity of untouched shapes): a pen point or a one-shape drag rebuilds ONE
+  // element, not N. The cache epoch resets when anything cross-cutting shifts —
+  // the raster backdrop (adaptive ink resamples), image decodes, edit/crop
+  // hides — trading one full rebuild for correctness. Camera pans/zooms don't
+  // touch elements at all (live values read through refs).
+  const shapeElCache = useRef(new WeakMap<Shape, React.ReactElement | null>());
+  const labelElCache = useRef(new WeakMap<Shape, React.ReactElement | null>());
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useMemo(() => {
+    shapeElCache.current = new WeakMap();
+    labelElCache.current = new WeakMap();
+  }, [imgEls, imgSig, bgImage, editingId, editingLabelId, croppingId, lumEpoch]);
+  const buildShapeEl = (sh: Shape): React.ReactElement | null => {
           if (sh.id === editingId && sh.type === "text") return null; // hidden under the textarea
           // Adaptive ink resolves to a solid color contrasting the background
           // under the shape; other scribbles never affect it.
@@ -760,7 +900,7 @@ export function DrawCanvas({
               );
             }
             case "line":
-              return <Line key={sh.id} {...common(sh)} points={sh.points} stroke={stroke} strokeWidth={sw} lineCap="round" hitStrokeWidth={Math.max(sPx(12), sw)} />;
+              return <Line key={sh.id} {...common(sh)} points={sh.points} stroke={stroke} strokeWidth={sw} lineCap="round" />;
             case "arrow":
               return (
                 <Arrow
@@ -773,7 +913,7 @@ export function DrawCanvas({
                   pointerLength={8 + sw}
                   pointerWidth={8 + sw}
                   pointerAtBeginning={sh.doubleHead}
-                  hitStrokeWidth={Math.max(sPx(12), sw)}
+                 
                 />
               );
             case "pen":
@@ -787,7 +927,7 @@ export function DrawCanvas({
                   lineCap="round"
                   lineJoin="round"
                   tension={0.4}
-                  hitStrokeWidth={Math.max(sPx(12), sw)}
+                 
                 />
               );
             case "text":
@@ -798,13 +938,19 @@ export function DrawCanvas({
               return <KonvaImage key={sh.id} {...common(sh)} image={img} x={sh.x} y={sh.y} width={sh.width} height={sh.height} crop={sh.crop} />;
             }
           }
-      }),
+  };
+  const shapeNodes = useMemo(() => {
+    const cache = shapeElCache.current;
+    return paintOrder(renderShapes).map((sh) => {
+      if (cache.has(sh)) return cache.get(sh)!;
+      const el = buildShapeEl(sh);
+      cache.set(sh, el);
+      return el;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shapes, imgEls, editingId, croppingId, vs]
-  );
-  const labelNodes = useMemo(
-    () =>
-      shapes.map((sh) => {
+  }, [renderShapes, imgEls, editingId, croppingId]);
+  const buildLabelEl = (sh: Shape): React.ReactElement | null => {
+    return ((sh) => {
         if (!sh.label || sh.id === editingLabelId) return null;
         const b = boundingBox(sh);
         if (sh.type === "line" || sh.type === "arrow" || sh.type === "pen") {
@@ -846,10 +992,18 @@ export function DrawCanvas({
             listening={false}
           />
         );
-      }),
+      })(sh);
+  };
+  const labelNodes = useMemo(() => {
+    const cache = labelElCache.current;
+    return renderShapes.map((sh) => {
+      if (cache.has(sh)) return cache.get(sh)!;
+      const el = buildLabelEl(sh);
+      cache.set(sh, el);
+      return el;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shapes, editingLabelId]
-  );
+  }, [renderShapes, editingLabelId]);
 
   return (
     <Stage
@@ -873,7 +1027,7 @@ export function DrawCanvas({
       onDblTap={onStageDblClick}
       style={{ cursor, touchAction: "none" }}
     >
-      <Layer>
+      <Layer ref={layerRef}>
         {/* Opaque background so the exported PNG is legible: the annotated image,
             or the board surface. Non-listening so clicks on it count as "empty
             canvas". */}

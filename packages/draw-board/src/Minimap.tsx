@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, type ReactElement } from "react";
 import { boundingBox, contentBounds, isContrastInk, type Shape } from "./drawModel.ts";
 import {
   fitView,
@@ -78,7 +78,11 @@ export function Minimap({
       e.stopPropagation();
       dragging.current = true;
       dragWorld.current = liveWorld; // freeze the mapping for the whole gesture
-      svgRef.current?.setPointerCapture(e.pointerId);
+      try {
+        svgRef.current?.setPointerCapture(e.pointerId);
+      } catch {
+        // Synthetic events carry no active pointer — capture is best-effort.
+      }
       centerCameraAt(e.clientX, e.clientY);
     },
     [centerCameraAt, liveWorld]
@@ -94,32 +98,27 @@ export function Minimap({
     dragWorld.current = null;
   }, []);
 
-  const mx = (x: number) => logicalToScreen(m, { x, y: 0 }).x;
-  const my = (y: number) => logicalToScreen(m, { x: 0, y }).y;
-
   const ghost = (sh: Shape) => {
     const color = isContrastInk(sh.stroke) ? GHOST_INK : sh.stroke;
     if (sh.type === "line" || sh.type === "arrow") {
       const [x1, y1, x2, y2] = sh.points;
       return (
-        <line key={sh.id} data-minimap-ghost x1={mx(x1)} y1={my(y1)} x2={mx(x2)} y2={my(y2)} stroke={color} strokeWidth={1} opacity={0.75} />
+        <line key={sh.id} data-minimap-ghost x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.75} />
       );
     }
     if (sh.type === "pen") {
       const n = sh.points.length / 2;
       const step = Math.max(1, Math.ceil(n / PEN_GHOST_POINTS));
       const pts: string[] = [];
-      for (let i = 0; i < n; i += step) pts.push(`${mx(sh.points[i * 2])},${my(sh.points[i * 2 + 1])}`);
+      for (let i = 0; i < n; i += step) pts.push(`${sh.points[i * 2]},${sh.points[i * 2 + 1]}`);
       const last = (n - 1) * 2;
-      pts.push(`${mx(sh.points[last])},${my(sh.points[last + 1])}`);
-      return <polyline key={sh.id} data-minimap-ghost points={pts.join(" ")} fill="none" stroke={color} strokeWidth={1} opacity={0.75} />;
+      pts.push(`${sh.points[last]},${sh.points[last + 1]}`);
+      return <polyline key={sh.id} data-minimap-ghost points={pts.join(" ")} fill="none" stroke={color} strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.75} />;
     }
     const b = boundingBox(sh);
-    const w = Math.max(2, b.width * m.scale);
-    const h = Math.max(2, b.height * m.scale);
     if (sh.type === "ellipse") {
       return (
-        <ellipse key={sh.id} data-minimap-ghost cx={mx(b.x) + w / 2} cy={my(b.y) + h / 2} rx={w / 2} ry={h / 2} fill="none" stroke={color} strokeWidth={1} opacity={0.75} />
+        <ellipse key={sh.id} data-minimap-ghost cx={b.x + b.width / 2} cy={b.y + b.height / 2} rx={b.width / 2} ry={b.height / 2} fill="none" stroke={color} strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.75} />
       );
     }
     // rect / text / image → box silhouette (images filled faintly: they're area).
@@ -127,24 +126,36 @@ export function Minimap({
       <rect
         key={sh.id}
         data-minimap-ghost
-        x={mx(b.x)}
-        y={my(b.y)}
-        width={w}
-        height={h}
+        x={b.x}
+        y={b.y}
+        width={b.width}
+        height={b.height}
         fill={sh.type === "image" ? color : "none"}
         fillOpacity={sh.type === "image" ? 0.2 : undefined}
         stroke={color}
         strokeWidth={1}
+        vectorEffect="non-scaling-stroke"
         opacity={0.75}
       />
     );
   };
 
-  // Ghosts cached on content + mapping. When the camera moves INSIDE the content
-  // extent (the common navigation case) the world — and so `m` — is stable, and a
-  // pan frame skips rebuilding N SVG nodes; only the viewport rect updates.
+  // Ghosts are built in LOGICAL coords and cached PER SHAPE OBJECT (untouched
+  // shapes keep their identity through the reducer): a pen point mid-draw
+  // rebuilds one ghost, not N. The world→minimap mapping is ONE group transform
+  // per frame — mapping per ghost made every pan frame rebuild every SVG node.
+  const ghostCache = useRef(new WeakMap<Shape, ReactElement>());
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const ghosts = useMemo(() => shapes.map(ghost), [shapes, m.x, m.y, m.scale]);
+  const ghosts = useMemo(() => {
+    const cache = ghostCache.current;
+    return shapes.map((sh) => {
+      const hit = cache.get(sh);
+      if (hit) return hit;
+      const el = ghost(sh);
+      cache.set(sh, el);
+      return el;
+    });
+  }, [shapes]);
 
   const vTopLeft = logicalToScreen(m, { x: visible.x, y: visible.y });
 
@@ -162,7 +173,7 @@ export function Minimap({
       role="img"
       aria-label="Board overview — click or drag to move the view"
     >
-      {ghosts}
+      <g transform={`translate(${m.x} ${m.y}) scale(${m.scale})`}>{ghosts}</g>
       <rect
         data-minimap-view
         x={vTopLeft.x}

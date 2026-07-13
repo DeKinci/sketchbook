@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent } from "react";
+import { flushSync } from "react-dom";
 import { Frame, Maximize2, Minimize2, Minus, Plus } from "lucide-react";
 import type Konva from "konva";
 import { DrawToolbar } from "./DrawToolbar.tsx";
@@ -652,10 +653,18 @@ export function DrawEditor({
 
   // ── Export ──────────────────────────────────────────────────────────────────
   const exporting = useRef(false);
+  // True while an export renders: disables viewport culling so the whole plane
+  // is in the layer for the snapshot.
+  const [renderAll, setRenderAll] = useState(false);
   const exportNow = useCallback(() => {
     const stage = stageRef.current;
     if (!stage || !onSave || exporting.current) return; // a double-click must not attach twice
     exporting.current = true;
+    // Normal frames CULL to the viewport and may hold a gesture bitmap cache —
+    // the export needs every shape live in the layer. flushSync mounts the full
+    // set synchronously; caches are cleared before the deterministic transform.
+    flushSync(() => setRenderAll(true));
+    stage.getLayers().forEach((l) => l.clearCache());
     const transformers = stage.find("Transformer");
     transformers.forEach((n) => n.hide());
     stage.draw();
@@ -665,6 +674,7 @@ export function DrawEditor({
       .catch((e) => notify(`Export failed: ${e instanceof Error ? e.message : e}`))
       .finally(() => {
         exporting.current = false;
+        setRenderAll(false);
         transformers.forEach((n) => n.show());
         stage.draw();
       });
@@ -912,6 +922,7 @@ export function DrawEditor({
               onCropApply={onCropApply}
               onCropCancel={onCropCancel}
               cropControlRef={cropControlRef}
+              renderAll={renderAll}
               newId={newShapeId}
             />
             {session && (
