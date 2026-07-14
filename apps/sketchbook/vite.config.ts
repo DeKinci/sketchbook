@@ -15,6 +15,6 @@ const port = Number(
 export default defineConfig({
   plugins: [react()],
   // `.ts.net` so the dev server is reachable at its own tailnet origin through Tailscale
-  // Serve (the own-origin preview path — see apps/server/src/serveOrigins.ts).
+  // Serve (the own-origin preview path — see apps/server/src/previewOrigins.ts).
   server: { port, allowedHosts: [".ts.net"] },
 });
