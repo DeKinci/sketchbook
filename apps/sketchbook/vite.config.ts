@@ -12,9 +12,21 @@ const port = Number(
     (base ? Number(base) + 3 : 5199)
 );
 
+// Wildcard-preview (Cloudflare Tunnel) hints, injected by the server's devEnv when an origin
+// template is configured (apps/server/src/devEnv.ts). Behind the tunnel this dev server is reached
+// at `p<port>.<domain>` over 443, so its Host must be allowed (else Vite 403s "forbidden") and HMR
+// must dial 443 — not the raw local port over https, which fails silently. Unset (a laptop/loopback
+// preview) → the tailnet default. Same handling as apps/web/vite.config.ts.
+const previewAllowedHosts = process.env.OPERATOR_PREVIEW_ALLOWED_HOSTS;
+const previewHmrClientPort = process.env.OPERATOR_PREVIEW_HMR_CLIENT_PORT;
+const allowedHosts = previewAllowedHosts === "all" ? true : previewAllowedHosts ? [previewAllowedHosts] : [".ts.net"];
+const hmr = previewHmrClientPort ? { hmr: { clientPort: Number(previewHmrClientPort) } } : {};
+
 export default defineConfig({
   plugins: [react()],
   // `.ts.net` so the dev server is reachable at its own tailnet origin through Tailscale
-  // Serve (the own-origin preview path — see apps/server/src/previewOrigins.ts).
-  server: { port, allowedHosts: [".ts.net"] },
+  // Serve (the own-origin preview path — see apps/server/src/previewOrigins.ts). Behind the
+  // Cloudflare Tunnel wildcard origin the `p<port>.<domain>` Host is allowed via
+  // OPERATOR_PREVIEW_ALLOWED_HOSTS (=all) instead.
+  server: { port, allowedHosts, ...hmr },
 });
