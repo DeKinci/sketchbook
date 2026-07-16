@@ -4,6 +4,7 @@ import type { KonvaEventObject } from "konva/lib/Node.js";
 import { Stage, Layer, Rect, Ellipse, Line, Arrow, Text, Image as KonvaImage, Group, Label, Tag, Transformer } from "react-konva";
 import { CropLayer, type CropControl } from "./CropLayer.tsx";
 import { SpatialIndex } from "./spatialIndex.ts";
+import { splitGestureLayers } from "./gestureLayers.ts";
 import {
   nearestBindableId,
   nearestEdgeBindableId,
@@ -847,19 +848,9 @@ export function DrawCanvas({
   const baseSet = useMemo(() => new Set<Shape>(state.gestureBase ?? []), [state.gestureBase]);
   const splitRef = useRef<{ stat: Shape[]; dyn: Shape[] }>({ stat: [], dyn: [] });
   const { stat: staticShapes, dyn: dynamicShapes } = useMemo(() => {
-    let stat: Shape[];
-    let dyn: Shape[];
-    if (!contentGesture) {
-      stat = renderShapes;
-      dyn = [];
-    } else {
-      stat = [];
-      dyn = [];
-      for (const sh of renderShapes) {
-        if (baseSet.has(sh) && !selected.has(sh.id)) stat.push(sh);
-        else dyn.push(sh);
-      }
-    }
+    // Selected shapes always ride the dynamic layer (see splitGestureLayers) so
+    // the Transformer's target never jumps layers when a resize gesture begins.
+    const { stat, dyn } = splitGestureLayers(renderShapes, { contentGesture, baseSet, selected });
     // STABLE identities: renderShapes is a fresh array every edit frame, but the
     // static membership rarely changes mid-gesture — returning the previous
     // arrays keeps the static layer's children (and its bitmap cache) untouched.
