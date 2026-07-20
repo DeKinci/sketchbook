@@ -24,7 +24,9 @@ import {
   canRedo,
   stepStroke,
   sizeSlotOf,
+  slotTargetStep,
   fontForStroke,
+  strokeForFont,
   PALETTE,
   CONTRAST_INK,
   isContrastInk,
@@ -91,6 +93,30 @@ describe("secret size ladder (stepStroke / sizeSlotOf / fontForStroke)", () => {
     expect(fontForStroke(1)).toBeLessThan(fontForStroke(3));
     expect(fontForStroke(28)).toBeGreaterThan(fontForStroke(10));
     expect(fontForStroke(7)).toBe(24); // off-ladder fallback unchanged
+  });
+
+  it("strokeForFont inverts fontForStroke (a selected text lands on its dot)", () => {
+    for (const w of [1, 2, 3, 6, 10, 14, 20, 28]) expect(strokeForFont(fontForStroke(w))).toBe(w);
+    expect(strokeForFont(30)).toBe(6); // off-ladder font → nearest rung (28)
+  });
+
+  it("slotTargetStep — absolute dots in the normal zone, relative in the extended zone, mid always resets", () => {
+    // Mid: absolute reset from anywhere.
+    for (const step of [-3, -1, 0, 1, 4]) expect(slotTargetStep(step, 1)).toBe(0);
+    // Normal zone: the extremes are absolute selectors…
+    expect(slotTargetStep(0, 2)).toBe(1); // fresh (natural) → large
+    expect(slotTargetStep(0, 0)).toBe(-1); // fresh → small
+    expect(slotTargetStep(1, 0)).toBe(-1); // "if we are large, we become small"
+    expect(slotTargetStep(-1, 2)).toBe(1); // …and symmetrically small → large
+    // …and re-pressing the extreme you're at enters the extended zone.
+    expect(slotTargetStep(1, 2)).toBe(2);
+    expect(slotTargetStep(3, 2)).toBe(4); // keeps growing
+    expect(slotTargetStep(-1, 0)).toBe(-2);
+    // Extended zone: the OPPOSITE extreme is one step back in, not absolute.
+    expect(slotTargetStep(2, 0)).toBe(1); // "above large → only step downstairs once"
+    expect(slotTargetStep(5, 0)).toBe(4);
+    expect(slotTargetStep(-2, 2)).toBe(-1);
+    expect(slotTargetStep(-4, 2)).toBe(-3);
   });
 });
 

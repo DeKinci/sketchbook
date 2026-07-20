@@ -59,6 +59,13 @@ export interface BaseShape {
   /** Level-keyed stash of glue edges parked when each enclosing group formed
    *  (see {@link DormantEdge}). */
   dormant?: DormantEdge[];
+  /** Size-CONTROL steps from the natural size (×1.2 each; absent = 0 = natural
+   *  "medium"). Only the size dots / -= keys write it, for a whole group
+   *  (uniform across members) or a lone image — so the control can render the
+   *  unit's remembered position and "mid" can reset to the natural size.
+   *  Manual transformer resizes leave it alone (they change the natural size,
+   *  not the control steps); group/ungroup strip it (natural rebases). */
+  sizeStep?: number;
 }
 /** Rect + ellipse share an axis-aligned bounding box {x,y,width,height}. The
  *  view converts an ellipse box to Konva's center+radii; keeping the box form
@@ -801,6 +808,35 @@ export function scaleStepTarget(shapes: Shape[], selectedIds: string[]): string[
   return members[0].type === "image" ? [members[0].id] : null; // a lone image
 }
 
+/** The size-control step of the unit the controls target (members carry a
+ *  uniform stamp; absent = 0 = natural size). */
+export function unitSizeStep(shapes: Shape[], ids: string[]): number {
+  const set = new Set(ids);
+  return shapes.find((sh) => set.has(sh.id))?.sizeStep ?? 0;
+}
+
+/** What step a size-dot click means at `step` — the two-mode model. NORMAL zone
+ *  (|step| ≤ 1): the dots are ABSOLUTE selectors — small −1 · mid 0 · large +1
+ *  (so "large → click small" jumps straight to small). EXTENDED zone (entered by
+ *  re-pressing an extreme from at-or-beyond it): the same extreme keeps stepping
+ *  OUT, mid still resets to 0, and the OPPOSITE extreme turns into a one-step
+ *  walk back IN. The keyboard -/= is always the relative ±1 on top of this. */
+export function slotTargetStep(step: number, slot: 0 | 1 | 2): number {
+  if (slot === 1) return 0; // mid: absolute reset, from anywhere
+  const dir = slot === 2 ? 1 : -1;
+  if (step * dir >= 1) return step + dir; // at/past this extreme → further out
+  if (step * dir <= -2) return step + dir; // deep past the OPPOSITE → one step back
+  return dir; // normal zone → absolute
+}
+
+/** Inverse of {@link fontForStroke}: the ladder rung whose text size is nearest
+ *  `px` — how a selected text's remembered size lands on the stroke dots. */
+export function strokeForFont(px: number): number {
+  let best: number = STROKE_LADDER[0];
+  for (const w of STROKE_LADDER) if (Math.abs(TEXT_SIZES[w] - px) < Math.abs(TEXT_SIZES[best] - px)) best = w;
+  return best;
+}
+
 /** Undirected attach adjacency at ROOT-UNIT grain: nodes are root unit keys; any
  *  stored `attach` edge (child→parent) touching any member connects the two UNITS
  *  in both directions — so group↔group glue works by construction. Intra-unit
@@ -1136,6 +1172,9 @@ export type DrawAction =
   // dormant box offsets ×fx/×fy, and the same outward-refresh + reflow +
   // inbound re-judge tail as scaleUnit. History-NEUTRAL inside begin/endGesture.
   | { type: "stretchUnit"; ids: string[]; fx: number; fy: number; origin: { x: number; y: number }; distScale?: number }
+  // Record the size-control step on a unit's members (dispatched inside the same
+  // gesture as its scaleUnit, so the geometry + stamp are one undo entry).
+  | { type: "stampSizeStep"; ids: string[]; step: number }
   // Set the logical canvas size (blank sketch fills its container on open — done
   // once, before anything is drawn, so no shape coordinates need remapping).
   | { type: "resizeCanvas"; width: number; height: number }
@@ -1329,12 +1368,16 @@ export function normalizeGroups(shapes: Shape[]): Shape[] {
       .filter((d): d is DormantEdge => !!d);
     const sameDormant =
       (sh.dormant?.length ?? 0) === (dormant?.length ?? 0) && (dormant ?? []).every((d, j) => d === sh.dormant![j]);
-    if (samePath && sameDormant) return sh;
+    // A size-control stamp is only meaningful on group members and loose images
+    // — heal anything else (e.g. a collapse just stripped the path).
+    const stripStep = sh.sizeStep !== undefined && !path?.length && sh.type !== "image";
+    if (samePath && sameDormant && !stripStep) return sh;
     changed = true;
     return {
       ...sh,
       groupPath: path?.length ? path : undefined,
       dormant: dormant?.length ? dormant : undefined,
+      sizeStep: stripStep ? undefined : sh.sizeStep,
     };
   });
   return changed ? next : shapes;
@@ -1469,7 +1512,9 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       const childUnits = new Set(s.shapes.filter((sh) => members.has(sh.id)).map(rootUnitKeyOf));
       if (childUnits.size < 2) return s; // incl. would-be single-member groups
       const next = mapShapes(s.shapes, members, (sh) => {
-        const out: Shape = { ...sh, groupPath: [a.gid, ...(sh.groupPath ?? [])] };
+        // sizeStep resets: a fresh group is at its natural ("medium") size, and
+        // any member's own control history dies with its loose life.
+        const out: Shape = { ...sh, groupPath: [a.gid, ...(sh.groupPath ?? [])], sizeStep: undefined };
         // Sever OUTWARD edges (attach + connector binds to non-members) — undo
         // restores exactly; a still-touching neighbor re-glues on the next drag.
         // Internal edges CROSSING between the forming group's child units park in
@@ -1520,7 +1565,9 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       const ids = new Set(s.shapes.map((sh) => sh.id));
       const next = mapShapes(s.shapes, members, (sh) => {
         const path = sh.groupPath!.slice(1);
-        const out: Shape = { ...sh, groupPath: path.length ? path : undefined };
+        // The dissolved unit's control steps die with it — every freed shape's
+        // current size becomes its natural size.
+        const out: Shape = { ...sh, groupPath: path.length ? path : undefined, sizeStep: undefined };
         // Restore THIS gid's dormant entries — only into EMPTY slots (a live
         // outward edge stamped during the group's life wins); drop entries whose
         // target no longer exists. The stash dies with its level either way.
@@ -1707,6 +1754,11 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       });
       // History-neutral: the surrounding gesture's endGesture owns the push.
       return { ...s, shapes: settleTransformedUnit(next, memberIds, distScale) };
+    }
+    case "stampSizeStep": {
+      // History-neutral like scaleUnit — the surrounding gesture commits both.
+      const set = new Set(a.ids);
+      return { ...s, shapes: mapShapes(s.shapes, set, (sh) => ({ ...sh, sizeStep: a.step === 0 ? undefined : a.step })) };
     }
     case "stretchUnitGhost": {
       // LIVE stretch frame — mirror of scaleUnitGhost with the stretch bake.

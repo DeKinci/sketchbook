@@ -610,6 +610,64 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     await expect.poll(async () => (await shape(page, "img")).width).toBeCloseTo(72, 0);
   });
 
+  test("size dots read the unit's remembered step: absolute in the normal zone, relative in the extended zone, mid restores natural", async ({ page }) => {
+    await openSeeded(page, [
+      rect("a", 100, 100, 80, 60, { groupPath: ["g"] }),
+      rect("b", 320, 100, 80, 60, { groupPath: ["g"] }),
+      rect("loose", 100, 400, 80, 60, { strokeWidth: 10 }),
+    ]);
+    const clickAt = async (pt: { x: number; y: number }) => {
+      const s = await toScreen(page, pt);
+      await page.mouse.click(s.x, s.y);
+    };
+    const dotSmall = page.getByRole("button", { name: "Stroke 3px" });
+    const dotMid = page.getByRole("button", { name: "Stroke 6px" });
+    const dotLarge = page.getByRole("button", { name: "Stroke 10px" });
+    // A fresh group selects at its natural size — the MID dot is active.
+    await clickAt({ x: 140, y: 130 });
+    await expect(dotMid).toHaveAttribute("aria-pressed", "true");
+    // Large: ABSOLUTE ×1.2, the well slides to large.
+    await dotLarge.click();
+    await expect.poll(async () => (await shape(page, "a")).width).toBeCloseTo(96, 0);
+    await expect(dotLarge).toHaveAttribute("aria-pressed", "true");
+    // Re-pressing large enters the EXTENDED zone (×1.2³ total) — and the
+    // OPPOSITE dot now advertises its changed meaning (one step back).
+    await dotLarge.click();
+    await dotLarge.click();
+    await expect.poll(async () => (await shape(page, "a")).width).toBeCloseTo(138.24, 0);
+    await expect(dotSmall).toHaveAttribute("title", /One step back down/);
+    // Small in the extended zone: ONE step back in, not a jump.
+    await dotSmall.click();
+    await expect.poll(async () => (await shape(page, "a")).width).toBeCloseTo(115.2, 0);
+    // Mid: restores the exact natural size from anywhere.
+    await dotMid.click();
+    await expect.poll(async () => (await shape(page, "a")).width).toBeCloseTo(80, 1);
+    expect((await shape(page, "a")).x).toBeCloseTo(100, 1);
+    // Normal zone is absolute both ways: large, then small jumps STRAIGHT down
+    // past natural (the "if we are large, we become small" case).
+    await dotLarge.click();
+    await expect.poll(async () => (await shape(page, "a")).width).toBeCloseTo(96, 0);
+    await dotSmall.click();
+    await expect.poll(async () => (await shape(page, "a")).width).toBeCloseTo(80 / 1.2, 0);
+    expect((await shape(page, "a")).sizeStep).toBe(-1); // remembered IN the drawing (persists)
+    // Switching selection shows the OTHER element's remembered size: the loose
+    // rect's own stroke (10 → large dot), not the group's step.
+    await clickAt({ x: 140, y: 430 });
+    await expect(dotLarge).toHaveAttribute("aria-pressed", "true");
+    // Stroke mode has the same extended-zone affordance on its ladder…
+    await dotLarge.click(); // 10 → 14 (secret)
+    await expect.poll(async () => (await shape(page, "loose")).strokeWidth).toBe(14);
+    await expect(dotSmall).toHaveAttribute("title", /One step back down/);
+    // …and re-selecting the group restores ITS remembered small position, with
+    // the keyboard stepping relatively on top of it (−1 → 0 → +1).
+    await clickAt({ x: 140, y: 120 });
+    await expect(dotSmall).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("=");
+    await page.keyboard.press("=");
+    await expect.poll(async () => (await shape(page, "a")).width).toBeCloseTo(96, 0);
+    await expect(dotLarge).toHaveAttribute("aria-pressed", "true");
+  });
+
   test("opening the text editor keeps the glyphs in place (field line metrics match the canvas)", async ({ page }) => {
     await openSeeded(page, [{ id: "t1", type: "text", stroke: "#e5484d", strokeWidth: 3, x: 100, y: 100, text: "Hello", fontSize: 24 }]);
     // Clip around the text's LEFT half (excludes the caret, which parks after
@@ -655,6 +713,26 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     // Same glyphs, same place: tolerate ≤1px of engine baseline nuance — the
     // pre-fix leading mismatch showed up as a systematic multi-px drop.
     expect(Math.abs(fieldTop - canvasTop)).toBeLessThanOrEqual(1);
+  });
+
+  test("a fast ⌘C⌘V pastes the just-copied shapes even while the system clipboard still holds older content", async ({ page }) => {
+    await openSeeded(page, [rect("r", 100, 100, 80, 60)]);
+    // Older external content sits on the system clipboard, and the board's own
+    // ⌘C clipboard write is ASYNC — a fast ⌘V can read the clipboard before the
+    // envelope lands. Simulate the lost race deterministically: pin writeText
+    // to a no-op so ⌘C's system write never arrives.
+    await page.evaluate(async () => {
+      await navigator.clipboard.writeText("older external text");
+      (navigator.clipboard as { writeText: (t: string) => Promise<void> }).writeText = () => Promise.resolve();
+    });
+    const p = await toScreen(page, { x: 140, y: 130 });
+    await page.mouse.click(p.x, p.y);
+    await page.keyboard.press("Control+c");
+    await page.keyboard.press("Control+v");
+    await expect.poll(async () => (await doc(page)).shapes.length).toBe(2);
+    // The COPY pasted — not a text shape minted from the stale clipboard text.
+    const pasted = (await doc(page)).shapes.find((sh) => sh.id !== "r")!;
+    expect(pasted.type).toBe("rect");
   });
 
   test("two quick clicks at DIFFERENT spots never synthesize a double-click (no phantom editor)", async ({ page }) => {

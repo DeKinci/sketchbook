@@ -4,6 +4,7 @@ import {
   Square,
   Circle,
   Minus,
+  Plus,
   ArrowUpRight,
   MoveDiagonal,
   Type,
@@ -105,6 +106,7 @@ export function DrawToolbar({
   lineVariant,
   color,
   strokeWidth,
+  sizeStep = null,
   palette,
   hasSelection,
   groupAction,
@@ -130,7 +132,12 @@ export function DrawToolbar({
   shapeVariant: ShapeVariant;
   lineVariant: LineVariant;
   color: string;
+  /** The width the size dots display (the selection's own when it has one). */
   strokeWidth: number;
+  /** Scale mode: the selected group's / lone image's size-control step (0 =
+   *  natural "medium"), or null for stroke mode. The dots then read the unit's
+   *  position — mid resets, extremes step — instead of stroke widths. */
+  sizeStep?: number | null;
   /** Swatch colors: primary theme ink first, then the content colors. */
   palette: readonly string[];
   hasSelection: boolean;
@@ -169,7 +176,15 @@ export function DrawToolbar({
   // The well sits on the nearest visible slot even for SECRET sizes (past the
   // three shown); the active slot's dot then renders at the REAL size so the
   // secret level stays legible. Repeated presses of an extreme keep stepping.
-  const sizeIdx = sizeSlotOf(strokeWidth);
+  // Scale mode (sizeStep != null — a whole group / lone image selected): the
+  // slots read the unit's control step instead — small −1 · mid 0 (natural) ·
+  // large +1, extended past either end.
+  const scaleMode = sizeStep != null;
+  const sizeIdx: 0 | 1 | 2 = scaleMode ? (sizeStep <= -1 ? 0 : sizeStep >= 1 ? 2 : 1) : sizeSlotOf(strokeWidth);
+  // EXTENDED zone: the OPPOSITE extreme now means "one step back in" (see
+  // slotTargetStep) — it renders as −/+ so the changed meaning is visible on
+  // the control itself, not just in behavior.
+  const extended = scaleMode ? Math.abs(sizeStep) >= 2 : strokeWidth > STROKE_WIDTHS[2] || strokeWidth < STROKE_WIDTHS[0];
   return (
     <div className="relative flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-t border-ink-600 px-2 py-1.5 max-md:[zoom:1.04]">
       {/* Upload image — pinned left on desktop (the mobile copy lives in the
@@ -315,8 +330,10 @@ export function DrawToolbar({
 
 {/* Stroke / text size — same sliding accent well. Three dots, more sizes: the
     extremes keep stepping when re-pressed (secret levels past the visible
-    three; the active dot grows/shrinks with the REAL size), mid resets, and
-    with a group or image selected the same dots scale IT proportionally. */}
+    three; the active dot grows/shrinks with the REAL size), mid resets. With a
+    group or image selected the dots read ITS remembered scale step instead
+    (mid = natural size), same stepping model. In the extended zone the
+    opposite extreme renders as −/+ — it walks one step back, not absolute. */}
       <div className="relative flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5">
         <span
           aria-hidden
@@ -325,9 +342,21 @@ export function DrawToolbar({
         />
         {STROKE_WIDTHS.map((w, i) => {
           const active = sizeIdx === i;
-          // The active dot mirrors the real size (clamped to the button); the
-          // spring makes a repeated press visibly grow/shrink it.
-          const dot = active ? Math.max(3, Math.min(22, strokeWidth + 2)) : w + 2;
+          // The active dot mirrors the real size/step (clamped to the button);
+          // the spring makes a repeated press visibly grow/shrink it.
+          const dot = scaleMode
+            ? active
+              ? i === 2
+                ? Math.min(22, 12 + (sizeStep - 1) * 3)
+                : i === 0
+                  ? Math.max(2, 5 + (sizeStep + 1) * 1.5)
+                  : 8
+              : w + 2
+            : active
+              ? Math.max(3, Math.min(22, strokeWidth + 2))
+              : w + 2;
+          const backGlyph = extended && !active && i !== 1 ? (i === 0 ? Minus : Plus) : null;
+          const BackIcon = backGlyph;
           return (
             <button
               key={w}
@@ -336,16 +365,24 @@ export function DrawToolbar({
               aria-pressed={active}
               title={
                 i === 1
-                  ? "Size medium — resets (-/=)"
-                  : `Size ${i === 0 ? "small" : "large"} (-/=) — press again for ${i === 0 ? "smaller" : "larger"}`
+                  ? scaleMode
+                    ? "Size normal — resets the scale (-/=)"
+                    : "Size medium — resets (-/=)"
+                  : BackIcon
+                    ? `One step back ${i === 0 ? "down" : "up"} (-/=)`
+                    : `Size ${i === 0 ? "small" : "large"} (-/=) — press again for ${i === 0 ? "smaller" : "larger"}`
               }
               onClick={() => onSizeSlot(i as 0 | 1 | 2)}
               className="relative z-10 flex h-7 w-7 items-center justify-center rounded-full"
             >
-              <span
-                className="rounded-full bg-ink-100"
-                style={{ width: dot, height: dot, transition: `width 220ms ${SPRING}, height 220ms ${SPRING}` }}
-              />
+              {BackIcon ? (
+                <BackIcon size={13} strokeWidth={2.5} className="text-ink-100" />
+              ) : (
+                <span
+                  className="rounded-full bg-ink-100"
+                  style={{ width: dot, height: dot, transition: `width 220ms ${SPRING}, height 220ms ${SPRING}` }}
+                />
+              )}
             </button>
           );
         })}

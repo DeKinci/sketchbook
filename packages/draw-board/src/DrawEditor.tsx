@@ -20,9 +20,12 @@ import {
   labelFont,
   normalizeGroups,
   scaleStepTarget,
+  slotTargetStep,
   stepStroke,
+  strokeForFont,
   toDoc,
   unitBoundsOf,
+  unitSizeStep,
   rootUnitKeyOf,
   STROKE_WIDTHS,
   CANVAS_BG_DARK,
@@ -67,6 +70,17 @@ export interface BoardImageData {
 /** Default file→raster reader: plain FileReader, no size policy. A host with
  *  attachment rules (size caps, mime allowlists) injects its own reader via
  *  `imageToData` and REJECTS to surface the refusal through `onNotify`. */
+/** The width the size dots display and step FROM: the selection's own width
+ *  when it has one (an element remembers its size — selecting a secret-size
+ *  element surfaces the extended controls), else the drawing default. */
+function strokeBase(s: { shapes: Shape[]; selectedIds: string[]; strokeWidth: number }): number {
+  if (!s.selectedIds.length) return s.strokeWidth;
+  const sel = new Set(s.selectedIds);
+  const widths = new Set<number>();
+  for (const sh of s.shapes) if (sel.has(sh.id)) widths.add(sh.type === "text" ? strokeForFont(sh.fontSize) : sh.strokeWidth);
+  return widths.size === 1 ? [...widths][0] : s.strokeWidth;
+}
+
 function defaultImageToData(file: File): Promise<BoardImageData> {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -516,11 +530,15 @@ export function DrawEditor({
     },
     [dispatch, pastePoint]
   );
+  // When the last board copy happened — the paste handler's tie-breaker for the
+  // async-clipboard race (see onPaste).
+  const lastCopyAt = useRef(-Infinity);
   const copy = useCallback(() => {
     const sel = new Set(stateRef.current.selectedIds);
     const picked = stateRef.current.shapes.filter((s) => sel.has(s.id)).map(cloneShape);
     if (!picked.length) return;
     clipboard.current = picked;
+    lastCopyAt.current = performance.now();
     // ALSO write an envelope to the SYSTEM clipboard. Without this, stale OS
     // clipboard content (any text/image copied earlier) intercepts the next ⌘V
     // ahead of the internal fallback — "copy-paste selection doesn't work".
@@ -620,6 +638,22 @@ export function DrawEditor({
   const onPaste = useCallback(
     (e: ReactClipboardEvent) => {
       if (session) return;
+      // ⌘C's system-clipboard write is ASYNC — a fast ⌘C⌘V reads the clipboard
+      // BEFORE the envelope lands, and would process the PREVIOUS content (a
+      // stale image/board/text copied earlier) instead of the just-copied
+      // shapes. Within a short grace window after our own copy, clipboard
+      // content that isn't our envelope IS that race: the internal clipboard is
+      // the truth. (A genuine external copy inside the window would need an
+      // app-switch + copy + switch back in under 1.5s.)
+      if (
+        clipboard.current.length &&
+        performance.now() - lastCopyAt.current < 1500 &&
+        !(e.clipboardData?.getData("text") ?? "").includes(SHAPES_ENVELOPE)
+      ) {
+        e.preventDefault();
+        pasteInternal();
+        return;
+      }
       const items = e.clipboardData?.items ? Array.from(e.clipboardData.items) : [];
       // A whole-BOARD payload rides text/plain NEXT TO the image (Chromium strips
       // PNG chunks on the clipboard, so a rich copy pairs representations) — it
@@ -742,47 +776,62 @@ export function DrawEditor({
   // -/= step size, Tab cycles color — same as the toolbar controls (apply to the
   // selection if any, else change the active value via the reducer).
   // Two meanings, one control: with a whole GROUP (or a lone image) selected the
-  // step SCALES it proportionally (stroke width is either meaningless or should
-  // scale with everything else); otherwise it walks the stroke ladder — one rung
-  // per press, past the three visible slots into the secret sizes.
+  // controls track the unit's size-STEP (×1.2 per step from its natural size,
+  // remembered on the shapes); otherwise they walk the stroke ladder. Both share
+  // the slotTargetStep model: absolute dots in the normal zone, relative
+  // stepping in the extended zone, mid always resets.
   const SCALE_STEP = 1.2;
+  /** Move the scale target (whole group / lone image) to an ABSOLUTE control
+   *  step: factor from its current step, about the unit center, stamped in the
+   *  same gesture — one undo entry per press. */
+  const applySizeStep = useCallback(
+    (target: string[], toStep: number) => {
+      const s = stateRef.current;
+      const cur = unitSizeStep(s.shapes, target);
+      if (toStep === cur) return;
+      const b = unitBoundsOf(s.shapes, rootUnitKeyOf(s.shapes.find((sh) => sh.id === target[0])!));
+      if (!b) return;
+      const factor = Math.pow(SCALE_STEP, toStep - cur);
+      if (factor < 1 && Math.min(b.width, b.height) * factor < 8) return; // shrink floor
+      dispatch({ type: "beginGesture" });
+      dispatch({
+        type: "scaleUnit",
+        ids: target,
+        factor,
+        origin: { x: b.x + b.width / 2, y: b.y + b.height / 2 }, // about its center
+        distScale: distScale(),
+      });
+      dispatch({ type: "stampSizeStep", ids: target, step: toStep });
+      dispatch({ type: "endGesture" });
+    },
+    [dispatch, distScale]
+  );
   const stepSize = useCallback(
     (dir: number) => {
       const s = stateRef.current;
       const target = scaleStepTarget(s.shapes, s.selectedIds);
       if (target) {
-        const b = unitBoundsOf(s.shapes, rootUnitKeyOf(s.shapes.find((sh) => sh.id === target[0])!));
-        if (!b) return;
-        const factor = dir > 0 ? SCALE_STEP : 1 / SCALE_STEP;
-        if (factor < 1 && Math.min(b.width, b.height) * factor < 8) return; // shrink floor
-        dispatch({ type: "beginGesture" });
-        dispatch({
-          type: "scaleUnit",
-          ids: target,
-          factor,
-          origin: { x: b.x + b.width / 2, y: b.y + b.height / 2 }, // about its center
-          distScale: distScale(),
-        });
-        dispatch({ type: "endGesture" }); // one undo entry per press
+        applySizeStep(target, unitSizeStep(s.shapes, target) + dir);
         return;
       }
-      dispatch({ type: "setStrokeWidth", width: stepStroke(s.strokeWidth, dir) });
+      dispatch({ type: "setStrokeWidth", width: stepStroke(strokeBase(s), dir) });
     },
-    [dispatch, distScale]
+    [applySizeStep, dispatch]
   );
-  /** A visible size dot was clicked. Stroke mode: mid resets immediately; an
-   *  extreme SELECTS its slot from the normal zone, but from at-or-beyond it
-   *  keeps stepping further out (the secret sizes), and from the OPPOSITE
-   *  secret zone walks back one rung at a time. Scale mode (group/image
-   *  selected): the extremes step the scale; mid has no reset point. */
+  /** A visible size dot was clicked. Scale mode (group/image selected): the
+   *  slotTargetStep model on the unit's remembered step. Stroke mode: the same
+   *  model expressed on the ladder — mid resets, an extreme SELECTS its slot
+   *  from the normal zone but keeps stepping further out from at-or-beyond it,
+   *  and from the OPPOSITE secret zone walks back one rung at a time. */
   const onSizeSlot = useCallback(
     (slot: 0 | 1 | 2) => {
       const s = stateRef.current;
-      if (scaleStepTarget(s.shapes, s.selectedIds)) {
-        if (slot !== 1) stepSize(slot === 2 ? 1 : -1);
+      const target = scaleStepTarget(s.shapes, s.selectedIds);
+      if (target) {
+        applySizeStep(target, slotTargetStep(unitSizeStep(s.shapes, target), slot));
         return;
       }
-      const w = s.strokeWidth;
+      const w = strokeBase(s);
       const width =
         slot === 1
           ? STROKE_WIDTHS[1]
@@ -795,7 +844,7 @@ export function DrawEditor({
               : STROKE_WIDTHS[0];
       dispatch({ type: "setStrokeWidth", width });
     },
-    [dispatch, stepSize]
+    [applySizeStep, dispatch]
   );
   const cycleColor = useCallback(
     (dir: number) => {
@@ -1038,6 +1087,9 @@ export function DrawEditor({
   const editingLabelId = session?.kind === "label" ? session.id : null;
   const centered = session?.kind === "label";
 
+  // The size dots render the SELECTION's remembered position: a whole group /
+  // lone image shows its scale step (mid = natural), anything else its stroke.
+  const sizeTarget = scaleStepTarget(state.shapes, state.selectedIds);
   const toolbar = (
     <DrawToolbar
       tool={state.tool}
@@ -1045,7 +1097,8 @@ export function DrawEditor({
       shapeVariant={state.shapeVariant}
       lineVariant={state.lineVariant}
       color={state.color}
-      strokeWidth={state.strokeWidth}
+      strokeWidth={strokeBase(state)}
+      sizeStep={sizeTarget ? unitSizeStep(state.shapes, sizeTarget) : null}
       palette={palette}
       hasSelection={state.selectedIds.length > 0}
       groupAction={groupActionFor(state.shapes, state.selectedIds)}

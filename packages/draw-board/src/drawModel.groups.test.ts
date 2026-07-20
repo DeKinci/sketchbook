@@ -20,6 +20,8 @@ import {
   normalizeGroups,
   boundingBox,
   scaleStepTarget,
+  slotTargetStep,
+  unitSizeStep,
   type DrawState,
   type BoxShape,
   type TextShape,
@@ -588,6 +590,88 @@ describe("size-control scale mode (scaleStepTarget + stepped scaleUnit)", () => 
     // And the press is undoable back to the exact pre-press geometry.
     s = drawReducer(s, { type: "undo" });
     expect(unitBoundsOf(s.shapes, "g1")).toEqual(b0);
+  });
+});
+
+describe("sizeStep — the unit's remembered size-control position", () => {
+  /** The editor's applySizeStep: move to an ABSOLUTE step — factor from the
+   *  current stamp, scale about the unit center, stamp, one gesture. */
+  const press = (s: DrawState, toStep: number): DrawState => {
+    const ids = scaleStepTarget(s.shapes, s.selectedIds)!;
+    const cur = unitSizeStep(s.shapes, ids);
+    const b = unitBoundsOf(s.shapes, rootUnitKeyOf(byId(s, ids[0])))!;
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, {
+      type: "scaleUnit",
+      ids,
+      factor: Math.pow(1.2, toStep - cur),
+      origin: { x: b.x + b.width / 2, y: b.y + b.height / 2 },
+    });
+    s = drawReducer(s, { type: "stampSizeStep", ids, step: toStep });
+    return drawReducer(s, { type: "endGesture" });
+  };
+
+  it("stamps uniformly with the scale as ONE undo entry; step 0 stores as absent", () => {
+    let s = seeded([box("a", { x: 100, y: 100 }), box("b", { x: 200, y: 100 })]);
+    s = grouped(s, ["a", "b"], "g1");
+    const past0 = s.past.length;
+    s = press(s, 1);
+    expect(byId(s, "a").sizeStep).toBe(1);
+    expect(byId(s, "b").sizeStep).toBe(1);
+    expect(unitSizeStep(s.shapes, ["b"])).toBe(1);
+    expect(s.past.length).toBe(past0 + 1); // geometry + stamp are one entry
+    s = drawReducer(s, { type: "undo" });
+    expect(byId(s, "a").sizeStep).toBeUndefined();
+    expect((byId(s, "a") as BoxShape).width).toBe(40); // exact pre-press geometry
+    s = drawReducer(s, { type: "redo" });
+    s = press(s, 0); // back to natural
+    expect(byId(s, "a").sizeStep).toBeUndefined(); // canonical absent, not 0
+  });
+
+  it("mid restores the exact natural size from deep in the extended zone", () => {
+    let s = seeded([box("a", { x: 100, y: 100 }), box("b", { x: 200, y: 100 })]);
+    s = grouped(s, ["a", "b"], "g1");
+    const b0 = unitBoundsOf(s.shapes, "g1")!;
+    for (const step of [1, 2, 3]) s = press(s, step); // three "large" presses
+    expect(unitBoundsOf(s.shapes, "g1")!.width).toBeCloseTo(b0.width * 1.2 ** 3, 5);
+    s = press(s, slotTargetStep(unitSizeStep(s.shapes, ["a"]), 1)); // mid
+    const b1 = unitBoundsOf(s.shapes, "g1")!;
+    expect(b1.width).toBeCloseTo(b0.width, 5);
+    expect(b1.height).toBeCloseTo(b0.height, 5);
+    expect(b1.x).toBeCloseTo(b0.x, 5);
+    expect(byId(s, "a").strokeWidth).toBeCloseTo(3, 5);
+  });
+
+  it("grouping strips members' stale stamps (a fresh group is natural size)", () => {
+    let s = seeded([image("i", { x: 100, y: 100, sizeStep: 2 }), box("c", { x: 200, y: 100 })]);
+    s = grouped(s, ["i", "c"], "g1");
+    expect(byId(s, "i").sizeStep).toBeUndefined();
+    expect(unitSizeStep(s.shapes, ["c"])).toBe(0);
+  });
+
+  it("ungroup strips the stamps — freed shapes keep their size, rebased as natural", () => {
+    let s = seeded([box("a", { x: 100, y: 100 }), box("b", { x: 200, y: 100 })]);
+    s = grouped(s, ["a", "b"], "g1");
+    s = press(s, 2);
+    const w = (byId(s, "a") as BoxShape).width;
+    s = drawReducer(s, { type: "ungroup" });
+    expect(byId(s, "a").groupPath).toBeUndefined();
+    expect(byId(s, "a").sizeStep).toBeUndefined();
+    expect((byId(s, "a") as BoxShape).width).toBeCloseTo(w, 5); // geometry untouched
+  });
+
+  it("normalizeGroups heals a stamp stranded on a loose non-image", () => {
+    const healed = normalizeGroups([
+      box("loose", { sizeStep: 3 }),
+      box("solo", { x: 100, y: 100, sizeStep: 1, groupPath: ["gone"] }), // singleton → collapses
+      image("img", { x: 200, y: 200, sizeStep: 2 }),
+      box("m1", { x: 300, y: 10, sizeStep: 1, groupPath: ["g"] }),
+      box("m2", { x: 300, y: 100, sizeStep: 1, groupPath: ["g"] }),
+    ]);
+    expect(healed.find((sh) => sh.id === "loose")!.sizeStep).toBeUndefined();
+    expect(healed.find((sh) => sh.id === "solo")!.sizeStep).toBeUndefined();
+    expect(healed.find((sh) => sh.id === "img")!.sizeStep).toBe(2); // a loose image legitimately remembers
+    expect(healed.find((sh) => sh.id === "m1")!.sizeStep).toBe(1); // group members keep theirs
   });
 });
 
