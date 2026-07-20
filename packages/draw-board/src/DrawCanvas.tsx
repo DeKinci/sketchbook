@@ -485,6 +485,32 @@ export function DrawCanvas({
     return bestStroke ?? bestArea;
   };
 
+  /** Gap-click fallback for the SELECT tool: a group presents as its whole
+   *  AABB, so a click that hits no shape but lands inside a group's box still
+   *  grabs the group. Returns the member NEAREST the point — every downstream
+   *  path (select-normalize, toggleSelect, moveClusterIds) is unit-grained from
+   *  any member, so the representative only has to belong to the unit. Direct
+   *  shape hits always win over this (callers try {@link smallestAt} first),
+   *  and the eraser/dblclick paths stay item-grained on purpose. */
+  const nearestGroupMemberAt = (pt: { x: number; y: number }): Shape | null => {
+    const key = units.smallestGroupAt(pt);
+    if (!key) return null;
+    let best: Shape | null = null;
+    let bestD = Infinity;
+    for (const sh of shapes) {
+      if (units.rootOf(sh.id) !== key) continue;
+      const b = boundingBox(sh);
+      const dx = Math.max(b.x - pt.x, 0, pt.x - (b.x + b.width));
+      const dy = Math.max(b.y - pt.y, 0, pt.y - (b.y + b.height));
+      const d = dx * dx + dy * dy;
+      if (d < bestD) {
+        bestD = d;
+        best = sh;
+      }
+    }
+    return best;
+  };
+
   // ── Stage-level pointer (pan / draw / select+move / marquee / erase) ────────
   /** Settle whatever content gesture is live — the ONE teardown path, used by
    *  mouseup, by an outside-release detected on re-entry (buttons gone), and by
@@ -560,9 +586,12 @@ export function DrawCanvas({
       // A press on a Transformer handle resizes — leave it to the Transformer.
       const parent = e.target.getParent() as Konva.Node | null;
       if (parent && parent.getClassName?.() === "Transformer") return;
-      const hit = smallestAt(logicalPointer(e));
+      const p = logicalPointer(e);
+      const direct = smallestAt(p);
+      // Direct shape hits win; a miss inside a group's AABB still grabs the
+      // group (gap-click — the group acts as its whole box, not a bag of items).
+      const hit = direct ?? nearestGroupMemberAt(p);
       if (!hit) {
-        const p = logicalPointer(e);
         marqueeStart.current = p;
         setMarquee({ x: p.x, y: p.y, width: 0, height: 0 });
         dispatch({ type: "select", ids: [] });
@@ -575,10 +604,11 @@ export function DrawCanvas({
       }
       // ⌘/Ctrl-click a grouped member → DEEP-SELECT it (restricted edits only;
       // no move gesture — members never move individually). On a loose shape the
-      // modifier means nothing — fall through to a plain select.
+      // modifier means nothing — fall through to a plain select. DIRECT hits
+      // only: a gap-click has no member under the cursor to deep-select.
       const metaKey = "metaKey" in e.evt && (e.evt.metaKey || e.evt.ctrlKey);
-      if (metaKey && units.isGroupedMember(hit.id)) {
-        dispatch({ type: "select", ids: [hit.id], deep: true });
+      if (metaKey && direct && units.isGroupedMember(direct.id)) {
+        dispatch({ type: "select", ids: [direct.id], deep: true });
         return;
       }
       // Clicking inside an existing multi-selection keeps it (drag the group);
@@ -592,8 +622,7 @@ export function DrawCanvas({
       // Followers ride by INCLUSION: the size-gated attach cluster ("largest drags
       // smallest") plus every dragged container's contents (moveClusterIds folds in
       // containment). The reducer freezes anything left out of this set.
-      const down = logicalPointer(e);
-      moveRef.current = { last: down, downAt: down, ids: moveClusterIds(shapes, ids) };
+      moveRef.current = { last: p, downAt: p, ids: moveClusterIds(shapes, ids) };
       return;
     }
     const { x, y } = logicalPointer(e);

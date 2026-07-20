@@ -81,6 +81,26 @@ export class UnitIndex {
     return !!entry?.shape.groupPath?.length;
   }
 
+  /** Smallest GROUP unit (multi-member — loose singletons never qualify) whose
+   *  union AABB contains the point, or null. The gap-click fallback: a group
+   *  presents as its whole box, so a click landing BETWEEN members (hitting no
+   *  shape) still finds the group. Smallest-wins mirrors the shape hit test. */
+  smallestGroupAt(pt: { x: number; y: number }): string | null {
+    let bestKey: string | null = null;
+    let bestArea = Infinity;
+    for (const [key, set] of this.members) {
+      if (set.size < 2) continue; // rootKey = own id ⇒ singleton ⇒ not a group
+      const b = this.boundsOf(key);
+      if (!b || pt.x < b.x || pt.x > b.x + b.width || pt.y < b.y || pt.y > b.y + b.height) continue;
+      const area = b.width * b.height;
+      if (area < bestArea) {
+        bestArea = area;
+        bestKey = key;
+      }
+    }
+    return bestKey;
+  }
+
   /** Union AABB of a root unit's members (cached until a member changes). */
   boundsOf(rootKey: string): Box | null {
     const cached = this.bounds.get(rootKey);

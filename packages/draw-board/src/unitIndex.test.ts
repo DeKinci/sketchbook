@@ -55,4 +55,26 @@ describe("UnitIndex", () => {
     expect(idx.rootOf("b")).toBeUndefined();
     expect(idx.membersOf("b").size).toBe(0);
   });
+
+  it("smallestGroupAt: finds the group whose AABB contains a point, smallest wins, singletons never", () => {
+    const idx = new UnitIndex();
+    idx.update([
+      // Group g spans (10,10)-(150,140) with a GAP between its members.
+      box("a", { groupPath: ["g"] }),
+      box("b", { x: 110, y: 110, groupPath: ["g"] }),
+      // Nested-in-AABB smaller group h inside g's box: (60,60)-(100,100).
+      box("h1", { x: 60, y: 60, width: 15, height: 15, groupPath: ["h"] }),
+      box("h2", { x: 85, y: 85, width: 15, height: 15, groupPath: ["h"] }),
+      // A loose shape far away — its singleton unit must never match.
+      box("c", { x: 500, y: 500 }),
+    ]);
+    // In g's gap (but outside h's box) → g.
+    expect(idx.smallestGroupAt({ x: 130, y: 30 })).toBe("g");
+    // Inside BOTH boxes → the smaller group wins.
+    expect(idx.smallestGroupAt({ x: 80, y: 80 })).toBe("h");
+    // Over the loose shape → no group (singleton units don't qualify).
+    expect(idx.smallestGroupAt({ x: 510, y: 510 })).toBeNull();
+    // Empty canvas → null.
+    expect(idx.smallestGroupAt({ x: 900, y: 900 })).toBeNull();
+  });
 });

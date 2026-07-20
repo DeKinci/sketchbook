@@ -520,6 +520,29 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     // And the healed groups BEHAVE: dragging a moved its whole unit (b rode).
     expect(b.x).toBeCloseTo(a.x + 60, 0);
   });
+
+  test("a group is selectable by its AABB: clicking/dragging the GAP between members grabs the whole group", async ({ page }) => {
+    // Two members with an empty corridor between them (200..300 hits neither).
+    await openSeeded(page, [
+      rect("a", 100, 100, 80, 60, { groupPath: ["g"] }),
+      rect("b", 320, 100, 80, 60, { groupPath: ["g"] }),
+      rect("loose", 100, 400, 80, 60),
+    ]);
+    // Click in the gap → the whole group selects (ungroup action available).
+    const gap = await toScreen(page, { x: 250, y: 130 });
+    await page.mouse.click(gap.x, gap.y);
+    await expect(page.getByRole("button", { name: "Ungroup (⌘G)" })).toBeEnabled();
+    // Drag FROM the gap → the whole group moves rigidly; loose stays put.
+    await dragLogical(page, { x: 250, y: 130 }, { x: 290, y: 180 });
+    await expect.poll(async () => (await shape(page, "a")).x).toBeCloseTo(140, 0);
+    expect((await shape(page, "b")).x).toBeCloseTo(360, 0);
+    expect((await shape(page, "b")).y).toBeCloseTo(150, 0);
+    expect((await shape(page, "loose")).x).toBe(100);
+    // OUTSIDE the AABB → still a marquee-from-empty (deselects; no accidental grab).
+    const out = await toScreen(page, { x: 700, y: 130 });
+    await page.mouse.click(out.x, out.y);
+    await expect(page.getByRole("button", { name: "Group selection (⌘G)" })).toBeDisabled();
+  });
 });
 
 test("export menu stacks ABOVE the minimap (hit-test in the overlap)", async ({ page }) => {
