@@ -19,7 +19,11 @@ import {
   isSelectable,
   labelFont,
   normalizeGroups,
+  scaleStepTarget,
+  stepStroke,
   toDoc,
+  unitBoundsOf,
+  rootUnitKeyOf,
   STROKE_WIDTHS,
   CANVAS_BG_DARK,
   CONTRAST_INK,
@@ -737,13 +741,61 @@ export function DrawEditor({
 
   // -/= step size, Tab cycles color — same as the toolbar controls (apply to the
   // selection if any, else change the active value via the reducer).
+  // Two meanings, one control: with a whole GROUP (or a lone image) selected the
+  // step SCALES it proportionally (stroke width is either meaningless or should
+  // scale with everything else); otherwise it walks the stroke ladder — one rung
+  // per press, past the three visible slots into the secret sizes.
+  const SCALE_STEP = 1.2;
   const stepSize = useCallback(
     (dir: number) => {
-      const idx = STROKE_WIDTHS.indexOf(stateRef.current.strokeWidth as (typeof STROKE_WIDTHS)[number]);
-      const ni = Math.min(STROKE_WIDTHS.length - 1, Math.max(0, (idx < 0 ? 0 : idx) + dir));
-      dispatch({ type: "setStrokeWidth", width: STROKE_WIDTHS[ni] });
+      const s = stateRef.current;
+      const target = scaleStepTarget(s.shapes, s.selectedIds);
+      if (target) {
+        const b = unitBoundsOf(s.shapes, rootUnitKeyOf(s.shapes.find((sh) => sh.id === target[0])!));
+        if (!b) return;
+        const factor = dir > 0 ? SCALE_STEP : 1 / SCALE_STEP;
+        if (factor < 1 && Math.min(b.width, b.height) * factor < 8) return; // shrink floor
+        dispatch({ type: "beginGesture" });
+        dispatch({
+          type: "scaleUnit",
+          ids: target,
+          factor,
+          origin: { x: b.x + b.width / 2, y: b.y + b.height / 2 }, // about its center
+          distScale: distScale(),
+        });
+        dispatch({ type: "endGesture" }); // one undo entry per press
+        return;
+      }
+      dispatch({ type: "setStrokeWidth", width: stepStroke(s.strokeWidth, dir) });
     },
-    [dispatch]
+    [dispatch, distScale]
+  );
+  /** A visible size dot was clicked. Stroke mode: mid resets immediately; an
+   *  extreme SELECTS its slot from the normal zone, but from at-or-beyond it
+   *  keeps stepping further out (the secret sizes), and from the OPPOSITE
+   *  secret zone walks back one rung at a time. Scale mode (group/image
+   *  selected): the extremes step the scale; mid has no reset point. */
+  const onSizeSlot = useCallback(
+    (slot: 0 | 1 | 2) => {
+      const s = stateRef.current;
+      if (scaleStepTarget(s.shapes, s.selectedIds)) {
+        if (slot !== 1) stepSize(slot === 2 ? 1 : -1);
+        return;
+      }
+      const w = s.strokeWidth;
+      const width =
+        slot === 1
+          ? STROKE_WIDTHS[1]
+          : slot === 2
+            ? w >= STROKE_WIDTHS[2] || w < STROKE_WIDTHS[0]
+              ? stepStroke(w, 1)
+              : STROKE_WIDTHS[2]
+            : w <= STROKE_WIDTHS[0] || w > STROKE_WIDTHS[2]
+              ? stepStroke(w, -1)
+              : STROKE_WIDTHS[0];
+      dispatch({ type: "setStrokeWidth", width });
+    },
+    [dispatch, stepSize]
   );
   const cycleColor = useCallback(
     (dir: number) => {
@@ -1008,7 +1060,7 @@ export function DrawEditor({
       onTool={(tool) => dispatch({ type: "setTool", tool })}
       onArmCluster={(cluster) => dispatch({ type: "armCluster", cluster })}
       onColor={(color) => dispatch({ type: "setColor", color })}
-      onWidth={(width) => dispatch({ type: "setStrokeWidth", width })}
+      onSizeSlot={onSizeSlot}
       onUndo={() => dispatch({ type: "undo" })}
       onRedo={() => dispatch({ type: "redo" })}
       onEraser={onEraser}

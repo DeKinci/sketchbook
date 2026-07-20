@@ -544,6 +544,52 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     await expect(page.getByRole("button", { name: "Group selection (⌘G)" })).toBeDisabled();
   });
 
+  test("secret size ladder + size dots scale a selected group/image proportionally", async ({ page }) => {
+    const PNG1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    await openSeeded(page, [
+      rect("solo", 100, 100, 80, 60),
+      rect("a", 300, 100, 80, 60, { groupPath: ["g"] }),
+      rect("b", 420, 100, 80, 60, { groupPath: ["g"] }),
+      { id: "img", type: "image", stroke: "#000", strokeWidth: 3, x: 100, y: 350, width: 60, height: 40, dataBase64: PNG1, mediaType: "image/png" },
+    ]);
+    const clickAt = async (pt: { x: number; y: number }) => {
+      const s = await toScreen(page, pt);
+      await page.mouse.click(s.x, s.y);
+    };
+    // — Stroke mode: `=` walks past the visible top into the secret sizes.
+    await clickAt({ x: 140, y: 130 }); // select solo (stroke 3)
+    for (let i = 0; i < 3; i++) await page.keyboard.press("=");
+    await expect.poll(async () => (await shape(page, "solo")).strokeWidth).toBe(14); // 3→6→10→14 (secret)
+    // Toolbar: re-pressing the LARGE dot keeps going…
+    await page.getByRole("button", { name: "Stroke 10px" }).click();
+    await expect.poll(async () => (await shape(page, "solo")).strokeWidth).toBe(20);
+    // …the OPPOSITE extreme walks back one rung…
+    await page.getByRole("button", { name: "Stroke 3px" }).click();
+    await expect.poll(async () => (await shape(page, "solo")).strokeWidth).toBe(14);
+    // …and MID resets immediately.
+    await page.getByRole("button", { name: "Stroke 6px" }).click();
+    await expect.poll(async () => (await shape(page, "solo")).strokeWidth).toBe(6);
+    // — Scale mode: the same keys/dots scale a selected GROUP proportionally.
+    await clickAt({ x: 340, y: 130 }); // select the whole group
+    await page.keyboard.press("=");
+    await expect.poll(async () => (await shape(page, "a")).width).toBeCloseTo(96, 0); // 80×1.2
+    expect((await shape(page, "a")).strokeWidth).toBeCloseTo(3.6, 3); // stroke rides the scale
+    expect((await shape(page, "b")).width).toBeCloseTo(96, 0);
+    // The union center stayed put (scaled about the group's center).
+    const a1 = await shape(page, "a");
+    const b1 = await shape(page, "b");
+    expect((a1.x + (b1.x + b1.width)) / 2).toBeCloseTo((300 + 500) / 2, 0);
+    // Large DOT steps the scale too; `-` steps back down.
+    await page.getByRole("button", { name: "Stroke 10px" }).click();
+    await expect.poll(async () => (await shape(page, "a")).width).toBeCloseTo(115.2, 0);
+    await page.keyboard.press("-");
+    await expect.poll(async () => (await shape(page, "a")).width).toBeCloseTo(96, 0);
+    // — A lone IMAGE scales as well (stroke is meaningless there).
+    await clickAt({ x: 130, y: 370 });
+    await page.keyboard.press("=");
+    await expect.poll(async () => (await shape(page, "img")).width).toBeCloseTo(72, 0);
+  });
+
   test("opening the text editor keeps the glyphs in place (field line metrics match the canvas)", async ({ page }) => {
     await openSeeded(page, [{ id: "t1", type: "text", stroke: "#e5484d", strokeWidth: 3, x: 100, y: 100, text: "Hello", fontSize: 24 }]);
     // Clip around the text's LEFT half (excludes the caret, which parks after

@@ -177,10 +177,32 @@ export const DEFAULT_STROKE_WIDTH = 3;
 /** Stroke widths for shapes; for TEXT these same three slots mean small/medium/
  *  large font size (see {@link fontForStroke}). */
 export const STROKE_WIDTHS = [3, 6, 10] as const;
-export const TEXT_SIZES: Record<number, number> = { 3: 18, 6: 28, 10: 44 };
+/** The FULL size ladder: the three visible slots plus "secret" levels past each
+ *  end — the toolbar only ever shows three dots, but -/= (and re-pressing an
+ *  extreme dot) keeps walking this ladder. Values off the ladder (legacy docs)
+ *  step from the nearest rung. */
+export const STROKE_LADDER = [1, 2, 3, 6, 10, 14, 20, 28] as const;
+export const TEXT_SIZES: Record<number, number> = { 1: 10, 2: 14, 3: 18, 6: 28, 10: 44, 14: 58, 20: 76, 28: 100 };
 /** Generic small/medium/large text size for a stroke slot (not stroke-scaled). */
 export function fontForStroke(w: number): number {
   return TEXT_SIZES[w] ?? 24;
+}
+/** One ladder step from `w` (dir ±1), clamped at the secret ends. */
+export function stepStroke(w: number, dir: number): number {
+  let idx = 0;
+  for (let i = 1; i < STROKE_LADDER.length; i++) {
+    if (Math.abs(STROKE_LADDER[i] - w) < Math.abs(STROKE_LADDER[idx] - w)) idx = i;
+  }
+  return STROKE_LADDER[Math.max(0, Math.min(STROKE_LADDER.length - 1, idx + (dir > 0 ? 1 : -1)))];
+}
+/** Which of the three visible dots represents `w` (secret sizes light up the
+ *  nearest extreme — whose dot then grows/shrinks with the real value). */
+export function sizeSlotOf(w: number): 0 | 1 | 2 {
+  let slot: 0 | 1 | 2 = 0;
+  (STROKE_WIDTHS as readonly number[]).forEach((v, i) => {
+    if (Math.abs(v - w) < Math.abs(STROKE_WIDTHS[slot] - w)) slot = i as 0 | 1 | 2;
+  });
+  return slot;
 }
 /** The content colors (user's drawing colors — NOT UI chrome; the design-token
  *  rule governs chrome, these are pixels the user paints). The palette shown in
@@ -760,6 +782,23 @@ export function groupActionFor(shapes: Shape[], selectedIds: string[]): "group" 
   const members = shapes.filter((sh) => rootUnitKeyOf(sh) === key);
   if (members.length !== sel.size) return null; // proper subset — deep-select, never ungroups
   return members[0].groupPath?.length ? "ungroup" : null; // a lone loose shape isn't a group
+}
+
+/** What the size controls should SCALE instead of restroke: the member ids when
+ *  the selection exactly covers ONE group unit (whole-unit proportional scale) or
+ *  is exactly one loose IMAGE (stroke is meaningless there) — else null and the
+ *  controls keep their stroke-width meaning. Deep-selects (proper subsets) are
+ *  null by construction: members never resize individually. */
+export function scaleStepTarget(shapes: Shape[], selectedIds: string[]): string[] | null {
+  if (selectedIds.length === 0) return null;
+  const sel = new Set(selectedIds);
+  const keys = new Set<string>();
+  for (const sh of shapes) if (sel.has(sh.id)) keys.add(rootUnitKeyOf(sh));
+  if (keys.size !== 1) return null;
+  const members = shapes.filter((sh) => keys.has(rootUnitKeyOf(sh)));
+  if (members.length !== sel.size) return null; // deep-select subset
+  if (members.length > 1) return members.map((sh) => sh.id); // a whole group
+  return members[0].type === "image" ? [members[0].id] : null; // a lone image
 }
 
 /** Undirected attach adjacency at ROOT-UNIT grain: nodes are root unit keys; any

@@ -22,6 +22,9 @@ import {
   toDoc,
   canUndo,
   canRedo,
+  stepStroke,
+  sizeSlotOf,
+  fontForStroke,
   PALETTE,
   CONTRAST_INK,
   isContrastInk,
@@ -57,6 +60,39 @@ const text = (id: string, over: Partial<TextShape> = {}): TextShape => ({
 });
 
 const seeded = (shapes: Shape[]): DrawState => initialDrawState({ shapes, width: 400, height: 300 });
+
+describe("secret size ladder (stepStroke / sizeSlotOf / fontForStroke)", () => {
+  it("steps the full ladder one rung per press, clamped at the secret ends", () => {
+    // Up from default 3 all the way past the visible top.
+    const up: number[] = [];
+    let w = 3;
+    for (let i = 0; i < 7; i++) up.push((w = stepStroke(w, 1)));
+    expect(up).toEqual([6, 10, 14, 20, 28, 28, 28]); // clamps at 28
+    // Down past the visible bottom.
+    const down: number[] = [];
+    w = 6;
+    for (let i = 0; i < 5; i++) down.push((w = stepStroke(w, -1)));
+    expect(down).toEqual([3, 2, 1, 1, 1]); // clamps at 1
+  });
+
+  it("off-ladder legacy widths step from the nearest rung", () => {
+    expect(stepStroke(4, 1)).toBe(6); // nearest 3 → up
+    expect(stepStroke(5, -1)).toBe(3); // nearest 6 → down
+    expect(stepStroke(12, 1)).toBe(14);
+  });
+
+  it("sizeSlotOf lights the nearest visible dot — secrets land on the extremes", () => {
+    expect([1, 2, 3].map(sizeSlotOf)).toEqual([0, 0, 0]);
+    expect(sizeSlotOf(6)).toBe(1);
+    expect([10, 14, 20, 28].map(sizeSlotOf)).toEqual([2, 2, 2, 2]);
+  });
+
+  it("fontForStroke covers the secret rungs (text keeps sizing past S/M/L)", () => {
+    expect(fontForStroke(1)).toBeLessThan(fontForStroke(3));
+    expect(fontForStroke(28)).toBeGreaterThan(fontForStroke(10));
+    expect(fontForStroke(7)).toBe(24); // off-ladder fallback unchanged
+  });
+});
 
 describe("drawReducer — draw gesture", () => {
   it("draws a rect and (from the cursor base) auto-selects it, one history entry", () => {

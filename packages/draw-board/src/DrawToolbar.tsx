@@ -18,7 +18,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { IconButton } from "./IconButton.tsx";
-import { CONTRAST_INK, STROKE_WIDTHS, SHAPE_VARIANTS, LINE_VARIANTS, type Tool, type ShapeVariant, type LineVariant } from "./drawModel.ts";
+import { CONTRAST_INK, STROKE_WIDTHS, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type Tool, type ShapeVariant, type LineVariant } from "./drawModel.ts";
 
 /** The two persistent tools live in a segmented "well" that slides to whichever
  *  is armed; the one-use tools (shape / connector clusters + text) follow it. */
@@ -114,7 +114,7 @@ export function DrawToolbar({
   onTool,
   onArmCluster,
   onColor,
-  onWidth,
+  onSizeSlot,
   onUndo,
   onRedo,
   onEraser,
@@ -145,7 +145,10 @@ export function DrawToolbar({
   /** Arm a one-use cluster (select its variant, or cycle if already armed). */
   onArmCluster: (cluster: "shape" | "line") => void;
   onColor: (c: string) => void;
-  onWidth: (w: number) => void;
+  /** A size dot was pressed (0 small · 1 mid · 2 large). The EDITOR owns the
+   *  semantics (secret-ladder stepping / group scaling) — the toolbar only
+   *  reports which dot. */
+  onSizeSlot: (slot: 0 | 1 | 2) => void;
   onUndo: () => void;
   onRedo: () => void;
   /** Eraser: delete the current selection, or (if none) arm the erase tool. */
@@ -163,7 +166,10 @@ export function DrawToolbar({
 }) {
   const persistentActive = tool === "select" || tool === "pen";
   const colorIdx = palette.findIndex((c) => c.toLowerCase() === color.toLowerCase());
-  const sizeIdx = STROKE_WIDTHS.indexOf(strokeWidth as (typeof STROKE_WIDTHS)[number]);
+  // The well sits on the nearest visible slot even for SECRET sizes (past the
+  // three shown); the active slot's dot then renders at the REAL size so the
+  // secret level stays legible. Repeated presses of an extreme keep stepping.
+  const sizeIdx = sizeSlotOf(strokeWidth);
   return (
     <div className="relative flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-t border-ink-600 px-2 py-1.5 max-md:[zoom:1.04]">
       {/* Upload image — pinned left on desktop (the mobile copy lives in the
@@ -307,28 +313,42 @@ export function DrawToolbar({
         })}
       </div>
 
-{/* Stroke / text size — same sliding accent well. */}
+{/* Stroke / text size — same sliding accent well. Three dots, more sizes: the
+    extremes keep stepping when re-pressed (secret levels past the visible
+    three; the active dot grows/shrinks with the REAL size), mid resets, and
+    with a group or image selected the same dots scale IT proportionally. */}
       <div className="relative flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5">
-        {sizeIdx >= 0 && (
-          <span
-            aria-hidden
-            className="pointer-events-none absolute inset-y-0.5 left-0.5 w-7 rounded-full bg-accent-600/25 ring-1 ring-inset ring-accent-500/40 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]"
-            style={{ transform: `translateX(${sizeIdx * 100}%)` }}
-          />
-        )}
-        {STROKE_WIDTHS.map((w) => (
-          <button
-            key={w}
-            type="button"
-            aria-label={`Stroke ${w}px`}
-            aria-pressed={strokeWidth === w}
-            title={`Size ${w === STROKE_WIDTHS[0] ? "small" : w === STROKE_WIDTHS[STROKE_WIDTHS.length - 1] ? "large" : "medium"} (-/=)`}
-            onClick={() => onWidth(w)}
-            className="relative z-10 flex h-7 w-7 items-center justify-center rounded-full"
-          >
-            <span className="rounded-full bg-ink-100" style={{ width: w + 2, height: w + 2 }} />
-          </button>
-        ))}
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0.5 left-0.5 w-7 rounded-full bg-accent-600/25 ring-1 ring-inset ring-accent-500/40 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]"
+          style={{ transform: `translateX(${sizeIdx * 100}%)` }}
+        />
+        {STROKE_WIDTHS.map((w, i) => {
+          const active = sizeIdx === i;
+          // The active dot mirrors the real size (clamped to the button); the
+          // spring makes a repeated press visibly grow/shrink it.
+          const dot = active ? Math.max(3, Math.min(22, strokeWidth + 2)) : w + 2;
+          return (
+            <button
+              key={w}
+              type="button"
+              aria-label={`Stroke ${w}px`}
+              aria-pressed={active}
+              title={
+                i === 1
+                  ? "Size medium — resets (-/=)"
+                  : `Size ${i === 0 ? "small" : "large"} (-/=) — press again for ${i === 0 ? "smaller" : "larger"}`
+              }
+              onClick={() => onSizeSlot(i as 0 | 1 | 2)}
+              className="relative z-10 flex h-7 w-7 items-center justify-center rounded-full"
+            >
+              <span
+                className="rounded-full bg-ink-100"
+                style={{ width: dot, height: dot, transition: `width 220ms ${SPRING}, height 220ms ${SPRING}` }}
+              />
+            </button>
+          );
+        })}
       </div>
       </div>
 

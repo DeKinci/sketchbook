@@ -19,6 +19,7 @@ import {
   clonePastedShapes,
   normalizeGroups,
   boundingBox,
+  scaleStepTarget,
   type DrawState,
   type BoxShape,
   type TextShape,
@@ -552,6 +553,41 @@ describe("scaleUnit", () => {
     const ddy = Math.max(a.y - ey, 0, ey - (a.y + a.height));
     expect(Math.hypot(ddx, ddy)).toBeLessThanOrEqual(4.0001);
     expect(ex).not.toBeCloseTo(96, 1); // it moved off the pre-scale border
+  });
+});
+
+describe("size-control scale mode (scaleStepTarget + stepped scaleUnit)", () => {
+  it("targets a fully-selected group or a lone image; never deep subsets, loose shapes, or multi-unit picks", () => {
+    let s = seeded([box("a", { x: 100, y: 100 }), box("b", { x: 200, y: 100 }), box("c", { x: 300, y: 100 }), image("i", { x: 100, y: 300 })]);
+    s = grouped(s, ["a", "b"], "g1");
+    expect(scaleStepTarget(s.shapes, ["a", "b"])?.sort()).toEqual(["a", "b"]); // whole group
+    expect(scaleStepTarget(s.shapes, ["a"])).toBeNull(); // deep subset — members never resize
+    expect(scaleStepTarget(s.shapes, ["i"])).toEqual(["i"]); // lone image (stroke is meaningless)
+    expect(scaleStepTarget(s.shapes, ["c"])).toBeNull(); // loose rect keeps stroke semantics
+    expect(scaleStepTarget(s.shapes, ["a", "b", "c"])).toBeNull(); // multi-unit selection
+    expect(scaleStepTarget(s.shapes, [])).toBeNull();
+  });
+
+  it("a keyboard step (begin → scaleUnit ×1.2 about center → end) scales the whole group proportionally, one undo entry per press", () => {
+    let s = seeded([box("a", { x: 100, y: 100, width: 40, height: 30 }), box("b", { x: 200, y: 100, width: 40, height: 30 })]);
+    s = grouped(s, ["a", "b"], "g1");
+    const b0 = unitBoundsOf(s.shapes, "g1")!;
+    const origin = { x: b0.x + b0.width / 2, y: b0.y + b0.height / 2 };
+    const past0 = s.past.length;
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "scaleUnit", ids: scaleStepTarget(s.shapes, s.selectedIds)!, factor: 1.2, origin });
+    s = drawReducer(s, { type: "endGesture" });
+    const b1 = unitBoundsOf(s.shapes, "g1")!;
+    expect(b1.width).toBeCloseTo(b0.width * 1.2, 5);
+    expect(b1.height).toBeCloseTo(b0.height * 1.2, 5);
+    // About the center: the union box center stays put.
+    expect(b1.x + b1.width / 2).toBeCloseTo(origin.x, 5);
+    expect(b1.y + b1.height / 2).toBeCloseTo(origin.y, 5);
+    expect(byId(s, "a").strokeWidth).toBeCloseTo(3.6, 5); // proportional, not a slot jump
+    expect(s.past.length).toBe(past0 + 1); // one entry per press
+    // And the press is undoable back to the exact pre-press geometry.
+    s = drawReducer(s, { type: "undo" });
+    expect(unitBoundsOf(s.shapes, "g1")).toEqual(b0);
   });
 });
 
