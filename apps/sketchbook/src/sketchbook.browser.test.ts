@@ -364,6 +364,164 @@ test.describe("clipboard fallback", () => {
   });
 });
 
+test.describe("shape grouping (⌘G end-to-end)", () => {
+  test.use({ permissions: ["clipboard-read", "clipboard-write"] });
+
+  type SeedShape = Record<string, unknown>;
+  const rect = (id: string, x: number, y: number, width = 80, height = 60, over: SeedShape = {}): SeedShape => ({
+    id,
+    type: "rect",
+    stroke: "#e5484d",
+    strokeWidth: 3,
+    x,
+    y,
+    width,
+    height,
+    ...over,
+  });
+
+  /** Boot the app on a seeded single-drawing store (precise geometry beats
+   *  fragile mouse-drawing for glue/scale assertions). */
+  async function openSeeded(page: Page, shapes: SeedShape[]) {
+    await page.addInitScript((list: SeedShape[]) => {
+      window.localStorage.setItem(
+        "sketchbook:drawings",
+        JSON.stringify([{ id: "seeded", name: "Seeded", doc: { shapes: list, width: 800, height: 600 }, createdAt: 1 }])
+      );
+    }, shapes);
+    await open(page);
+    // Select tool (the board opens in pen — a stray drag must not ink).
+    await page.getByRole("button", { name: "Cursor — select / move (Tab)" }).click();
+  }
+
+  /** Logical→screen through the live camera (the board may open fitted). */
+  async function toScreen(page: Page, pt: { x: number; y: number }) {
+    const cam = await page.evaluate(() => {
+      const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+      return { x: s.x(), y: s.y(), scale: s.scaleX() };
+    });
+    const box = (await page.locator(".konvajs-content canvas").first().boundingBox())!;
+    return { x: box.x + pt.x * cam.scale + cam.x, y: box.y + pt.y * cam.scale + cam.y };
+  }
+
+  async function dragLogical(page: Page, from: { x: number; y: number }, to: { x: number; y: number }) {
+    const a = await toScreen(page, from);
+    const b = await toScreen(page, to);
+    await page.mouse.move(a.x, a.y);
+    await page.mouse.down();
+    await page.mouse.move(b.x, b.y, { steps: 8 });
+    await page.mouse.up();
+  }
+
+  const doc = async (page: Page) => (await stored(page))[0].doc as { shapes: Record<string, any>[] };
+  const shape = async (page: Page, id: string) => (await doc(page)).shapes.find((sh) => sh.id === id)!;
+
+  test("group → drag whole → glue in → scale via proxy (inbound re-judged) → deep-edit → paste remap → ungroup", async ({ page }) => {
+    test.setTimeout(60_000);
+    await openSeeded(page, [rect("r1", 100, 100), rect("r2", 220, 100), rect("out", 400, 320, 60, 40)]);
+
+    // Marquee r1+r2, ⌘G — both members carry the same fresh gid; out stays loose.
+    await dragLogical(page, { x: 60, y: 60 }, { x: 320, y: 200 });
+    await page.keyboard.press("Control+g");
+    await expect.poll(async () => (await shape(page, "r1")).groupPath?.length ?? 0).toBe(1);
+    const gid = (await shape(page, "r1")).groupPath![0] as string;
+    expect((await shape(page, "r2")).groupPath).toEqual([gid]);
+    expect((await shape(page, "out")).groupPath).toBeUndefined();
+
+    // Dragging ONE member drags the whole group rigidly.
+    await dragLogical(page, { x: 140, y: 130 }, { x: 260, y: 160 });
+    await expect.poll(async () => (await shape(page, "r1")).x).toBe(220);
+    expect(await shape(page, "r2")).toMatchObject({ x: 340, y: 130 });
+
+    // Glue IN: drop `out` snug under member r2 → an inbound edge onto the unit…
+    await dragLogical(page, { x: 430, y: 340 }, { x: 380, y: 215 });
+    await expect.poll(async () => (await shape(page, "out")).attach?.id).toBe("r2");
+    // …so the follower rides the next whole-group drag.
+    const outBefore = await shape(page, "out");
+    await dragLogical(page, { x: 260, y: 160 }, { x: 260, y: 260 });
+    await expect.poll(async () => (await shape(page, "r1")).y).toBe(230);
+    const outAfter = await shape(page, "out");
+    expect(outAfter.y - outBefore.y).toBeCloseTo(100, 0);
+
+    // Scale via the proxy Transformer: click a member (selects the whole unit),
+    // drag the bottom-right corner anchor outward. Uniform bake: both members
+    // scale by the same factor, ratio preserved, strokeWidth rides.
+    const r1 = await shape(page, "r1");
+    const r2 = await shape(page, "r2");
+    const corner = { x: Math.max(r1.x + r1.width, r2.x + r2.width), y: Math.max(r1.y + r1.height, r2.y + r2.height) };
+    const origin = { x: Math.min(r1.x, r2.x), y: Math.min(r1.y, r2.y) };
+    await page.mouse.click((await toScreen(page, { x: r1.x + 10, y: r1.y + 10 })).x, (await toScreen(page, { x: r1.x + 10, y: r1.y + 10 })).y);
+    const target = { x: origin.x + (corner.x - origin.x) * 1.5, y: origin.y + (corner.y - origin.y) * 1.5 };
+    await dragLogical(page, corner, target);
+    await expect.poll(async () => (await shape(page, "r1")).width).toBeGreaterThan(95);
+    const s1 = await shape(page, "r1");
+    const s2 = await shape(page, "r2");
+    const factor = s1.width / 80;
+    expect(s1.width / s1.height).toBeCloseTo(80 / 60, 2); // uniform
+    expect(s2.width / 80).toBeCloseTo(factor, 2); // same factor for every member
+    expect(s1.strokeWidth).toBeCloseTo(3 * factor, 1);
+    expect((await shape(page, "out")).attach?.id).toBe("r2"); // inbound edge re-judged, kept
+
+    // Deep-edit: ⌘-click member r2, set stroke 10 — ONLY r2 changes.
+    const p2 = await toScreen(page, { x: s2.x + 10, y: s2.y + 10 });
+    const canvasBox = (await page.locator(".konvajs-content").boundingBox())!;
+    await page
+      .locator(".konvajs-content")
+      .click({ position: { x: p2.x - canvasBox.x, y: p2.y - canvasBox.y }, modifiers: ["Control"] });
+    // Deep-select is live: a proper subset can't group OR ungroup → the toolbar
+    // toggle reads "Group selection" and is disabled.
+    await expect(page.getByRole("button", { name: "Group selection (⌘G)" })).toBeDisabled();
+    await page.getByRole("button", { name: "Stroke 10px" }).click();
+    await expect.poll(async () => (await shape(page, "r2")).strokeWidth).toBe(10);
+    expect((await shape(page, "r1")).strokeWidth).toBeCloseTo(3 * factor, 1); // untouched
+
+    // Copy/paste the group: fresh ids, fresh SHARED gid — never welded to the
+    // original (⌘G on the pasted pair must not affect r1/r2).
+    const s1now = await shape(page, "r1");
+    const click1 = await toScreen(page, { x: s1now.x + 10, y: s1now.y + 10 });
+    await page.mouse.click(click1.x, click1.y); // plain click → whole unit
+    await page.keyboard.press("Control+c");
+    await page.keyboard.press("Control+v");
+    await expect.poll(async () => (await doc(page)).shapes.length).toBe(5);
+    const pasted = (await doc(page)).shapes.filter((sh) => !["r1", "r2", "out"].includes(sh.id as string));
+    expect(pasted).toHaveLength(2);
+    const pgid = pasted[0].groupPath![0] as string;
+    expect(pasted[1].groupPath).toEqual([pgid]);
+    expect(pgid).not.toBe(gid);
+
+    // Ungroup the ORIGINAL: exact-cover selection + ⌘G strips the level; the
+    // pasted copy keeps its own group.
+    await page.mouse.click(click1.x, click1.y);
+    await page.keyboard.press("Control+g");
+    await expect.poll(async () => (await shape(page, "r1")).groupPath ?? null).toBeNull();
+    expect((await shape(page, "r2")).groupPath).toBeUndefined();
+    expect((await doc(page)).shapes.filter((sh) => sh.groupPath?.[0] === pgid)).toHaveLength(2);
+  });
+
+  test("cross-version normalization: duplicated gids split by context, singleton paths collapse, on open", async ({ page }) => {
+    await openSeeded(page, [
+      rect("a", 100, 100, 40, 30, { groupPath: ["g1"] }),
+      rect("b", 160, 100, 40, 30, { groupPath: ["g1"] }),
+      // The same gid nested under a different parent — an old-version artifact;
+      // structurally a DIFFERENT group.
+      rect("c", 400, 100, 40, 30, { groupPath: ["g2", "g1"] }),
+      rect("d", 460, 100, 40, 30, { groupPath: ["g2", "g1"] }),
+      rect("e", 100, 400, 40, 30, { groupPath: ["solo"] }), // singleton → collapses
+    ]);
+    // Normalization runs at open (in memory); an edit persists the healed doc.
+    await dragLogical(page, { x: 120, y: 115 }, { x: 130, y: 115 });
+    await expect.poll(async () => (await shape(page, "a")).x).toBeGreaterThan(105);
+    const [a, b, c, d, e2] = await Promise.all(["a", "b", "c", "d", "e"].map((id) => shape(page, id)));
+    expect(a.groupPath).toEqual(["g1"]);
+    expect(b.groupPath).toEqual(["g1"]);
+    expect(c.groupPath![1]).not.toBe("g1"); // split off g1's reuse
+    expect(c.groupPath).toEqual(d.groupPath);
+    expect(e2.groupPath).toBeUndefined();
+    // And the healed groups BEHAVE: dragging a moved its whole unit (b rode).
+    expect(b.x).toBeCloseTo(a.x + 60, 0);
+  });
+});
+
 test("export menu stacks ABOVE the minimap (hit-test in the overlap)", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 560 }); // force menu/minimap overlap
   await open(page);

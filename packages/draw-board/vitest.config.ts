@@ -6,5 +6,11 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "node",
+    // Restricted-CPU sandboxes can resolve tinypool's default minThreads above
+    // its computed maxThreads ("options.minThreads and options.maxThreads must
+    // not conflict"), killing the run before any test executes. The suite is
+    // sub-second — one fork loses nothing and runs everywhere.
+    pool: "forks",
+    poolOptions: { forks: { singleFork: true } },
   },
 });

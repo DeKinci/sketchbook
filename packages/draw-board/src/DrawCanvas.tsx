@@ -167,8 +167,18 @@ export function DrawCanvas({
   const [marquee, setMarquee] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
   const marqueeStart = useRef<{ x: number; y: number } | null>(null);
-  const moveRef = useRef<{ last: { x: number; y: number }; ids: string[] } | null>(null);
+  const moveRef = useRef<{ last: { x: number; y: number }; downAt: { x: number; y: number }; ids: string[] } | null>(null);
   const erasing = useRef(false);
+  // Konva synthesizes a dblclick from ANY two down/up pairs inside its 400ms
+  // window — movement-blind, so [click; quick drag/resize] "double-clicks"
+  // wherever the second gesture ENDED and would pop a text/label/crop editor
+  // mid-flow. Every real drag (move/marquee/transform) arms this deadline;
+  // onStageDblClick ignores synthetic dblclicks until it passes. Genuine
+  // double-clicks (two still clicks) never arm it.
+  const suppressDblUntil = useRef(0);
+  const suppressDbl = () => {
+    suppressDblUntil.current = performance.now() + 500;
+  };
 
   // Spatial index over shape bboxes — every "what's here" query (culling, hit
   // tests, glue candidates) goes through it instead of scanning all N shapes.
@@ -489,7 +499,9 @@ export function DrawCanvas({
       // Re-detect attachments for what was dragged (attach if dropped edge-to-edge
       // with a shape, detach if dragged away), then commit the whole gesture. The
       // glue distance is zoom-scaled: "touching" is judged on SCREEN.
-      dispatch({ type: "reattach", ids: moveRef.current.ids, distScale: sPx(1) });
+      const m = moveRef.current;
+      if (m.last.x !== m.downAt.x || m.last.y !== m.downAt.y) suppressDbl(); // a real drag, not a click
+      dispatch({ type: "reattach", ids: m.ids, distScale: sPx(1) });
       dispatch({ type: "endGesture" });
       moveRef.current = null;
       return;
@@ -499,6 +511,7 @@ export function DrawCanvas({
       marqueeStart.current = null;
       setMarquee(null);
       if (Math.abs(box.width) >= sPx(3) || Math.abs(box.height) >= sPx(3)) {
+        suppressDbl();
         const m = {
           x: box.width < 0 ? box.x + box.width : box.x,
           y: box.height < 0 ? box.y + box.height : box.y,
@@ -579,7 +592,8 @@ export function DrawCanvas({
       // Followers ride by INCLUSION: the size-gated attach cluster ("largest drags
       // smallest") plus every dragged container's contents (moveClusterIds folds in
       // containment). The reducer freezes anything left out of this set.
-      moveRef.current = { last: logicalPointer(e), ids: moveClusterIds(shapes, ids) };
+      const down = logicalPointer(e);
+      moveRef.current = { last: down, downAt: down, ids: moveClusterIds(shapes, ids) };
       return;
     }
     const { x, y } = logicalPointer(e);
@@ -709,6 +723,14 @@ export function DrawCanvas({
 
   const onStageDblClick = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
     if (croppingId || tool !== "select") return;
+    // A dblclick within the suppression window is SYNTHETIC — one of its two
+    // "clicks" was a drag/marquee/resize (Konva's window is movement-blind), so
+    // it would pop an editor wherever that gesture happened to end.
+    if (performance.now() < suppressDblUntil.current) return;
+    // Same law as onStageDown: input originating on a Transformer handle belongs
+    // to the Transformer.
+    const parent = e.target.getParent() as Konva.Node | null;
+    if (parent && parent.getClassName?.() === "Transformer") return;
     const hit = smallestAt(logicalPointer(e));
     if (!hit) return;
     // Double-click: text → edit text; image → crop; any other shape → bound
@@ -771,6 +793,7 @@ export function DrawCanvas({
       if (box) dispatch({ type: "reflowChildrenTo", parentId: sh.id, box, distScale: 1 / vsRef.current });
     },
     onTransformEnd: (e: KonvaEventObject<Event>) => {
+      suppressDbl(); // an anchor drag is not a "click" (see suppressDblUntil)
       bakeTransform(e, sh);
       dispatch({ type: "endGesture" });
     },
@@ -1312,6 +1335,7 @@ export function DrawCanvas({
               dispatch({ type: "scaleUnitGhost", ids: g.ids, factor: e.target.scaleX(), origin: g.origin });
             }}
             onTransformEnd={(e) => {
+              suppressDbl(); // an anchor drag is not a "click" (see suppressDblUntil)
               const g = unitScaleRef.current;
               unitScaleRef.current = null;
               const node = e.target;
