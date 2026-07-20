@@ -543,6 +543,53 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     await page.mouse.click(out.x, out.y);
     await expect(page.getByRole("button", { name: "Group selection (⌘G)" })).toBeDisabled();
   });
+
+  test("opening the text editor keeps the glyphs in place (field line metrics match the canvas)", async ({ page }) => {
+    await openSeeded(page, [{ id: "t1", type: "text", stroke: "#e5484d", strokeWidth: 3, x: 100, y: 100, text: "Hello", fontSize: 24 }]);
+    // Clip around the text's LEFT half (excludes the caret, which parks after
+    // the last glyph while editing).
+    const tl = await toScreen(page, { x: 98, y: 80 });
+    const br = await toScreen(page, { x: 150, y: 150 });
+    const clip = { x: tl.x, y: tl.y, width: br.x - tl.x, height: br.y - tl.y };
+    /** Topmost screenshot row containing text-colored (red) ink, decoded IN-PAGE. */
+    const topInkRow = async () => {
+      const png = await page.screenshot({ clip });
+      return page.evaluate(async (b64) => {
+        const img = new Image();
+        img.src = "data:image/png;base64," + b64;
+        await img.decode();
+        const c = document.createElement("canvas");
+        c.width = img.width;
+        c.height = img.height;
+        const ctx = c.getContext("2d")!;
+        ctx.drawImage(img, 0, 0);
+        const d = ctx.getImageData(0, 0, c.width, c.height).data;
+        for (let y = 0; y < c.height; y++) {
+          for (let x = 0; x < c.width; x++) {
+            const i = (y * c.width + x) * 4;
+            if (d[i] > 120 && d[i] - d[i + 2] > 40 && d[i] - d[i + 1] > 40) return y;
+          }
+        }
+        return -1;
+      }, png.toString("base64"));
+    };
+    const canvasTop = await topInkRow();
+    expect(canvasTop).toBeGreaterThan(0);
+    const p = await toScreen(page, { x: 120, y: 112 });
+    await page.mouse.dblclick(p.x, p.y);
+    const field = page.locator(".draw-text-input");
+    await expect(field).toBeVisible();
+    // Kill the caret + the select-all highlight so only glyph ink is measured.
+    await field.evaluate((ta: HTMLTextAreaElement) => {
+      ta.style.caretColor = "transparent";
+      ta.setSelectionRange(0, 0);
+    });
+    const fieldTop = await topInkRow();
+    expect(fieldTop).toBeGreaterThan(0);
+    // Same glyphs, same place: tolerate ≤1px of engine baseline nuance — the
+    // pre-fix leading mismatch showed up as a systematic multi-px drop.
+    expect(Math.abs(fieldTop - canvasTop)).toBeLessThanOrEqual(1);
+  });
 });
 
 test("export menu stacks ABOVE the minimap (hit-test in the overlap)", async ({ page }) => {

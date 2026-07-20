@@ -1098,7 +1098,11 @@ export function DrawEditor({
                   }
                 }}
                 spellCheck={false}
-                className="draw-text-input absolute m-0 resize-none overflow-hidden whitespace-pre border-0 bg-transparent p-0 text-center leading-tight outline-none"
+                // leading-none: Konva.Text lays lines at lineHeight 1, so the
+                // field must too — any extra leading pushes the glyphs DOWN vs
+                // the canvas text (a visible jump when the editor opens) and
+                // compounds per line on multi-line texts.
+                className="draw-text-input absolute m-0 resize-none overflow-hidden whitespace-pre border-0 bg-transparent p-0 text-center leading-none outline-none"
                 style={{
                   left: session.x * view.scale + view.x,
                   top: session.y * view.scale + view.y,
