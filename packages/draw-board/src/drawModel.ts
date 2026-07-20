@@ -34,6 +34,14 @@ export type Attach =
   | { id: string; kind: "box"; ax: number; ay: number; dx: number; dy: number }
   | { id: string; kind: "radial"; angle: number; gap: number };
 
+/** A glue edge parked in a member's `dormant` stash when a group formed (an
+ *  internal edge that crossed between the forming group's child units). Keyed by
+ *  the group `gid` (level-keyed — nesting stashes at each level independently);
+ *  restored ONLY by that gid's ungroup, and only into an empty slot (a live edge
+ *  stamped during the group's life wins). Invisible to all reflow/adjacency
+ *  consumers. See docs/groups-design.md. */
+export type DormantEdge = { gid: string; attach?: Attach; bindStart?: Bind; bindEnd?: Bind };
+
 export interface BaseShape {
   id: string;
   /** Stroke color (also the fill for text). */
@@ -44,6 +52,13 @@ export interface BaseShape {
   label?: string;
   /** Attachment to a parent shape (see {@link Attach}), or none. */
   attach?: Attach;
+  /** Group ancestry, ROOT FIRST. Absent = ungrouped. A group exists only as the
+   *  set of shapes sharing a path prefix — there are no group objects
+   *  (docs/groups-design.md). */
+  groupPath?: string[];
+  /** Level-keyed stash of glue edges parked when each enclosing group formed
+   *  (see {@link DormantEdge}). */
+  dormant?: DormantEdge[];
 }
 /** Rect + ellipse share an axis-aligned bounding box {x,y,width,height}. The
  *  view converts an ellipse box to Konva's center+radii; keeping the box form
@@ -195,7 +210,9 @@ const DEFAULT_STAGE = { width: 720, height: 460 };
 export function initialDrawState(doc?: DrawDoc, opts?: { color?: string }): DrawState {
   return {
     background: doc?.background,
-    shapes: doc ? doc.shapes.map(cloneShape) : [],
+    // normalizeGroups: cross-version safety for every open path (localStorage,
+    // PNG/SVG board import, host-supplied docs) — see its doc comment.
+    shapes: doc ? normalizeGroups(doc.shapes.map(cloneShape)) : [],
     width: doc?.width ?? DEFAULT_STAGE.width,
     height: doc?.height ?? DEFAULT_STAGE.height,
     // Always open in pen — ready to sketch immediately (cursor is one Tab away).
@@ -537,24 +554,35 @@ export function attachAt(child: Shape, shapes: Shape[], distScale = 1): Attach |
   return { id: best.id, kind: "box", ax, ay, dx: cc.x - (b.x + ax * b.width), dy: cc.y - (b.y + ay * b.height) };
 }
 
-/** Move every attached shape so its center tracks the parent's current anchor —
- *  following the parent on move AND resize. Drops attachments whose parent is
- *  gone. `skip` = shapes being directly dragged (don't yank them back). A few
- *  passes handle shallow nesting. Pure. */
+/** Move every attached follower so its center tracks the parent's current anchor
+ *  — following the parent on move AND resize — at ROOT-UNIT grain: when a
+ *  follower's anchor fires, its ENTIRE unit moves rigidly by the same delta
+ *  (bound arrows then re-cling via {@link reflowBindings}). INTRA-unit edges are
+ *  inert here — rigidity owns geometry inside a unit (they matter again after
+ *  ungroup). Drops attachments whose parent is gone. `skip` = shapes being
+ *  directly dragged (don't yank them back) — a unit with ANY member in `skip`
+ *  never moves. A few passes handle shallow nesting. Pure. */
 export function reflowAttachments(shapes: Shape[], skip: Set<string>): Shape[] {
   let result = shapes;
   let anyChange = false;
   for (let pass = 0; pass < 3; pass++) {
     const byId = new Map(result.map((s) => [s.id, s]));
-    let passChanged = false;
-    const next = result.map((sh) => {
-      if (!sh.attach || skip.has(sh.id) || isConnector(sh)) return sh; // connectors reflow via bindings, not attach
+    const units = unitPartition(result);
+    // Collect per-unit corrections (≤1 outward edge per unit — first wins on
+    // legacy multi-edge data) and dropped edges, then apply in one map.
+    const unitDelta = new Map<string, { dx: number; dy: number }>();
+    const dropAttach = new Set<string>();
+    for (const sh of result) {
+      if (!sh.attach || skip.has(sh.id) || isConnector(sh)) continue; // connectors reflow via bindings, not attach
       const parent = byId.get(sh.attach.id);
       if (!parent) {
-        const { attach: _drop, ...rest } = sh;
-        passChanged = true;
-        return rest as Shape;
+        dropAttach.add(sh.id);
+        continue;
       }
+      const key = rootUnitKeyOf(sh);
+      if (rootUnitKeyOf(parent) === key) continue; // intra-unit edge: rigid, inert
+      if (unitDelta.has(key)) continue;
+      if ((units.get(key) ?? []).some((id) => skip.has(id))) continue; // unit is being dragged
       const pb = boundingBox(parent);
       let tx: number;
       let ty: number;
@@ -570,12 +598,19 @@ export function reflowAttachments(shapes: Shape[], skip: Set<string>): Shape[] {
       const cb = boundingBox(sh);
       const dx = tx - (cb.x + cb.width / 2);
       const dy = ty - (cb.y + cb.height / 2);
-      if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return sh;
-      passChanged = true;
-      return offsetShape(sh, dx, dy);
+      if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) continue;
+      unitDelta.set(key, { dx, dy });
+    }
+    if (!unitDelta.size && !dropAttach.size) break;
+    result = result.map((sh) => {
+      let out = sh;
+      if (dropAttach.has(sh.id)) {
+        const { attach: _drop, ...rest } = out;
+        out = rest as Shape;
+      }
+      const d = unitDelta.get(rootUnitKeyOf(out));
+      return d ? offsetShape(out, d.dx, d.dy) : out;
     });
-    if (!passChanged) break;
-    result = next;
     anyChange = true;
   }
   return anyChange ? result : shapes;
@@ -587,34 +622,37 @@ function reflowAll(shapes: Shape[], skip: Set<string>): Shape[] {
 }
 
 /** Ids of shapes fully contained within any of the given container shapes' boxes
- *  (used to drag a container's contents along with it). Containment is PROPER:
- *  a box the container's own size is an overlay, not content — two identical
- *  stacked shapes would otherwise contain each other symmetrically and weld
- *  forever (dragging either moved both; they could never be pulled apart).
- *  Only area shapes act as containers; the containers themselves are excluded. */
+ *  (used to drag a container's contents along with it), at ROOT-UNIT grain: a
+ *  container contains only via its members' own boxes (never hull air between
+ *  them), and a containee UNIT is admitted whole — only when ALL its members are
+ *  inside. Containment is PROPER: a box the container's own size is an overlay,
+ *  not content — two identical stacked shapes would otherwise contain each other
+ *  symmetrically and weld forever (dragging either moved both; they could never
+ *  be pulled apart). Only area shapes act as containers; units overlapping the
+ *  container set are excluded. */
 export function containedIds(shapes: Shape[], containerIds: string[]): string[] {
+  const byId = new Map(shapes.map((s) => [s.id, s]));
   const boxes = containerIds
-    .map((id) => shapes.find((s) => s.id === id))
+    .map((id) => byId.get(id))
     .filter((s): s is Shape => !!s && CONTAINER_TYPES.has(s.type))
     .map(boundingBox);
   if (!boxes.length) return [];
   const set = new Set(containerIds);
-  const out: string[] = [];
-  for (const sh of shapes) {
-    if (set.has(sh.id)) continue;
+  const inside = (sh: Shape) => {
     const b = boundingBox(sh);
-    if (
-      boxes.some(
-        (A) =>
-          b.x >= A.x &&
-          b.y >= A.y &&
-          b.x + b.width <= A.x + A.width &&
-          b.y + b.height <= A.y + A.height &&
-          (b.width < A.width - CLUSTER_EPS || b.height < A.height - CLUSTER_EPS)
-      )
-    ) {
-      out.push(sh.id);
-    }
+    return boxes.some(
+      (A) =>
+        b.x >= A.x &&
+        b.y >= A.y &&
+        b.x + b.width <= A.x + A.width &&
+        b.y + b.height <= A.y + A.height &&
+        (b.width < A.width - CLUSTER_EPS || b.height < A.height - CLUSTER_EPS)
+    );
+  };
+  const out: string[] = [];
+  for (const [, memberIds] of unitPartition(shapes)) {
+    if (memberIds.some((id) => set.has(id))) continue; // the containers' own units
+    if (memberIds.every((id) => inside(byId.get(id)!))) out.push(...memberIds);
   }
   return out;
 }
@@ -674,12 +712,64 @@ export function paintOrder(shapes: Shape[]): Shape[] {
   return [...images, ...rest];
 }
 
-/** Undirected attach adjacency: every stored `attach` edge (child→parent) is added
- *  in BOTH directions, so propagation is direction-agnostic. Edges to a missing
- *  target are ignored. Arrow/line `bind` edges are NOT included (they re-cling via
- *  {@link reflowBindings}, they don't drag). */
+/** Root unit key of a shape: its root group id, or its own id when loose. The
+ *  glue engine, selection normalization, and outlines all operate at this grain —
+ *  a group behaves as ONE unit (docs/groups-design.md). */
+export const rootUnitKeyOf = (sh: Shape): string => sh.groupPath?.[0] ?? sh.id;
+
+/** Partition shapes into root units: rootKey → member ids (singleton for loose
+ *  shapes). One O(n) pass — cheap at reducer-action frequency; the VIEW uses the
+ *  identity-diffed {@link UnitIndex} for per-frame queries instead. */
+export function unitPartition(shapes: Shape[]): Map<string, string[]> {
+  const units = new Map<string, string[]>();
+  for (const sh of shapes) {
+    const key = rootUnitKeyOf(sh);
+    const arr = units.get(key);
+    if (arr) arr.push(sh.id);
+    else units.set(key, [sh.id]);
+  }
+  return units;
+}
+
+/** Expand ids to FULL root units (normalizeSelection: any member implies its
+ *  whole group). Returns ids in shape order; ids of missing shapes drop out. */
+export function expandIdsToUnits(shapes: Shape[], ids: string[]): string[] {
+  const want = new Set(ids);
+  const keys = new Set<string>();
+  for (const sh of shapes) if (want.has(sh.id)) keys.add(rootUnitKeyOf(sh));
+  return shapes.filter((sh) => keys.has(rootUnitKeyOf(sh))).map((sh) => sh.id);
+}
+
+/** Union AABB of a root unit's members, or null if none exist. */
+export function unitBoundsOf(shapes: Shape[], rootKey: string): { x: number; y: number; width: number; height: number } | null {
+  return contentBounds(shapes.filter((sh) => rootUnitKeyOf(sh) === rootKey));
+}
+
+/** What ⌘G would do to this selection: 'group' (≥2 units), 'ungroup' (selection
+ *  EXACTLY covers one unit whose root is a group), or null — including any proper
+ *  subset of a unit, which is the deep-select context and never ungroups. Single
+ *  source for the reducer guards, the ⌘G handler, and the toolbar affordance. */
+export function groupActionFor(shapes: Shape[], selectedIds: string[]): "group" | "ungroup" | null {
+  if (selectedIds.length === 0) return null;
+  const sel = new Set(selectedIds);
+  const keys = new Set<string>();
+  for (const sh of shapes) if (sel.has(sh.id)) keys.add(rootUnitKeyOf(sh));
+  if (keys.size === 0) return null;
+  if (keys.size >= 2) return "group";
+  const key = [...keys][0];
+  const members = shapes.filter((sh) => rootUnitKeyOf(sh) === key);
+  if (members.length !== sel.size) return null; // proper subset — deep-select, never ungroups
+  return members[0].groupPath?.length ? "ungroup" : null; // a lone loose shape isn't a group
+}
+
+/** Undirected attach adjacency at ROOT-UNIT grain: nodes are root unit keys; any
+ *  stored `attach` edge (child→parent) touching any member connects the two UNITS
+ *  in both directions — so group↔group glue works by construction. Intra-unit
+ *  edges don't self-link. Edges to a missing target are ignored. Arrow/line
+ *  `bind` edges are NOT included (they re-cling via {@link reflowBindings}, they
+ *  don't drag). */
 function attachAdjacency(shapes: Shape[]): Map<string, Set<string>> {
-  const ids = new Set(shapes.map((s) => s.id));
+  const byId = new Map(shapes.map((s) => [s.id, s]));
   const adj = new Map<string, Set<string>>();
   const link = (a: string, b: string) => {
     let set = adj.get(a);
@@ -687,57 +777,85 @@ function attachAdjacency(shapes: Shape[]): Map<string, Set<string>> {
     set.add(b);
   };
   for (const sh of shapes) {
-    if (sh.attach && ids.has(sh.attach.id) && !isConnector(sh)) {
-      link(sh.id, sh.attach.id);
-      link(sh.attach.id, sh.id);
-    }
+    if (!sh.attach || isConnector(sh)) continue;
+    const target = byId.get(sh.attach.id);
+    if (!target) continue;
+    const a = rootUnitKeyOf(sh);
+    const b = rootUnitKeyOf(target);
+    if (a === b) continue;
+    link(a, b);
+    link(b, a);
   }
   return adj;
 }
 
 const CLUSTER_EPS = 1e-6;
 
+/** Drag-propagation weight of a root UNIT: a lone shape keeps {@link
+ *  clusterWeight} (strokes massless); a multi-member unit weighs its union-AABB
+ *  area — a group is an object even when every member is a stroke, and member
+ *  overlap isn't double-counted (docs/groups-design.md). */
+function unitWeight(byId: Map<string, Shape>, memberIds: string[]): number {
+  if (memberIds.length === 1) return clusterWeight(byId.get(memberIds[0])!);
+  const b = contentBounds(memberIds.map((id) => byId.get(id)!));
+  return b ? b.width * b.height : 0;
+}
+
 /**
  * The full set of shape ids a MOVE of `seedIds` drags along ("largest drags
- * smallest"):
- *  - every seed always moves (grabbing = precedence — selection overrides size);
- *  - from each seed, BFS over the UNDIRECTED attach graph, crossing into a
- *    neighbor iff `clusterWeight(neighbor) < clusterWeight(seed) - eps` — a
- *    heavier OR EQUAL node blocks its whole subtree. Equal weight staying put is
- *    load-bearing: if equals followed, a same-size glued pair welded forever
- *    (dragging either moved both — they could never be pulled apart). Move a
- *    same-size pair together by multi-selecting it.
- *  - plus everything geometrically contained in any dragged container.
- * BFS is per-seed with its own threshold + its own visited set (a node rejected
+ * smallest"), at ROOT-UNIT grain:
+ *  - seeds expand to their full units, which always move (grabbing = precedence —
+ *    selection overrides size);
+ *  - from each seed unit, BFS over the UNDIRECTED unit-grained attach graph,
+ *    crossing into a neighbor unit iff its {@link unitWeight} < the seed unit's
+ *    weight - eps — a heavier OR EQUAL unit blocks its whole subtree. Equal
+ *    weight staying put is load-bearing: if equals followed, a same-size glued
+ *    pair welded forever (dragging either moved both — they could never be
+ *    pulled apart). Move a same-size pair together by multi-selecting it.
+ *  - admission is atomic per unit (a unit is dragged whole or not at all);
+ *  - plus everything geometrically contained in any dragged container (whole
+ *    units, via {@link containedIds}).
+ * BFS is per-seed with its own threshold + its own visited set (a unit rejected
  * for a small seed must still be reachable from a bigger seed; the visited set
  * also guarantees termination on legacy cyclic `attach` data). Pure; O(shapes²)
  * worst case, but shape counts are tiny. */
 export function moveClusterIds(shapes: Shape[], seedIds: string[]): string[] {
   const byId = new Map(shapes.map((s) => [s.id, s]));
+  const units = unitPartition(shapes);
   const adj = attachAdjacency(shapes);
-  const cluster = new Set<string>();
+  const weights = new Map<string, number>();
+  const weightOf = (key: string) => {
+    let w = weights.get(key);
+    if (w === undefined) weights.set(key, (w = unitWeight(byId, units.get(key) ?? [])));
+    return w;
+  };
+  const seedKeys = new Set<string>();
   for (const seedId of seedIds) {
     const seed = byId.get(seedId);
-    if (!seed) continue;
-    cluster.add(seedId);
-    const threshold = clusterWeight(seed) - CLUSTER_EPS;
-    const visited = new Set<string>([seedId]);
-    const queue = [seedId];
+    if (seed) seedKeys.add(rootUnitKeyOf(seed));
+  }
+  const cluster = new Set<string>(); // unit keys
+  for (const seedKey of seedKeys) {
+    cluster.add(seedKey);
+    const threshold = weightOf(seedKey) - CLUSTER_EPS;
+    const visited = new Set<string>([seedKey]);
+    const queue = [seedKey];
     while (queue.length) {
       const cur = queue.shift()!;
       for (const nb of adj.get(cur) ?? []) {
         if (visited.has(nb)) continue;
-        visited.add(nb); // mark even if blocked → a heavier node blocks its subtree
-        const nbShape = byId.get(nb);
-        if (nbShape && clusterWeight(nbShape) < threshold) {
+        visited.add(nb); // mark even if blocked → a heavier unit blocks its subtree
+        if (weightOf(nb) < threshold) {
           cluster.add(nb);
           queue.push(nb);
         }
       }
     }
   }
-  for (const id of containedIds(shapes, [...cluster])) cluster.add(id);
-  return [...cluster];
+  const ids = new Set<string>();
+  for (const key of cluster) for (const id of units.get(key) ?? []) ids.add(id);
+  for (const id of containedIds(shapes, [...ids])) ids.add(id);
+  return [...ids];
 }
 
 /**
@@ -814,6 +932,67 @@ function refreshOwnAnchor(shapes: Shape[], id: string, distScale = 1): Shape[] {
   });
 }
 
+/** Uniform-scale a unit member about `origin` from its BASE (gesture-start)
+ *  geometry: position/extent/points affine; fontSize & strokeWidth ×factor
+ *  (continuous values allowed — the toolbar slots highlight nearest); live
+ *  INTERNAL glue metrics ×factor (both ends scale together — box dx/dy,
+ *  radial/bind gap); image `crop` rects are SOURCE-pixel space — untouched.
+ *  Derived from the base each call, so repeated live frames never compound.
+ *  Per-member minimum-size clamps deliberately DON'T apply (they'd distort
+ *  rigidity; the unit-level screen minimum lives in the view's boundBoxFunc). */
+function scaleMemberFrom(base: Shape, memberIds: Set<string>, factor: number, origin: { x: number; y: number }): Shape {
+  const px = (x: number) => origin.x + (x - origin.x) * factor;
+  const py = (y: number) => origin.y + (y - origin.y) * factor;
+  let out: Shape;
+  switch (base.type) {
+    case "rect":
+    case "ellipse":
+    case "image":
+      out = { ...base, x: px(base.x), y: py(base.y), width: base.width * factor, height: base.height * factor };
+      break;
+    case "text":
+      out = { ...base, x: px(base.x), y: py(base.y), fontSize: base.fontSize * factor };
+      break;
+    case "line":
+    case "arrow":
+      out = {
+        ...base,
+        points: [px(base.points[0]), py(base.points[1]), px(base.points[2]), py(base.points[3])],
+      };
+      break;
+    case "pen":
+      out = { ...base, points: base.points.map((v, i) => (i % 2 === 0 ? px(v) : py(v))) };
+      break;
+  }
+  out.strokeWidth = base.strokeWidth * factor;
+  if (out.attach && memberIds.has(out.attach.id)) {
+    out.attach =
+      out.attach.kind === "box"
+        ? { ...out.attach, dx: out.attach.dx * factor, dy: out.attach.dy * factor }
+        : { ...out.attach, gap: out.attach.gap * factor };
+  }
+  if (out.type === "line" || out.type === "arrow") {
+    if (out.bindStart && memberIds.has(out.bindStart.id)) out.bindStart = { ...out.bindStart, gap: out.bindStart.gap * factor };
+    if (out.bindEnd && memberIds.has(out.bindEnd.id)) out.bindEnd = { ...out.bindEnd, gap: out.bindEnd.gap * factor };
+  }
+  return out;
+}
+
+/** Scale a {@link DormantEdge}'s metrics — dormant edges scale at EVERY level so
+ *  a later ungroup restores geometry consistent with the scaled members. */
+function scaleDormant(d: DormantEdge, factor: number): DormantEdge {
+  return {
+    ...d,
+    attach: d.attach
+      ? d.attach.kind === "box"
+        ? { ...d.attach, dx: d.attach.dx * factor, dy: d.attach.dy * factor }
+        : { ...d.attach, gap: d.attach.gap * factor }
+      : undefined,
+    bindStart: d.bindStart ? { ...d.bindStart, gap: d.bindStart.gap * factor } : undefined,
+    bindEnd: d.bindEnd ? { ...d.bindEnd, gap: d.bindEnd.gap * factor } : undefined,
+  };
+}
+
 export type DrawAction =
   | { type: "setTool"; tool: Tool }
   // Arm a one-use cluster (shape = rect/ellipse, line = line/arrow/double-arrow):
@@ -822,8 +1001,25 @@ export type DrawAction =
   | { type: "armCluster"; cluster: "shape" | "line" }
   | { type: "setColor"; color: string }
   | { type: "setStrokeWidth"; width: number }
-  | { type: "select"; ids: string[] }
+  // Select shapes. Non-deep selects NORMALIZE: every id expands to its full root
+  // unit (click + marquee + select-all all funnel here). `deep: true` (⌘-click on
+  // a member) passes ids through raw — the deep-select context (a proper subset
+  // of a unit) that permits only the restricted member edits.
+  | { type: "select"; ids: string[]; deep?: boolean }
   | { type: "toggleSelect"; id: string }
+  // ⌘G group: stamp the minted `gid` (ids-from-the-view law — the reducer stays
+  // pure) onto every member of the ≥2 selected units. Guarded like history ops.
+  | { type: "groupSelection"; gid: string }
+  // ⌘G ungroup: dissolve ONE level of the single exactly-covered selected group.
+  | { type: "ungroup" }
+  // Live frame of a proxy-rect unit scale: restamp member geometry from the
+  // gestureBase snapshot (absolute factor — no compounding), reflow followers.
+  | { type: "scaleUnitGhost"; ids: string[]; factor: number; origin: { x: number; y: number } }
+  // Commit a uniform unit scale: full bake (geometry affine, fontSize/strokeWidth
+  // ×factor, live internal + dormant glue metrics ×factor, crop untouched) + the
+  // inbound-edge re-judge pass. History-NEUTRAL inside begin/endGesture, like
+  // commitResize. `distScale` keeps glue judgments screen-true.
+  | { type: "scaleUnit"; ids: string[]; factor: number; origin: { x: number; y: number }; distScale?: number }
   // Set the logical canvas size (blank sketch fills its container on open — done
   // once, before anything is drawn, so no shape coordinates need remapping).
   | { type: "resizeCanvas"; width: number; height: number }
@@ -903,13 +1099,42 @@ const translate = offsetShape;
  *  are REMAPPED to the new ids and kept (copy a glued assembly → paste a glued
  *  assembly; both endpoints move by the same offset, so kept edges stay valid);
  *  edges to shapes OUTSIDE the batch are dropped. No attach re-detection (the paste
- *  offset sits within ATTACH_DIST — detecting would weld every copy to its original). */
+ *  offset sits within ATTACH_DIST — detecting would weld every copy to its original).
+ *  Group ids remap per batch too (prefix-preserving — a pasted group is a NEW
+ *  group, never welded to the original), dormant-edge targets remap through the
+ *  same id map (entries whose target or level left the batch drop — else
+ *  ungrouping a pasted copy welds it to the ORIGINAL), and groups reduced to a
+ *  single member by a partial-batch copy collapse. */
 export function clonePastedShapes(clipboard: Shape[], dx: number, dy: number, newId: () => string): Shape[] {
   const idMap = new Map<string, string>();
   for (const sh of clipboard) idMap.set(sh.id, newId());
+  const gidMap = new Map<string, string>();
+  const gidCount = new Map<string, number>(); // members per gid in THIS batch (for singleton collapse)
+  for (const sh of clipboard) {
+    for (const gid of sh.groupPath ?? []) {
+      if (!gidMap.has(gid)) gidMap.set(gid, newId());
+      gidCount.set(gid, (gidCount.get(gid) ?? 0) + 1);
+    }
+  }
   return clipboard.map((sh) => {
     const clone = offsetShape(cloneShape(sh), dx, dy);
     clone.id = idMap.get(sh.id)!;
+    if (sh.groupPath) {
+      const path = sh.groupPath.filter((gid) => (gidCount.get(gid) ?? 0) >= 2).map((gid) => gidMap.get(gid)!);
+      clone.groupPath = path.length ? path : undefined;
+    }
+    if (sh.dormant) {
+      const kept = sh.dormant
+        .filter((d) => (gidCount.get(d.gid) ?? 0) >= 2) // its level survived the copy
+        .map((d) => ({
+          gid: gidMap.get(d.gid)!,
+          attach: d.attach && idMap.has(d.attach.id) ? { ...d.attach, id: idMap.get(d.attach.id)! } : undefined,
+          bindStart: d.bindStart && idMap.has(d.bindStart.id) ? { ...d.bindStart, id: idMap.get(d.bindStart.id)! } : undefined,
+          bindEnd: d.bindEnd && idMap.has(d.bindEnd.id) ? { ...d.bindEnd, id: idMap.get(d.bindEnd.id)! } : undefined,
+        }))
+        .filter((d) => d.attach || d.bindStart || d.bindEnd); // target(s) left the batch → dead entry
+      clone.dormant = kept.length ? kept : undefined;
+    }
     if (clone.attach) {
       const mapped = idMap.get(clone.attach.id);
       clone.attach = mapped ? { ...clone.attach, id: mapped } : undefined;
@@ -926,6 +1151,77 @@ export function clonePastedShapes(clipboard: Shape[], dx: number, dy: number, ne
     }
     return clone;
   });
+}
+
+/** Import/open normalization (cross-version safety): docs edited by app versions
+ *  that don't know `groupPath` can hold duplicated gids across unrelated
+ *  assemblies, sheared "rigid" groups, or singleton paths. Normalize by
+ *  (1) prefix-context gid dedupe — a gid appearing under DIFFERENT parent
+ *  prefixes is two different groups, split with derived fresh gids (connected
+ *  components at each nesting level) — and (2) singleton collapse (a gid with
+ *  exactly one member strips out). Dormant entries whose gid left the owner's
+ *  path drop. Geometry violations aren't undone — the damage is made
+ *  well-formed, not repaired (stated limitation). Returns the SAME array when
+ *  nothing needed fixing. */
+export function normalizeGroups(shapes: Shape[]): Shape[] {
+  // Pass 1 — dedupe: instance key = the gid in its full parent-prefix context.
+  // The first context keeps the original gid; later contexts derive stable
+  // fresh ids (opaque strings — only prefix-consistency matters).
+  const contextGid = new Map<string, string>(); // "prefix→gid" → effective gid
+  const firstContextOf = new Map<string, string>(); // gid → first seen prefix key
+  const effectivePath = (path: string[]): string[] => {
+    const out: string[] = [];
+    for (let i = 0; i < path.length; i++) {
+      const gid = path[i];
+      const prefixKey = `${out.join(" ")} ${gid}`;
+      let eff = contextGid.get(prefixKey);
+      if (!eff) {
+        const first = firstContextOf.get(gid);
+        if (first === undefined) {
+          firstContextOf.set(gid, prefixKey);
+          eff = gid;
+        } else {
+          eff = first === prefixKey ? gid : `${gid}:${contextGid.size}`;
+        }
+        contextGid.set(prefixKey, eff);
+      }
+      out.push(eff);
+    }
+    return out;
+  };
+  const paths = shapes.map((sh) => (sh.groupPath?.length ? effectivePath(sh.groupPath) : undefined));
+  // Pass 2 — singleton collapse on the deduped paths.
+  const count = new Map<string, number>();
+  for (const path of paths) for (const gid of path ?? []) count.set(gid, (count.get(gid) ?? 0) + 1);
+  let changed = false;
+  const next = shapes.map((sh, i) => {
+    const deduped = paths[i];
+    const path = deduped?.filter((gid) => (count.get(gid) ?? 0) >= 2);
+    const samePath =
+      (sh.groupPath === undefined && (path === undefined || path.length === 0)) ||
+      (!!sh.groupPath && !!path && path.length === sh.groupPath.length && path.every((g, j) => g === sh.groupPath![j]));
+    // Dormant gids follow the owner's own dedupe remap (level i original →
+    // effective); entries whose level collapsed or left the path drop.
+    const gidRemap = new Map<string, string>();
+    sh.groupPath?.forEach((orig, j) => gidRemap.set(orig, deduped![j]));
+    const pathSet = new Set(path ?? []);
+    const dormant = sh.dormant
+      ?.map((d) => {
+        const eff = gidRemap.get(d.gid);
+        return eff && pathSet.has(eff) ? (eff === d.gid ? d : { ...d, gid: eff }) : undefined;
+      })
+      .filter((d): d is DormantEdge => !!d);
+    const sameDormant =
+      (sh.dormant?.length ?? 0) === (dormant?.length ?? 0) && (dormant ?? []).every((d, j) => d === sh.dormant![j]);
+    if (samePath && sameDormant) return sh;
+    changed = true;
+    return {
+      ...sh,
+      groupPath: path?.length ? path : undefined,
+      dormant: dormant?.length ? dormant : undefined,
+    };
+  });
+  return changed ? next : shapes;
 }
 
 const keepExisting = (ids: string[], shapes: Shape[]) => ids.filter((id) => shapes.some((sh) => sh.id === id));
@@ -956,10 +1252,15 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       // keep cycling. Undoable (commit).
       const sel = s.shapes.filter((sh) => s.selectedIds.includes(sh.id));
       if (sel.length > 0 && sel.every((sh) => clusterOf(sh) === a.cluster)) {
-        const allMatch = sel.every((sh) => variantOf(sh) === remembered);
+        // Retype applies to LOOSE shapes only — grouped members are never retyped
+        // (a disallowed shape edit while grouped). All-grouped selection → total
+        // no-op: no history entry, no variant cycle, no tool arm.
+        const loose = sel.filter((sh) => !sh.groupPath);
+        if (loose.length === 0) return s;
+        const allMatch = loose.every((sh) => variantOf(sh) === remembered);
         const idx = members.indexOf(remembered);
         const target = (allMatch ? members[(idx + 1) % members.length] : remembered) as ShapeVariant | LineVariant;
-        const retyped = reflowAll(mapShapes(s.shapes, new Set(s.selectedIds), (sh) => toClusterVariant(sh, target)), new Set());
+        const retyped = reflowAll(mapShapes(s.shapes, new Set(loose.map((sh) => sh.id)), (sh) => toClusterVariant(sh, target)), new Set());
         return {
           ...commit(s, retyped),
           ...(a.cluster === "shape" ? { shapeVariant: target as ShapeVariant } : { lineVariant: target as LineVariant }),
@@ -1025,12 +1326,104 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       };
     }
     case "select":
-      return { ...s, selectedIds: a.ids };
-    case "toggleSelect":
+      return { ...s, selectedIds: a.deep ? a.ids : expandIdsToUnits(s.shapes, a.ids) };
+    case "toggleSelect": {
+      // Unit-grained: if ANY member of the clicked unit is selected, remove ALL
+      // its member ids, else add all (an id-then-expand toggle could never
+      // deselect a unit).
+      const sh = s.shapes.find((o) => o.id === a.id);
+      if (!sh) return s;
+      const memberIds = expandIdsToUnits(s.shapes, [a.id]);
+      const members = new Set(memberIds);
+      const anySelected = s.selectedIds.some((id) => members.has(id));
       return {
         ...s,
-        selectedIds: s.selectedIds.includes(a.id) ? s.selectedIds.filter((id) => id !== a.id) : [...s.selectedIds, a.id],
+        selectedIds: anySelected
+          ? s.selectedIds.filter((id) => !members.has(id))
+          : [...s.selectedIds.filter((id) => !members.has(id)), ...memberIds],
       };
+    }
+    case "groupSelection": {
+      // Guarded like history ops: a mid-drag ⌘G would corrupt the open gesture's
+      // history pair and the live move cluster. (The view additionally gates on a
+      // live camera-bitmap cache.)
+      if (s.gestureBase || s.draftId) return s;
+      const memberIds = expandIdsToUnits(s.shapes, s.selectedIds);
+      const members = new Set(memberIds);
+      const childUnits = new Set(s.shapes.filter((sh) => members.has(sh.id)).map(rootUnitKeyOf));
+      if (childUnits.size < 2) return s; // incl. would-be single-member groups
+      const next = mapShapes(s.shapes, members, (sh) => {
+        const out: Shape = { ...sh, groupPath: [a.gid, ...(sh.groupPath ?? [])] };
+        // Sever OUTWARD edges (attach + connector binds to non-members) — undo
+        // restores exactly; a still-touching neighbor re-glues on the next drag.
+        // Internal edges CROSSING between the forming group's child units park in
+        // the level-keyed dormant stash; same-child-unit edges stay live (inert
+        // under rigidity, live again after ungroup). Inbound edges are untouched.
+        let stash: DormantEdge | undefined;
+        const park = (edge: Partial<Omit<DormantEdge, "gid">>) => {
+          stash = { gid: a.gid, ...(stash ?? {}), ...edge };
+        };
+        const crossesChildUnits = (targetId: string) => {
+          const target = s.shapes.find((o) => o.id === targetId);
+          return !!target && rootUnitKeyOf(target) !== rootUnitKeyOf(sh);
+        };
+        if (out.attach) {
+          if (!members.has(out.attach.id)) out.attach = undefined;
+          else if (crossesChildUnits(out.attach.id)) {
+            park({ attach: out.attach });
+            out.attach = undefined;
+          }
+        }
+        if (out.type === "line" || out.type === "arrow") {
+          if (out.bindStart) {
+            if (!members.has(out.bindStart.id)) out.bindStart = undefined;
+            else if (crossesChildUnits(out.bindStart.id)) {
+              park({ bindStart: out.bindStart });
+              out.bindStart = undefined;
+            }
+          }
+          if (out.bindEnd) {
+            if (!members.has(out.bindEnd.id)) out.bindEnd = undefined;
+            else if (crossesChildUnits(out.bindEnd.id)) {
+              park({ bindEnd: out.bindEnd });
+              out.bindEnd = undefined;
+            }
+          }
+        }
+        if (stash) out.dormant = [...(out.dormant ?? []), stash];
+        return out;
+      });
+      // Post-state: selection = the new unit's members (⌘G⌘G round-trips).
+      return { ...commit(s, next), selectedIds: memberIds };
+    }
+    case "ungroup": {
+      if (s.gestureBase || s.draftId) return s;
+      if (groupActionFor(s.shapes, s.selectedIds) !== "ungroup") return s;
+      const members = new Set(s.selectedIds);
+      const gid = s.shapes.find((sh) => members.has(sh.id))!.groupPath![0];
+      const ids = new Set(s.shapes.map((sh) => sh.id));
+      const next = mapShapes(s.shapes, members, (sh) => {
+        const path = sh.groupPath!.slice(1);
+        const out: Shape = { ...sh, groupPath: path.length ? path : undefined };
+        // Restore THIS gid's dormant entries — only into EMPTY slots (a live
+        // outward edge stamped during the group's life wins); drop entries whose
+        // target no longer exists. The stash dies with its level either way.
+        const mine = (out.dormant ?? []).filter((d) => d.gid === gid);
+        const rest = (out.dormant ?? []).filter((d) => d.gid !== gid);
+        out.dormant = rest.length ? rest : undefined;
+        for (const d of mine) {
+          if (d.attach && !out.attach && ids.has(d.attach.id)) out.attach = d.attach;
+          if ((out.type === "line" || out.type === "arrow") && (d.bindStart || d.bindEnd)) {
+            const seg = out as SegmentShape;
+            if (d.bindStart && !seg.bindStart && ids.has(d.bindStart.id)) seg.bindStart = d.bindStart;
+            if (d.bindEnd && !seg.bindEnd && ids.has(d.bindEnd.id)) seg.bindEnd = d.bindEnd;
+          }
+        }
+        return out;
+      });
+      // Selection unchanged (now the freed members); settle restored glue.
+      return commit(s, reflowAll(next, new Set()));
+    }
 
     case "beginDraw":
       // Start a draw gesture: stash the pre-draw snapshot, append the draft.
@@ -1124,15 +1517,21 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
     case "patchShape":
       return { ...s, shapes: reflowAll(mapShapes(s.shapes, new Set([a.id]), (sh) => ({ ...sh, ...a.patch } as Shape)), new Set()) };
     case "translateShapes": {
-      const ids = new Set(a.ids);
+      // Group guard: a partial-unit id set EXPANDS to full units — members are
+      // never translated individually (never partial-translate, never drop).
+      const ids = new Set(expandIdsToUnits(s.shapes, a.ids));
       // NEW LAW (§2.2): an attached shape follows a move ONLY by being in `ids`
       // (the view passes the full size-gated cluster via moveClusterIds). A shape
       // OUTSIDE `ids` whose `attach` points INTO the moved set was deliberately
       // excluded (too heavy) — FREEZE it so the reflow doesn't drag it toward the
-      // moved parent. (Transitive freeze is unnecessary: a frozen shape doesn't
-      // move, so its own followers' targets don't move either.) Bound arrows still
-      // re-cling via reflowBindings.
-      const frozen = s.shapes.filter((sh) => sh.attach && ids.has(sh.attach.id) && !ids.has(sh.id)).map((sh) => sh.id);
+      // moved parent, at UNIT grain: exclusion is atomic per unit, so the whole
+      // excluded unit freezes (a rigid unit can't have one frozen member).
+      // (Transitive freeze is unnecessary: a frozen unit doesn't move, so its own
+      // followers' targets don't move either.) Bound arrows still re-cling via
+      // reflowBindings.
+      const frozenUnits = new Set<string>();
+      for (const sh of s.shapes) if (sh.attach && ids.has(sh.attach.id) && !ids.has(sh.id)) frozenUnits.add(rootUnitKeyOf(sh));
+      const frozen = s.shapes.filter((sh) => !ids.has(sh.id) && frozenUnits.has(rootUnitKeyOf(sh))).map((sh) => sh.id);
       return { ...s, shapes: reflowAll(mapShapes(s.shapes, ids, (sh) => translate(sh, a.dx, a.dy)), new Set([...ids, ...frozen])) };
     }
     case "reflowChildrenTo": {
@@ -1160,26 +1559,123 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       // 5. History-neutral (endGesture owns the push — a commit() here double-pushes).
       return { ...s, shapes: next };
     }
-    case "reattach": {
-      const moved = new Set(a.ids);
+    case "scaleUnitGhost": {
+      // LIVE unit-scale frame (model-driven — never imperative node scaling,
+      // which would fight the element caches): restamp member geometry from the
+      // gestureBase snapshot at the absolute factor, then reflow so inbound
+      // followers ride the scaling unit. No history, no dormant/outward bakes.
+      if (!s.gestureBase) return s;
+      const memberIds = new Set(expandIdsToUnits(s.gestureBase, a.ids));
+      const baseById = new Map(s.gestureBase.map((sh) => [sh.id, sh]));
+      const next = s.shapes.map((sh) => {
+        const b = baseById.get(sh.id);
+        return memberIds.has(sh.id) && b ? scaleMemberFrom(b, memberIds, a.factor, a.origin) : sh;
+      });
+      return { ...s, shapes: reflowAll(next, memberIds) };
+    }
+    case "scaleUnit": {
+      // Commit a uniform unit scale (full bake list — docs/groups-design.md).
+      // Computed from the gestureBase snapshot at the absolute factor, so the
+      // ghost-frames-then-commit and direct-dispatch paths converge identically.
+      const base = s.gestureBase ?? s.shapes;
+      const memberIds = new Set(expandIdsToUnits(base, a.ids));
+      if (!memberIds.size) return s;
       const distScale = a.distScale ?? 1;
-      let next = mapShapes(s.shapes, moved, (sh) => {
-        // A kept INTRA-cluster edge: the parent rode along rigidly, so the relative
-        // anchor is still valid — preserve it verbatim (fixes latent bug #3, where
-        // dragging a glued parent+child together dropped their edge).
-        if (sh.attach && moved.has(sh.attach.id)) return sh;
-        // A CROSSING edge: re-detect against non-moved candidates (a moved group
-        // shouldn't attach to itself), avoiding a 2-cycle back onto this shape.
-        const at = attachAt(sh, s.shapes.filter((o) => !moved.has(o.id) && o.attach?.id !== sh.id), distScale);
+      const baseById = new Map(base.map((sh) => [sh.id, sh]));
+      let next = s.shapes.map((sh) => {
+        const b = baseById.get(sh.id);
+        if (!memberIds.has(sh.id) || !b) return sh;
+        const scaled = scaleMemberFrom(b, memberIds, a.factor, a.origin);
+        if (scaled.dormant) scaled.dormant = scaled.dormant.map((d) => scaleDormant(d, a.factor));
+        return scaled;
+      });
+      // The unit's own OUTWARD anchor (member → non-member): refresh keep-or-drop
+      // from the scaled geometry — the target didn't scale, so the stored metrics
+      // are stale (the refreshOwnAnchor rule).
+      next = next.map((sh) => {
+        if (!memberIds.has(sh.id) || !sh.attach || memberIds.has(sh.attach.id)) return sh;
+        const target = next.find((o) => o.id === sh.attach!.id);
+        const at = target ? attachAt(sh, [target], distScale) : undefined;
+        if (at) return { ...sh, attach: at };
+        const { attach: _drop, ...rest } = sh;
+        return rest as Shape;
+      });
+      // Followers ride to their (old) anchors against the scaled members first…
+      next = reflowAll(next, memberIds);
+      // …then EVERY inbound edge targeting a member is re-judged with the
+      // action's distScale: keep-or-drop + anchor refresh (anchor dx/dy are
+      // absolute lengths and the border scaled under them). Metadata-only — the
+      // follower stays exactly where the reflow put it. Bound arrows already
+      // re-clung via reflowBindings.
+      next = next.map((sh) => {
+        if (memberIds.has(sh.id) || !sh.attach || !memberIds.has(sh.attach.id) || isConnector(sh)) return sh;
+        const target = next.find((o) => o.id === sh.attach!.id);
+        const at = target ? attachAt(sh, [target], distScale) : undefined;
+        if (at) return { ...sh, attach: at };
+        const { attach: _drop, ...rest } = sh;
+        return rest as Shape;
+      });
+      // History-neutral: the surrounding gesture's endGesture owns the push.
+      return { ...s, shapes: next };
+    }
+    case "reattach": {
+      // Unit-aware stamping: moved ids are whole units by construction (expand
+      // defensively). Kept INTRA-moved edges are preserved verbatim (the parent
+      // rode along rigidly — fixes latent bug #3); outward detection runs per
+      // member against non-moved candidates, but at most ONE outward edge per
+      // UNIT survives (nearest contact), stamped on the touching non-connector
+      // member whose slot isn't held by a kept intra-moved edge. Grouped members
+      // are never stamped as lone followers — the edge is owned by the unit.
+      const moved = new Set(expandIdsToUnits(s.shapes, a.ids));
+      const distScale = a.distScale ?? 1;
+      const byId = new Map(s.shapes.map((sh) => [sh.id, sh]));
+      const movedUnits = new Map<string, string[]>();
+      for (const id of moved) {
+        const sh = byId.get(id);
+        if (!sh) continue;
+        const key = rootUnitKeyOf(sh);
+        const arr = movedUnits.get(key);
+        if (arr) arr.push(id);
+        else movedUnits.set(key, [id]);
+      }
+      const stamp = new Map<string, Attach>();
+      const rejudged = new Set<string>(); // outward-eligible members (stale edges drop unless stamped)
+      for (const [, memberIds] of movedUnits) {
+        let best: { id: string; at: Attach; gap: number } | undefined;
+        for (const id of memberIds) {
+          const sh = byId.get(id)!;
+          if (isConnector(sh)) continue;
+          if (sh.attach && moved.has(sh.attach.id)) continue; // slot held by a kept intra-moved edge
+          rejudged.add(id);
+          // A moved unit shouldn't attach to itself; avoid a 2-cycle back onto sh.
+          const at = attachAt(sh, s.shapes.filter((o) => !moved.has(o.id) && o.attach?.id !== sh.id), distScale);
+          if (!at) continue;
+          const tb = boundingBox(byId.get(at.id)!);
+          const sb = boundingBox(sh);
+          const gap = Math.hypot(
+            Math.max(tb.x - (sb.x + sb.width), sb.x - (tb.x + tb.width), 0),
+            Math.max(tb.y - (sb.y + sb.height), sb.y - (tb.y + tb.height), 0)
+          );
+          if (!best || gap < best.gap) best = { id, at, gap };
+        }
+        if (best) stamp.set(best.id, best.at);
+      }
+      let next = mapShapes(s.shapes, rejudged, (sh) => {
+        const at = stamp.get(sh.id);
         if (at) return { ...sh, attach: at };
         return sh.attach ? { ...sh, attach: undefined } : sh;
       });
       // Stayers whose parent departed (their edge crossed the boundary the OTHER
       // way — they were too heavy to be dragged): re-evaluate from their unchanged
       // spot; keep a new adjacency if one exists, else drop the now-stale edge.
+      // Candidates exclude the stayer's own unit (an internal edge would be inert).
       const staleIds = new Set(next.filter((sh) => !moved.has(sh.id) && sh.attach && moved.has(sh.attach.id)).map((sh) => sh.id));
       next = mapShapes(next, staleIds, (sh) => {
-        const at = attachAt(sh, next.filter((o) => o.id !== sh.id && o.attach?.id !== sh.id), distScale);
+        const at = attachAt(
+          sh,
+          next.filter((o) => o.id !== sh.id && o.attach?.id !== sh.id && rootUnitKeyOf(o) !== rootUnitKeyOf(sh)),
+          distScale
+        );
         return { ...sh, attach: at }; // at may be undefined → detached
       });
       return { ...s, shapes: reflowAll(next, new Set()) };
@@ -1210,7 +1706,9 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       return { ...commit(s, [...s.shapes, ...added]), selectedIds: added.map((sh) => sh.id) };
     }
     case "cropImage": {
-      if (!s.shapes.some((sh) => sh.id === a.id && sh.type === "image")) return s;
+      // Grouped images can't be cropped (a crop is a resize in disguise — a
+      // disallowed member edit); the view also gates the overlay.
+      if (!s.shapes.some((sh) => sh.id === a.id && sh.type === "image" && !sh.groupPath)) return s;
       // A crop is a resize in disguise: same direction-agnostic follow + own-anchor
       // refresh as commitResize, but with its OWN history push (no surrounding
       // gesture) and base=null → the inverted anchor is computed from the pre-crop
@@ -1230,11 +1728,19 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       // mid-drag delete would interleave a commit inside the open gesture and
       // corrupt the history pair).
       if (s.gestureBase || s.selectedIds.length === 0) return s;
-      const gone = new Set(s.selectedIds);
+      // Deep-select exception: a selection that is a PROPER SUBSET of one unit is
+      // a deliberate member-editing context — Backspace must not nuke the group
+      // (ungroup to prune). Everything else expands to whole units (rule 2).
+      const sel = new Set(s.selectedIds);
+      const selShapes = s.shapes.filter((sh) => sel.has(sh.id));
+      const keys = new Set(selShapes.map(rootUnitKeyOf));
+      if (keys.size === 1 && selShapes.length < s.shapes.filter((sh) => keys.has(rootUnitKeyOf(sh))).length) return s;
+      const gone = new Set(expandIdsToUnits(s.shapes, s.selectedIds));
       return { ...commit(s, reflowAll(s.shapes.filter((sh) => !gone.has(sh.id)), new Set())), selectedIds: [] };
     }
     case "deleteShapes": {
-      const gone = new Set(a.ids);
+      // Group guard: deleting/erasing any member deletes the whole group (rule 2).
+      const gone = new Set(expandIdsToUnits(s.shapes, a.ids));
       if (![...gone].some((id) => s.shapes.some((sh) => sh.id === id))) return s;
       const next = reflowAll(s.shapes.filter((sh) => !gone.has(sh.id)), new Set());
       const selectedIds = s.selectedIds.filter((id) => !gone.has(id));
