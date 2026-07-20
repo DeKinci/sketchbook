@@ -8,6 +8,8 @@ import {
   MoveDiagonal,
   Type,
   Eraser,
+  Group,
+  Ungroup,
   Undo2,
   Redo2,
   Check,
@@ -105,6 +107,8 @@ export function DrawToolbar({
   strokeWidth,
   palette,
   hasSelection,
+  groupAction,
+  onGroup,
   canUndo,
   canRedo,
   onTool,
@@ -130,6 +134,11 @@ export function DrawToolbar({
   /** Swatch colors: primary theme ink first, then the content colors. */
   palette: readonly string[];
   hasSelection: boolean;
+  /** What ⌘G would do to the current selection (drives the group button's icon
+   *  + disabled state): 'group', 'ungroup', or null (nothing groupable). */
+  groupAction: "group" | "ungroup" | null;
+  /** Group/ungroup the selection (the ⌘G toggle). */
+  onGroup: () => void;
   canUndo: boolean;
   canRedo: boolean;
   onTool: (t: Tool) => void;
@@ -318,6 +327,15 @@ export function DrawToolbar({
           menu) gets trapped BELOW the board's z-10 overlays (minimap). */}
       <div className="z-30 flex items-center gap-2 max-md:order-3 max-md:basis-full max-md:justify-between md:absolute md:right-3 md:top-1/2 md:-translate-y-1/2">
         <div className="flex items-center gap-0.5">
+          {/* Group/ungroup toggle — mirrors ⌘G (groupAction decides which). */}
+          <IconButton
+            label={groupAction === "ungroup" ? "Ungroup (⌘G)" : "Group selection (⌘G)"}
+            disabled={groupAction === null}
+            onClick={onGroup}
+            className="disabled:opacity-30"
+          >
+            {groupAction === "ungroup" ? <Ungroup size={16} /> : <Group size={16} />}
+          </IconButton>
           <IconButton label="Undo (⌘Z)" disabled={!canUndo} onClick={onUndo} className="disabled:opacity-30">
             <Undo2 size={16} />
           </IconButton>

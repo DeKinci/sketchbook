@@ -4,6 +4,7 @@ import type { KonvaEventObject } from "konva/lib/Node.js";
 import { Stage, Layer, Rect, Ellipse, Line, Arrow, Text, Image as KonvaImage, Group, Label, Tag, Transformer } from "react-konva";
 import { CropLayer, type CropControl } from "./CropLayer.tsx";
 import { SpatialIndex } from "./spatialIndex.ts";
+import { UnitIndex } from "./unitIndex.ts";
 import { splitGestureLayers } from "./gestureLayers.ts";
 import {
   nearestBindableId,
@@ -39,6 +40,9 @@ import {
 /** Shapes whose scale can be baked into geometry (the Transformer attaches to a
  *  lone one of these). Lines/pen strokes are move-only in v1. */
 const RESIZABLE = new Set(["rect", "ellipse", "text", "image"]);
+/** Node id of the synthetic proxy rect the Transformer scales a whole GROUP
+ *  through (members' own nodes never get handles). Reserved — never a shape id. */
+const UNIT_PROXY_ID = "__unit_proxy__";
 const SELECT_COLOR = "#8b5cf6";
 /** Widest glue distance (bind/attach/edge-touch) — the candidate-query pad. */
 const GLUE_PAD = 24; // = EDGE_TOUCH, the largest of the three
@@ -102,6 +106,7 @@ export function DrawCanvas({
   onCropCancel,
   cropControlRef,
   renderAll,
+  camBusyRef,
   newId,
 }: {
   state: DrawState;
@@ -150,6 +155,10 @@ export function DrawCanvas({
   /** Render EVERY shape regardless of the viewport (export needs the whole
    *  plane in the layer; normal frames cull to the visible window). */
   renderAll?: boolean;
+  /** Kept in sync with the camera-gesture bitmap-cache state so the editor's ⌘G
+   *  handler can no-op while it's live (the N-identity group restamp would force
+   *  a full recache hitch mid-pan). */
+  camBusyRef?: React.MutableRefObject<boolean>;
   newId: () => string;
 }) {
   const trRef = useRef<Konva.Transformer>(null);
@@ -168,6 +177,13 @@ export function DrawCanvas({
   if (!indexRef.current) indexRef.current = new SpatialIndex();
   indexRef.current.update(state.shapes);
   const index = indexRef.current;
+
+  // Root-unit index (group membership + union bounds) — identity-diffed like the
+  // spatial index, consumed by outlines/proxy/glue-highlight render paths.
+  const unitsRef = useRef<UnitIndex | null>(null);
+  if (!unitsRef.current) unitsRef.current = new UnitIndex();
+  unitsRef.current.update(state.shapes);
+  const units = unitsRef.current;
 
   // The camera scale, and the screen→logical factor for every UX threshold.
   const vs = view.scale;
@@ -196,6 +212,7 @@ export function DrawCanvas({
   // cached shows the bitmap scaled until then (a 180ms softness, deliberate).
   const layerRef = useRef<Konva.Layer>(null);
   const [camGesture, setCamGesture] = useState(false);
+  if (camBusyRef) camBusyRef.current = camGesture; // mirror for the editor's ⌘G gate
   const wheelIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const markWheelGesture = () => {
     setCamGesture(true);
@@ -365,11 +382,29 @@ export function DrawCanvas({
     return lum > 0.55 ? "#111111" : "#f5f5f5";
   };
 
-  const soleResizable =
-    selectedIds.length === 1 && RESIZABLE.has(shapes.find((s) => s.id === selectedIds[0])?.type ?? "");
+  // A lone UNGROUPED resizable shape — a deep-selected member never gets
+  // handles (members can't be individually resized; the group scales whole).
+  const soleSel = selectedIds.length === 1 ? shapes.find((s) => s.id === selectedIds[0]) : undefined;
+  const soleResizable = !!soleSel && RESIZABLE.has(soleSel.type) && !soleSel.groupPath;
 
-  // Bind the Transformer to a lone resizable selection (else it stays detached;
-  // multi/segment selections show dashed outlines instead).
+  // The selection is EXACTLY one multi-member group unit → the Transformer
+  // attaches to a synthetic proxy rect over the unit bounds (keepRatio forced,
+  // corner anchors only — uniform scale is the only group resize).
+  const soleUnitKey = (() => {
+    if (selectedIds.length < 2) return null;
+    const key = units.rootOf(selectedIds[0]);
+    if (!key) return null;
+    for (const id of selectedIds) if (units.rootOf(id) !== key) return null;
+    return units.membersOf(key).size === selectedIds.length ? key : null;
+  })();
+  // While a unit-scale gesture is live, the proxy renders at its GESTURE-START
+  // bounds — the Transformer owns the node; live member restamps must not fight
+  // it (same law as reflowChildrenTo for a plain resize).
+  const unitScaleRef = useRef<{ ids: string[]; origin: { x: number; y: number }; base: Box } | null>(null);
+  const proxyBounds = soleUnitKey ? (unitScaleRef.current?.base ?? units.boundsOf(soleUnitKey)) : null;
+
+  // Bind the Transformer to a lone resizable selection or a whole group's proxy
+  // (else it stays detached; other selections show dashed outlines instead).
   useEffect(() => {
     const tr = trRef.current;
     const stage = stageRef.current;
@@ -377,11 +412,14 @@ export function DrawCanvas({
     if (tool === "select" && soleResizable && selectedIds[0] !== editingId && !croppingId) {
       const node = stage.findOne<Konva.Node>(`#${selectedIds[0]}`);
       tr.nodes(node ? [node] : []);
+    } else if (tool === "select" && soleUnitKey && !editing && !croppingId) {
+      const node = stage.findOne<Konva.Node>(`#${UNIT_PROXY_ID}`);
+      tr.nodes(node ? [node] : []);
     } else {
       tr.nodes([]);
     }
     tr.getLayer()?.batchDraw();
-  }, [selectedIds, tool, soleResizable, editingId, croppingId, shapes, stageRef]);
+  }, [selectedIds, tool, soleResizable, soleUnitKey, editing, editingId, croppingId, shapes, stageRef]);
 
   const logicalPointer = (e: KonvaEventObject<unknown>) => {
     const p = e.target.getStage()?.getRelativePointerPosition();
@@ -519,14 +557,24 @@ export function DrawCanvas({
       }
       const shiftKey = "shiftKey" in e.evt && e.evt.shiftKey;
       if (shiftKey) {
-        dispatch({ type: "toggleSelect", id: hit.id });
+        dispatch({ type: "toggleSelect", id: hit.id }); // unit-grained in the reducer
+        return;
+      }
+      // ⌘/Ctrl-click a grouped member → DEEP-SELECT it (restricted edits only;
+      // no move gesture — members never move individually). On a loose shape the
+      // modifier means nothing — fall through to a plain select.
+      const metaKey = "metaKey" in e.evt && (e.evt.metaKey || e.evt.ctrlKey);
+      if (metaKey && units.isGroupedMember(hit.id)) {
+        dispatch({ type: "select", ids: [hit.id], deep: true });
         return;
       }
       // Clicking inside an existing multi-selection keeps it (drag the group);
-      // otherwise select just the hit shape. Then begin a manual move gesture —
-      // dragging a shape also drags everything fully contained within it.
+      // otherwise select just the hit shape (the reducer expands it to its full
+      // unit — so does moveClusterIds for the drag). A click on a deep-selected
+      // member re-selects non-deep: dragging is a unit-context action.
       const ids = selected.has(hit.id) && selectedIds.length > 1 ? selectedIds : [hit.id];
       if (!selected.has(hit.id)) dispatch({ type: "select", ids: [hit.id] });
+      else if (selectedIds.length === 1 && units.isGroupedMember(hit.id)) dispatch({ type: "select", ids: [hit.id] });
       dispatch({ type: "beginGesture" });
       // Followers ride by INCLUSION: the size-gated attach cluster ("largest drags
       // smallest") plus every dragged container's contents (moveClusterIds folds in
@@ -663,9 +711,12 @@ export function DrawCanvas({
     if (croppingId || tool !== "select") return;
     const hit = smallestAt(logicalPointer(e));
     if (!hit) return;
-    // Double-click: text → edit text; image → crop; any other shape → bound label.
+    // Double-click: text → edit text; image → crop; any other shape → bound
+    // label. A GROUPED image never opens the crop overlay (crop is a resize in
+    // disguise — disallowed on members); it gets the label edit instead, which
+    // stays in the permitted member-edit set (as does text content).
     if (hit.type === "text") onEditText(hit.id);
-    else if (hit.type === "image") onCropImage(hit.id);
+    else if (hit.type === "image" && !hit.groupPath) onCropImage(hit.id);
     else onEditLabel(hit.id);
   };
 
@@ -762,17 +813,30 @@ export function DrawCanvas({
           : undefined;
     if (id) bindHighlights.add(id);
   }
-  // While dragging shape(s), highlight the shape they'd attach to on drop. Skip a
-  // cluster member whose `attach` points INTRA-cluster — reattach keeps that edge
-  // verbatim (the parent rode along), so there's nothing new to attach to.
+  // While dragging shape(s), highlight what they'd attach to on drop — at UNIT
+  // level and nearest-only, mirroring reattach's ≤1-outward-edge-per-unit rule
+  // (the glow frames the would-be partner unit's bounds, never a lone member
+  // box). Skip a member whose `attach` points INTRA-cluster — reattach keeps
+  // that edge verbatim (the parent rode along), so there's nothing new to glue.
   if (moveRef.current) {
     const moving = new Set(moveRef.current.ids);
+    let best: { id: string; gap: number } | null = null;
     for (const id of moveRef.current.ids) {
       const sh = shapes.find((s) => s.id === id);
       if (!sh || (sh.attach && moving.has(sh.attach.id))) continue;
       const at = attachAt(sh, glueNear(boundingBox(sh)).filter((o) => !moving.has(o.id)), sPx(1));
-      if (at) bindHighlights.add(at.id);
+      if (!at) continue;
+      const target = shapes.find((s) => s.id === at.id);
+      if (!target) continue;
+      const sb = boundingBox(sh);
+      const tb = boundingBox(target);
+      const gap = Math.hypot(
+        Math.max(tb.x - (sb.x + sb.width), sb.x - (tb.x + tb.width), 0),
+        Math.max(tb.y - (sb.y + sb.height), sb.y - (tb.y + tb.height), 0)
+      );
+      if (!best || gap < best.gap) best = { id: at.id, gap };
     }
+    if (best) bindHighlights.add(best.id);
   }
 
   const cursor = panActive
@@ -1117,15 +1181,22 @@ export function DrawCanvas({
         {dynamicShapeNodes}
         {dynamicLabelNodes}
 
-        {/* Bind highlight — glows a shape while a line/arrow endpoint hovers it.
+        {/* Bind highlight — glows what a line/arrow endpoint or dragged shape
+            would glue to. A grouped target glows as its WHOLE unit (the glue
+            system sees the group as one element); loose targets as themselves.
             Chrome is drawn at constant SCREEN size (offsets/strokes ÷ zoom). */}
-        {shapes
-          .filter((sh) => bindHighlights.has(sh.id))
-          .map((sh) => {
-            const b = boundingBox(sh);
-            return (
+        {(() => {
+          const seen = new Set<string>();
+          const els: React.ReactElement[] = [];
+          for (const id of bindHighlights) {
+            const key = units.rootOf(id);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            const b = units.boundsOf(key);
+            if (!b) continue;
+            els.push(
               <Rect
-                key={`bind-${sh.id}`}
+                key={`bind-${key}`}
                 x={b.x - sPx(4)}
                 y={b.y - sPx(4)}
                 width={b.width + sPx(8)}
@@ -1139,17 +1210,31 @@ export function DrawCanvas({
                 listening={false}
               />
             );
-          })}
+          }
+          return els;
+        })()}
 
-        {/* Selection outlines for anything the Transformer isn't already framing. */}
+        {/* Selection outlines for anything the Transformer isn't already framing
+            (a lone resizable shape or a whole group's proxy). Partitioned into
+            root units: a fully-covered multi-member unit gets ONE group-AABB
+            outline; loose shapes get per-shape outlines; a deep-selected proper
+            subset gets its own outline plus a SUBDUED unit outline for context. */}
         {!soleResizable &&
-          shapes
-            .filter((sh) => selected.has(sh.id))
-            .map((sh) => {
-              const b = boundingBox(sh);
-              return (
+          !soleUnitKey &&
+          (() => {
+            const byUnit = new Map<string, string[]>();
+            for (const id of selectedIds) {
+              const key = units.rootOf(id);
+              if (!key) continue;
+              const arr = byUnit.get(key);
+              if (arr) arr.push(id);
+              else byUnit.set(key, [id]);
+            }
+            const els: React.ReactElement[] = [];
+            const outline = (key: string, b: Box, subdued = false) =>
+              els.push(
                 <Rect
-                  key={`sel-${sh.id}`}
+                  key={`sel-${key}`}
                   x={b.x - sPx(3)}
                   y={b.y - sPx(3)}
                   width={b.width + sPx(6)}
@@ -1157,10 +1242,29 @@ export function DrawCanvas({
                   stroke={SELECT_COLOR}
                   strokeWidth={sPx(1)}
                   dash={[sPx(4), sPx(4)]}
+                  opacity={subdued ? 0.35 : 1}
                   listening={false}
                 />
               );
-            })}
+            for (const [key, ids] of byUnit) {
+              const memberCount = units.membersOf(key).size;
+              if (memberCount > 1 && ids.length === memberCount) {
+                const b = units.boundsOf(key);
+                if (b) outline(key, b);
+              } else {
+                for (const id of ids) {
+                  const sh = shapes.find((s) => s.id === id);
+                  if (sh) outline(id, boundingBox(sh));
+                }
+                // Deep-select: the member's own outline + the unit box, subdued.
+                if (memberCount > 1) {
+                  const b = units.boundsOf(key);
+                  if (b) outline(`unit-${key}`, b, true);
+                }
+              }
+            }
+            return els;
+          })()}
 
         {marquee && (
           <Rect
@@ -1176,6 +1280,51 @@ export function DrawCanvas({
           />
         )}
 
+        {/* Synthetic proxy rect for whole-group scaling: the Transformer attaches
+            HERE (members' own nodes never get handles). Invisible + non-listening
+            (transform events are fired by the Transformer directly, not the hit
+            graph). Its props stay at the gesture-start bounds during a scale so
+            React never fights the Transformer's node mutations; the model-driven
+            scaleUnitGhost restamps the members themselves each frame. */}
+        {proxyBounds && !editing && !croppingId && (
+          <Rect
+            id={UNIT_PROXY_ID}
+            x={proxyBounds.x}
+            y={proxyBounds.y}
+            width={proxyBounds.width}
+            height={proxyBounds.height}
+            listening={false}
+            onTransformStart={(e) => {
+              dispatch({ type: "beginGesture" });
+              const anchor = trRef.current?.getActiveAnchor() ?? "bottom-right";
+              const b = proxyBounds;
+              // The fixed point is the corner OPPOSITE the active anchor.
+              const origin = {
+                x: anchor.includes("left") ? b.x + b.width : b.x,
+                y: anchor.includes("top") ? b.y + b.height : b.y,
+              };
+              unitScaleRef.current = { ids: [...selectedIds], origin, base: b };
+            }}
+            onTransform={(e) => {
+              const g = unitScaleRef.current;
+              if (!g) return;
+              // keepRatio + corner anchors → uniform; read one axis.
+              dispatch({ type: "scaleUnitGhost", ids: g.ids, factor: e.target.scaleX(), origin: g.origin });
+            }}
+            onTransformEnd={(e) => {
+              const g = unitScaleRef.current;
+              unitScaleRef.current = null;
+              const node = e.target;
+              const factor = node.scaleX();
+              node.scaleX(1);
+              node.scaleY(1);
+              node.position({ x: g?.base.x ?? node.x(), y: g?.base.y ?? node.y() });
+              if (g) dispatch({ type: "scaleUnit", ids: g.ids, factor, origin: g.origin, distScale: 1 / vsRef.current });
+              dispatch({ type: "endGesture" });
+            }}
+          />
+        )}
+
         <Transformer
           ref={trRef}
           rotateEnabled={false}
@@ -1183,6 +1332,16 @@ export function DrawCanvas({
           anchorStroke={SELECT_COLOR}
           anchorSize={8}
           ignoreStroke
+          // Group proxy mode: uniform only — corner anchors, no flip. (keepRatio
+          // stays at Konva's default TRUE: with the default shiftBehavior, corner
+          // drags keep proportion with or without shift — exactly the uniform
+          // constraint the proxy needs, and unchanged single-shape behavior.)
+          flipEnabled={!soleUnitKey}
+          enabledAnchors={
+            soleUnitKey
+              ? ["top-left", "top-right", "bottom-left", "bottom-right"]
+              : ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
+          }
           boundBoxFunc={(oldBox, newBox) => (newBox.width < 6 || newBox.height < 6 ? oldBox : newBox)}
         />
 

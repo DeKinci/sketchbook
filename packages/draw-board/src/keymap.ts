@@ -26,6 +26,7 @@ export const DRAW_KEYMAP: DrawShortcut[] = [
   { keys: ["mod+c"], description: "Copy selection" },
   { keys: ["mod+v"], description: "Paste (shapes, image, or text)" },
   { keys: ["mod+a"], description: "Select all" },
+  { keys: ["mod+g"], description: "Group selection / ungroup a group" },
   { keys: ["1"], description: "Shape tool (again: rect ⇄ ellipse)" },
   { keys: ["2"], description: "Connector tool (again: line → arrow → double)" },
   { keys: ["3"], description: "Text tool" },

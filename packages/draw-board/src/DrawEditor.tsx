@@ -15,8 +15,10 @@ import {
   clonePastedShapes,
   contentBounds,
   fontForStroke,
+  groupActionFor,
   isSelectable,
   labelFont,
+  normalizeGroups,
   toDoc,
   STROKE_WIDTHS,
   CANVAS_BG_DARK,
@@ -184,6 +186,10 @@ export function DrawEditor({
   const stateRef = useRef(state);
   stateRef.current = state;
   const clipboard = useRef<Shape[]>([]);
+  // Mirrors the canvas's camera-gesture bitmap-cache state — gates ⌘G (see the
+  // keydown handler). NOTE: this blocks ⌘G during ANY live camera gesture, a
+  // deliberately conservative superset of "cache is live" (momentary, invisible).
+  const camBusyRef = useRef(false);
 
   // Host injection points, read through refs so callbacks stay stable.
   const notifyRef = useRef(onNotify);
@@ -399,7 +405,12 @@ export function DrawEditor({
       }
     } else if (cur.kind === "edit-text" && cur.id) {
       if (text) dispatch({ type: "setText", id: cur.id, text });
-      else dispatch({ type: "deleteShapes", ids: [cur.id] });
+      else if (stateRef.current.shapes.find((sh) => sh.id === cur.id)?.groupPath) {
+        // A GROUPED text cleared empty must NOT route through deleteShapes — that
+        // expands to the whole unit and would nuke the group from a deliberate
+        // member-edit context. Keep the (empty) member; ungroup to prune.
+        dispatch({ type: "setText", id: cur.id, text: "" });
+      } else dispatch({ type: "deleteShapes", ids: [cur.id] });
     } else if (cur.kind === "label" && cur.id) {
       dispatch({ type: "beginGesture" });
       dispatch({ type: "patchShape", id: cur.id, patch: { label: text || undefined } });
@@ -522,13 +533,16 @@ export function DrawEditor({
     pasteShapes(clipboard.current);
     return true;
   }, [pasteShapes]);
-  /** Parse a system-clipboard text as a shapes envelope; null if it's not one. */
+  /** Parse a system-clipboard text as a shapes envelope; null if it's not one.
+   *  Group data is normalized here (cross-board/cross-version paste is an import
+   *  path) — the INTERNAL clipboard skips this safely because it's only ever
+   *  seeded from live state, which is normalized at open. */
   const parseEnvelope = useCallback((text: string): Shape[] | null => {
     if (!text.includes(SHAPES_ENVELOPE)) return null;
     try {
       const parsed = JSON.parse(text) as Record<string, unknown>;
       const shapes = parsed?.[SHAPES_ENVELOPE] ? (parsed.shapes as Shape[] | undefined) : undefined;
-      return Array.isArray(shapes) && shapes.length ? shapes : null;
+      return Array.isArray(shapes) && shapes.length ? normalizeGroups(shapes) : null;
     } catch {
       return null;
     }
@@ -849,6 +863,16 @@ export function DrawEditor({
         } else if (k === "a") {
           e.preventDefault();
           dispatch({ type: "select", ids: stateRef.current.shapes.map((s) => s.id) });
+        } else if (k === "g") {
+          // ⌘G toggles: ≥2 selected units → group; a selection exactly covering
+          // one group → ungroup one level (groupActionFor decides; the reducer
+          // re-guards). Inert while the camera-gesture bitmap cache is live —
+          // the N-identity restamp would force a full recache hitch mid-pan.
+          e.preventDefault();
+          if (camBusyRef.current) return;
+          const action = groupActionFor(stateRef.current.shapes, stateRef.current.selectedIds);
+          if (action === "group") dispatch({ type: "groupSelection", gid: newShapeId() });
+          else if (action === "ungroup") dispatch({ type: "ungroup" });
         } else if (policy !== "fixed" && (k === "=" || k === "+")) {
           // ⌘= / ⌘- / ⌘0 zoom the BOARD while it holds focus (like every canvas
           // app) — plain -/= stay stroke-size keys.
@@ -972,6 +996,13 @@ export function DrawEditor({
       strokeWidth={state.strokeWidth}
       palette={palette}
       hasSelection={state.selectedIds.length > 0}
+      groupAction={groupActionFor(state.shapes, state.selectedIds)}
+      onGroup={() => {
+        if (camBusyRef.current) return;
+        const action = groupActionFor(stateRef.current.shapes, stateRef.current.selectedIds);
+        if (action === "group") dispatch({ type: "groupSelection", gid: newShapeId() });
+        else if (action === "ungroup") dispatch({ type: "ungroup" });
+      }}
       canUndo={canUndo(state)}
       canRedo={canRedo(state)}
       onTool={(tool) => dispatch({ type: "setTool", tool })}
@@ -1047,6 +1078,7 @@ export function DrawEditor({
               onCropCancel={onCropCancel}
               cropControlRef={cropControlRef}
               renderAll={renderAll}
+              camBusyRef={camBusyRef}
               newId={newShapeId}
             />
             {session && (
