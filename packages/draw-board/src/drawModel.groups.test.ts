@@ -591,6 +591,107 @@ describe("size-control scale mode (scaleStepTarget + stepped scaleUnit)", () => 
   });
 });
 
+describe("stretchUnit (side-anchor disproportional resize)", () => {
+  const grp = () => {
+    let s = seeded([
+      box("r1", { x: 100, y: 100, width: 40, height: 30 }),
+      box("r2", { x: 200, y: 100, width: 40, height: 30 }),
+      text("t", { x: 120, y: 160, fontSize: 18 }),
+      arrow("ar", [140, 115, 200, 115]), // spans the gap between r1 and r2
+    ]);
+    return grouped(s, ["r1", "r2", "t", "ar"], "g1");
+  };
+
+  it("box members KEEP size and reposition (centers affine per axis); points remap; text/stroke undistorted; undoable", () => {
+    let s = grp();
+    const past0 = s.past.length;
+    s = drawReducer(s, { type: "beginGesture" });
+    // Stretch ×1.5 horizontally about the unit's left edge (x=100).
+    s = drawReducer(s, { type: "stretchUnit", ids: ["r1"], fx: 1.5, fy: 1, origin: { x: 100, y: 0 } });
+    s = drawReducer(s, { type: "endGesture" });
+    const r1 = byId(s, "r1") as BoxShape;
+    const r2 = byId(s, "r2") as BoxShape;
+    // Sizes untouched…
+    expect([r1.width, r1.height, r2.width, r2.height]).toEqual([40, 30, 40, 30]);
+    expect(r1.strokeWidth).toBe(3);
+    // …centers remapped: r1 center 120→130, r2 center 220→280.
+    expect(r1.x + 20).toBeCloseTo(130, 5);
+    expect(r2.x + 20).toBeCloseTo(280, 5);
+    expect(r1.y).toBe(100); // fy=1 → vertical untouched
+    // The connector's points remapped per-point (it keeps spanning the gap).
+    const ar = byId(s, "ar") as SegmentShape;
+    expect(ar.points[0]).toBeCloseTo(100 + (140 - 100) * 1.5, 5);
+    expect(ar.points[2]).toBeCloseTo(100 + (200 - 100) * 1.5, 5);
+    expect(ar.points[1]).toBe(115);
+    // Text: fontSize unchanged, center remapped.
+    const t = byId(s, "t") as TextShape;
+    expect(t.fontSize).toBe(18);
+    expect(s.past.length).toBe(past0 + 1); // ONE entry (history-neutral in-gesture)
+    const before = grp().shapes;
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes).toEqual(before);
+  });
+
+  it("ghost frames then commit converges with a direct commit (no compounding)", () => {
+    const direct = (() => {
+      let s = grp();
+      s = drawReducer(s, { type: "beginGesture" });
+      s = drawReducer(s, { type: "stretchUnit", ids: ["r1"], fx: 1.6, fy: 1, origin: { x: 100, y: 0 } });
+      return drawReducer(s, { type: "endGesture" });
+    })();
+    const ghosted = (() => {
+      let s = grp();
+      s = drawReducer(s, { type: "beginGesture" });
+      s = drawReducer(s, { type: "stretchUnitGhost", ids: ["r1"], fx: 1.2, fy: 1, origin: { x: 100, y: 0 } });
+      s = drawReducer(s, { type: "stretchUnitGhost", ids: ["r1"], fx: 1.4, fy: 1, origin: { x: 100, y: 0 } });
+      s = drawReducer(s, { type: "stretchUnit", ids: ["r1"], fx: 1.6, fy: 1, origin: { x: 100, y: 0 } });
+      return drawReducer(s, { type: "endGesture" });
+    })();
+    expect(ghosted.shapes).toEqual(direct.shapes);
+  });
+
+  it("DORMANT edges stretch their offsets (dx×fx) so a later ungroup restores the stretched layout", () => {
+    // b glued edge-to-edge right of a (gap 0); grouping PARKS that edge dormant.
+    let s = seeded([box("a", { x: 100, y: 100, width: 40, height: 30 }), box("b", { x: 140, y: 100, width: 40, height: 30 })]);
+    s = drawReducer(s, { type: "select", ids: ["b"] });
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "translateShapes", ids: ["b"], dx: 1, dy: 0 });
+    s = drawReducer(s, { type: "reattach", ids: ["b"] });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(byId(s, "b").attach?.id).toBe("a");
+    s = grouped(s, ["a", "b"], "g1");
+    const parked = byId(s, "b").dormant?.find((d) => d.gid === "g1");
+    expect(parked?.attach?.kind).toBe("box");
+    const dx0 = parked!.attach!.kind === "box" ? parked!.attach!.dx : NaN;
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "stretchUnit", ids: ["a"], fx: 3, fy: 1, origin: { x: 100, y: 0 } });
+    s = drawReducer(s, { type: "endGesture" });
+    const stretched = byId(s, "b").dormant?.find((d) => d.gid === "g1");
+    expect(stretched!.attach!.kind === "box" && stretched!.attach!.dx).toBeCloseTo(dx0 * 3, 5);
+    // Ungroup restores the edge live (into the empty slot) at the stretched offset.
+    s = drawReducer(s, { type: "select", ids: ["a", "b"] });
+    s = drawReducer(s, { type: "ungroup" });
+    expect(byId(s, "b").attach?.id).toBe("a");
+  });
+
+  it("an outside follower glued to a member rides the stretch (reflow + re-judge)", () => {
+    let s = grp();
+    // Attach an outside note under r2 through the real drag path.
+    s = drawReducer(s, { type: "addShapes", shapes: [box("note", { x: 205, y: 132, width: 30, height: 20 })], detectAttach: true });
+    expect(byId(s, "note").attach?.id).toBe("r2");
+    const note0 = byId(s, "note") as BoxShape;
+    const rel0 = { dx: note0.x - (byId(s, "r2") as BoxShape).x, dy: note0.y - (byId(s, "r2") as BoxShape).y };
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "stretchUnit", ids: ["r1"], fx: 1.5, fy: 1, origin: { x: 100, y: 0 } });
+    s = drawReducer(s, { type: "endGesture" });
+    // r2 repositioned; the note kept its anchor and rode along.
+    expect(byId(s, "note").attach?.id).toBe("r2");
+    const note1 = byId(s, "note") as BoxShape;
+    expect(note1.x - (byId(s, "r2") as BoxShape).x).toBeCloseTo(rel0.dx, 5);
+    expect(note1.y - (byId(s, "r2") as BoxShape).y).toBeCloseTo(rel0.dy, 5);
+  });
+});
+
 describe("clipboard + import transforms", () => {
   let n = 0;
   const newId = () => `n${n++}`;

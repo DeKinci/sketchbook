@@ -544,6 +544,26 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     await expect(page.getByRole("button", { name: "Group selection (⌘G)" })).toBeDisabled();
   });
 
+  test("side-anchor group resize STRETCHES the layout: members reposition, sizes stay", async ({ page }) => {
+    await openSeeded(page, [
+      rect("a", 300, 100, 80, 60, { groupPath: ["g"] }),
+      rect("b", 420, 100, 80, 60, { groupPath: ["g"] }),
+    ]);
+    // Select the group, then drag the MIDDLE-RIGHT anchor 100px right:
+    // unit bounds 300..500 → fx 1.5 about the left edge.
+    const sel = await toScreen(page, { x: 340, y: 130 });
+    await page.mouse.click(sel.x, sel.y);
+    await dragLogical(page, { x: 500, y: 130 }, { x: 600, y: 130 });
+    await expect.poll(async () => (await shape(page, "b")).x).toBeCloseTo(500, 0); // center 460→540
+    const a = await shape(page, "a");
+    const b = await shape(page, "b");
+    expect(a.x).toBeCloseTo(320, 0); // center 340→360
+    // NO distortion: sizes, vertical placement, and stroke all unchanged.
+    expect([a.width, a.height, b.width, b.height]).toEqual([80, 60, 80, 60]);
+    expect([a.y, b.y]).toEqual([100, 100]);
+    expect(a.strokeWidth).toBe(3);
+  });
+
   test("secret size ladder + size dots scale a selected group/image proportionally", async ({ page }) => {
     const PNG1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     await openSeeded(page, [

@@ -410,7 +410,7 @@ export function DrawCanvas({
   // While a unit-scale gesture is live, the proxy renders at its GESTURE-START
   // bounds — the Transformer owns the node; live member restamps must not fight
   // it (same law as reflowChildrenTo for a plain resize).
-  const unitScaleRef = useRef<{ ids: string[]; origin: { x: number; y: number }; base: Box } | null>(null);
+  const unitScaleRef = useRef<{ ids: string[]; origin: { x: number; y: number }; base: Box; side: boolean } | null>(null);
   const proxyBounds = soleUnitKey ? (unitScaleRef.current?.base ?? units.boundsOf(soleUnitKey)) : null;
 
   // Bind the Transformer to a lone resizable selection or a whole group's proxy
@@ -1350,29 +1350,36 @@ export function DrawCanvas({
               dispatch({ type: "beginGesture" });
               const anchor = trRef.current?.getActiveAnchor() ?? "bottom-right";
               const b = proxyBounds;
-              // The fixed point is the corner OPPOSITE the active anchor.
+              // SIDE anchors stretch one axis (members reposition, sizes kept);
+              // corner anchors scale uniformly (keepRatio). The fixed point is
+              // the corner/edge OPPOSITE the active anchor (the unused axis'
+              // origin is inert — its factor stays 1).
+              const side = anchor === "middle-left" || anchor === "middle-right" || anchor === "top-center" || anchor === "bottom-center";
               const origin = {
                 x: anchor.includes("left") ? b.x + b.width : b.x,
                 y: anchor.includes("top") ? b.y + b.height : b.y,
               };
-              unitScaleRef.current = { ids: [...selectedIds], origin, base: b };
+              unitScaleRef.current = { ids: [...selectedIds], origin, base: b, side };
             }}
             onTransform={(e) => {
               const g = unitScaleRef.current;
               if (!g) return;
+              if (g.side) dispatch({ type: "stretchUnitGhost", ids: g.ids, fx: e.target.scaleX(), fy: e.target.scaleY(), origin: g.origin });
               // keepRatio + corner anchors → uniform; read one axis.
-              dispatch({ type: "scaleUnitGhost", ids: g.ids, factor: e.target.scaleX(), origin: g.origin });
+              else dispatch({ type: "scaleUnitGhost", ids: g.ids, factor: e.target.scaleX(), origin: g.origin });
             }}
             onTransformEnd={(e) => {
               suppressDbl(); // an anchor drag is not a "click" (see suppressDblUntil)
               const g = unitScaleRef.current;
               unitScaleRef.current = null;
               const node = e.target;
-              const factor = node.scaleX();
+              const fx = node.scaleX();
+              const fy = node.scaleY();
               node.scaleX(1);
               node.scaleY(1);
               node.position({ x: g?.base.x ?? node.x(), y: g?.base.y ?? node.y() });
-              if (g) dispatch({ type: "scaleUnit", ids: g.ids, factor, origin: g.origin, distScale: 1 / vsRef.current });
+              if (g?.side) dispatch({ type: "stretchUnit", ids: g.ids, fx, fy, origin: g.origin, distScale: 1 / vsRef.current });
+              else if (g) dispatch({ type: "scaleUnit", ids: g.ids, factor: fx, origin: g.origin, distScale: 1 / vsRef.current });
               dispatch({ type: "endGesture" });
             }}
           />
@@ -1385,16 +1392,13 @@ export function DrawCanvas({
           anchorStroke={SELECT_COLOR}
           anchorSize={8}
           ignoreStroke
-          // Group proxy mode: uniform only — corner anchors, no flip. (keepRatio
-          // stays at Konva's default TRUE: with the default shiftBehavior, corner
-          // drags keep proportion with or without shift — exactly the uniform
-          // constraint the proxy needs, and unchanged single-shape behavior.)
+          // Group proxy mode: corners scale uniformly (keepRatio stays at
+          // Konva's default TRUE — corner drags keep proportion, exactly the
+          // uniform constraint the proxy needs), SIDE anchors stretch one axis
+          // (single-axis regardless of keepRatio — members reposition, sizes
+          // kept), and no flip. Same 8 anchors as any other shape.
           flipEnabled={!soleUnitKey}
-          enabledAnchors={
-            soleUnitKey
-              ? ["top-left", "top-right", "bottom-left", "bottom-right"]
-              : ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
-          }
+          enabledAnchors={["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]}
           boundBoxFunc={(oldBox, newBox) => (newBox.width < 6 || newBox.height < 6 ? oldBox : newBox)}
         />
 

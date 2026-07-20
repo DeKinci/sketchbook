@@ -1017,6 +1017,74 @@ function scaleMemberFrom(base: Shape, memberIds: Set<string>, factor: number, or
   return out;
 }
 
+/** STRETCH a unit member (disproportional axis resize) from its BASE geometry:
+ *  box-like members (rect/ellipse/image/text) keep their SIZE and reposition —
+ *  their centers remap affinely per axis relative to the dragged box — while
+ *  point-based members (line/arrow/pen) remap per-point so connectors keep
+ *  spanning what they connect. Nothing distorts: no width/height/fontSize/
+ *  strokeWidth change (that's the corner-drag {@link scaleMemberFrom}'s job).
+ *  Glue metrics are NOT touched here — the stretchUnit commit re-derives intra
+ *  anchors from the final geometry (metric scaling assumes sizes scaled too). */
+function stretchMemberFrom(base: Shape, fx: number, fy: number, origin: { x: number; y: number }): Shape {
+  const px = (x: number) => origin.x + (x - origin.x) * fx;
+  const py = (y: number) => origin.y + (y - origin.y) * fy;
+  switch (base.type) {
+    case "rect":
+    case "ellipse":
+    case "image": {
+      return { ...base, x: px(base.x + base.width / 2) - base.width / 2, y: py(base.y + base.height / 2) - base.height / 2 };
+    }
+    case "text": {
+      const b = boundingBox(base);
+      return { ...base, x: px(b.x + b.width / 2) - b.width / 2, y: py(b.y + b.height / 2) - b.height / 2 };
+    }
+    case "line":
+    case "arrow":
+      return { ...base, points: [px(base.points[0]), py(base.points[1]), px(base.points[2]), py(base.points[3])] };
+    case "pen":
+      return { ...base, points: base.points.map((v, i) => (i % 2 === 0 ? px(v) : py(v))) };
+  }
+}
+
+/** The shared post-transform settle for a unit whose members just scaled or
+ *  stretched (the scaleUnit tail, extracted verbatim):
+ *  1. the unit's own OUTWARD anchor (member → non-member) refreshed keep-or-drop
+ *     from the new geometry — the target didn't transform, the metrics are stale;
+ *  2. followers ride to their (old) anchors against the transformed members;
+ *  3. EVERY inbound edge targeting a member re-judged with `distScale`:
+ *     keep-or-drop + anchor refresh, metadata-only (the follower stays where the
+ *     reflow put it; bound arrows already re-clung via reflowBindings). */
+function settleTransformedUnit(shapes: Shape[], memberIds: Set<string>, distScale: number): Shape[] {
+  let next = shapes.map((sh) => {
+    if (!memberIds.has(sh.id) || !sh.attach || memberIds.has(sh.attach.id)) return sh;
+    const target = shapes.find((o) => o.id === sh.attach!.id);
+    const at = target ? attachAt(sh, [target], distScale) : undefined;
+    if (at) return { ...sh, attach: at };
+    const { attach: _drop, ...rest } = sh;
+    return rest as Shape;
+  });
+  next = reflowAll(next, memberIds);
+  return next.map((sh) => {
+    if (memberIds.has(sh.id) || !sh.attach || !memberIds.has(sh.attach.id) || isConnector(sh)) return sh;
+    const target = next.find((o) => o.id === sh.attach!.id);
+    const at = target ? attachAt(sh, [target], distScale) : undefined;
+    if (at) return { ...sh, attach: at };
+    const { attach: _drop, ...rest } = sh;
+    return rest as Shape;
+  });
+}
+
+/** Per-axis metric stretch for a {@link DormantEdge}: box offsets spread with
+ *  the layout (dx×fx, dy×fy); gaps stay — member sizes didn't change, so
+ *  absolute touch distances remain valid. Radial angles are best-effort kept
+ *  (the ungroup settle-reflow absorbs any residual). */
+function stretchDormant(d: DormantEdge, fx: number, fy: number): DormantEdge {
+  return {
+    ...d,
+    attach: d.attach && d.attach.kind === "box" ? { ...d.attach, dx: d.attach.dx * fx, dy: d.attach.dy * fy } : d.attach,
+  };
+}
+
 /** Scale a {@link DormantEdge}'s metrics — dormant edges scale at EVERY level so
  *  a later ungroup restores geometry consistent with the scaled members. */
 function scaleDormant(d: DormantEdge, factor: number): DormantEdge {
@@ -1059,6 +1127,15 @@ export type DrawAction =
   // inbound-edge re-judge pass. History-NEUTRAL inside begin/endGesture, like
   // commitResize. `distScale` keeps glue judgments screen-true.
   | { type: "scaleUnit"; ids: string[]; factor: number; origin: { x: number; y: number }; distScale?: number }
+  // Live frame of a proxy-rect unit STRETCH (side-anchor disproportional
+  // resize): box members reposition (centers affine per axis, sizes kept),
+  // point members remap per-point. Derived from gestureBase — no compounding.
+  | { type: "stretchUnitGhost"; ids: string[]; fx: number; fy: number; origin: { x: number; y: number } }
+  // Commit a unit stretch: geometry as the ghost, then intra-unit anchors
+  // RE-DERIVED from the final geometry (kept verbatim where underivable),
+  // dormant box offsets ×fx/×fy, and the same outward-refresh + reflow +
+  // inbound re-judge tail as scaleUnit. History-NEUTRAL inside begin/endGesture.
+  | { type: "stretchUnit"; ids: string[]; fx: number; fy: number; origin: { x: number; y: number }; distScale?: number }
   // Set the logical canvas size (blank sketch fills its container on open — done
   // once, before anything is drawn, so no shape coordinates need remapping).
   | { type: "resizeCanvas"; width: number; height: number }
@@ -1628,34 +1705,45 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         if (scaled.dormant) scaled.dormant = scaled.dormant.map((d) => scaleDormant(d, a.factor));
         return scaled;
       });
-      // The unit's own OUTWARD anchor (member → non-member): refresh keep-or-drop
-      // from the scaled geometry — the target didn't scale, so the stored metrics
-      // are stale (the refreshOwnAnchor rule).
-      next = next.map((sh) => {
-        if (!memberIds.has(sh.id) || !sh.attach || memberIds.has(sh.attach.id)) return sh;
-        const target = next.find((o) => o.id === sh.attach!.id);
-        const at = target ? attachAt(sh, [target], distScale) : undefined;
-        if (at) return { ...sh, attach: at };
-        const { attach: _drop, ...rest } = sh;
-        return rest as Shape;
-      });
-      // Followers ride to their (old) anchors against the scaled members first…
-      next = reflowAll(next, memberIds);
-      // …then EVERY inbound edge targeting a member is re-judged with the
-      // action's distScale: keep-or-drop + anchor refresh (anchor dx/dy are
-      // absolute lengths and the border scaled under them). Metadata-only — the
-      // follower stays exactly where the reflow put it. Bound arrows already
-      // re-clung via reflowBindings.
-      next = next.map((sh) => {
-        if (memberIds.has(sh.id) || !sh.attach || !memberIds.has(sh.attach.id) || isConnector(sh)) return sh;
-        const target = next.find((o) => o.id === sh.attach!.id);
-        const at = target ? attachAt(sh, [target], distScale) : undefined;
-        if (at) return { ...sh, attach: at };
-        const { attach: _drop, ...rest } = sh;
-        return rest as Shape;
-      });
       // History-neutral: the surrounding gesture's endGesture owns the push.
-      return { ...s, shapes: next };
+      return { ...s, shapes: settleTransformedUnit(next, memberIds, distScale) };
+    }
+    case "stretchUnitGhost": {
+      // LIVE stretch frame — mirror of scaleUnitGhost with the stretch bake.
+      if (!s.gestureBase) return s;
+      const memberIds = new Set(expandIdsToUnits(s.gestureBase, a.ids));
+      const baseById = new Map(s.gestureBase.map((sh) => [sh.id, sh]));
+      const next = s.shapes.map((sh) => {
+        const b = baseById.get(sh.id);
+        return memberIds.has(sh.id) && b ? stretchMemberFrom(b, a.fx, a.fy, a.origin) : sh;
+      });
+      return { ...s, shapes: reflowAll(next, memberIds) };
+    }
+    case "stretchUnit": {
+      // Commit a disproportional unit stretch (side-anchor resize): reposition
+      // members from the gestureBase, re-derive INTRA-unit anchors from the
+      // final geometry (metric scaling would assume sizes changed too — they
+      // didn't; underivable edges are kept verbatim and settle at ungroup),
+      // stretch dormant offsets, then the shared settle tail.
+      const base = s.gestureBase ?? s.shapes;
+      const memberIds = new Set(expandIdsToUnits(base, a.ids));
+      if (!memberIds.size) return s;
+      const distScale = a.distScale ?? 1;
+      const baseById = new Map(base.map((sh) => [sh.id, sh]));
+      let next = s.shapes.map((sh) => {
+        const b = baseById.get(sh.id);
+        if (!memberIds.has(sh.id) || !b) return sh;
+        const stretched = stretchMemberFrom(b, a.fx, a.fy, a.origin);
+        if (stretched.dormant) stretched.dormant = stretched.dormant.map((d) => stretchDormant(d, a.fx, a.fy));
+        return stretched;
+      });
+      next = next.map((sh) => {
+        if (!memberIds.has(sh.id) || !sh.attach || !memberIds.has(sh.attach.id)) return sh;
+        const target = next.find((o) => o.id === sh.attach!.id);
+        const at = target ? attachAt(sh, [target], distScale) : undefined;
+        return at ? { ...sh, attach: at } : sh; // keep verbatim when underivable
+      });
+      return { ...s, shapes: settleTransformedUnit(next, memberIds, distScale) };
     }
     case "reattach": {
       // Unit-aware stamping: moved ids are whole units by construction (expand
