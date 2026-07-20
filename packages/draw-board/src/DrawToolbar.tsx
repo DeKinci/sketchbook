@@ -260,6 +260,18 @@ export function DrawToolbar({
           <Type size={20} strokeWidth={2.25} />
         </IconButton>
       </div>
+
+      {/* Group/ungroup toggle — mirrors ⌘G (groupAction decides which). An
+          action on the selection, not an armable tool, so it sits outside the
+          one-use cluster. */}
+      <IconButton
+        label={groupAction === "ungroup" ? "Ungroup (⌘G)" : "Group selection (⌘G)"}
+        disabled={groupAction === null}
+        onClick={onGroup}
+        className="!text-ink-200 disabled:opacity-30"
+      >
+        {groupAction === "ungroup" ? <Ungroup size={20} strokeWidth={2.25} /> : <Group size={20} strokeWidth={2.25} />}
+      </IconButton>
       </div>
 
       {/* Style cluster (color + size) — on mobile this is the top row. */}
@@ -327,15 +339,6 @@ export function DrawToolbar({
           menu) gets trapped BELOW the board's z-10 overlays (minimap). */}
       <div className="z-30 flex items-center gap-2 max-md:order-3 max-md:basis-full max-md:justify-between md:absolute md:right-3 md:top-1/2 md:-translate-y-1/2">
         <div className="flex items-center gap-0.5">
-          {/* Group/ungroup toggle — mirrors ⌘G (groupAction decides which). */}
-          <IconButton
-            label={groupAction === "ungroup" ? "Ungroup (⌘G)" : "Group selection (⌘G)"}
-            disabled={groupAction === null}
-            onClick={onGroup}
-            className="disabled:opacity-30"
-          >
-            {groupAction === "ungroup" ? <Ungroup size={16} /> : <Group size={16} />}
-          </IconButton>
           <IconButton label="Undo (⌘Z)" disabled={!canUndo} onClick={onUndo} className="disabled:opacity-30">
             <Undo2 size={16} />
           </IconButton>
