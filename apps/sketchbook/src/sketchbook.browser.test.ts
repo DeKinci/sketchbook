@@ -656,6 +656,23 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     // pre-fix leading mismatch showed up as a systematic multi-px drop.
     expect(Math.abs(fieldTop - canvasTop)).toBeLessThanOrEqual(1);
   });
+
+  test("two quick clicks at DIFFERENT spots never synthesize a double-click (no phantom editor)", async ({ page }) => {
+    await openSeeded(page, [rect("r", 100, 100, 80, 60)]);
+    // Konva's dblclick window is time-based and position-blind: a deselect-click
+    // on empty canvas followed by a quick click on a shape used to "double-click"
+    // the shape and pop its label editor mid-flow.
+    const empty = await toScreen(page, { x: 500, y: 320 });
+    const onRect = await toScreen(page, { x: 140, y: 130 });
+    await page.mouse.click(empty.x, empty.y);
+    await page.mouse.click(onRect.x, onRect.y); // back-to-back: well inside the window
+    await page.waitForTimeout(300);
+    await expect(page.locator(".draw-text-input")).toHaveCount(0); // no phantom label editor
+    // A GENUINE double-click (two still clicks in one place) still opens it.
+    await page.waitForTimeout(500); // let the window from the clicks above lapse
+    await page.mouse.dblclick(onRect.x, onRect.y);
+    await expect(page.locator(".draw-text-input")).toBeVisible();
+  });
 });
 
 test("export menu stacks ABOVE the minimap (hit-test in the overlap)", async ({ page }) => {

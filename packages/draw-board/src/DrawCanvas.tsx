@@ -179,6 +179,21 @@ export function DrawCanvas({
   const suppressDbl = () => {
     suppressDblUntil.current = performance.now() + 500;
   };
+  // …and it is POSITION-blind too: two still clicks at unrelated spots inside
+  // the window (deselect-click, then a quick click on a shape) "double-click"
+  // the second spot. A genuine double-click is two clicks in ONE place, so a
+  // primary down landing far from the previous one arms the same suppression.
+  // 600ms generously covers Konva's 400ms up-to-up window measured down-to-down.
+  const lastDownRef = useRef<{ x: number; y: number; t: number } | null>(null);
+  const suppressFarApartDblPair = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
+    if ("button" in e.evt && e.evt.button !== 0) return; // Konva pairs primary clicks only
+    const screen = e.target.getStage()?.getPointerPosition();
+    if (!screen) return;
+    const prev = lastDownRef.current;
+    const slop = "button" in e.evt ? 8 : 24; // finger jitter > mouse jitter
+    if (prev && performance.now() - prev.t < 600 && Math.hypot(screen.x - prev.x, screen.y - prev.y) > slop) suppressDbl();
+    lastDownRef.current = { x: screen.x, y: screen.y, t: performance.now() };
+  };
 
   // Spatial index over shape bboxes — every "what's here" query (culling, hit
   // tests, glue candidates) goes through it instead of scanning all N shapes.
@@ -555,6 +570,9 @@ export function DrawCanvas({
   };
 
   const onStageDown = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
+    // Before any early-return: even a click that only blurs an editor or lands
+    // during crop is half of a potential synthetic dblclick pair.
+    suppressFarApartDblPair(e);
     if (croppingId) return; // the crop overlay owns all input while active
     if (editing) return; // let the click blur+commit the open text, nothing else
     if (pinchRef.current) return; // two fingers own the camera
