@@ -544,24 +544,40 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     await expect(page.getByRole("button", { name: "Group selection (⌘G)" })).toBeDisabled();
   });
 
-  test("side-anchor group resize STRETCHES the layout: members reposition, sizes stay", async ({ page }) => {
+  test("side-anchor group resize: members FOLLOW the stretch (sizes track the axis), bound arrows re-cling with absolute gap", async ({ page }) => {
     await openSeeded(page, [
       rect("a", 300, 100, 80, 60, { groupPath: ["g"] }),
       rect("b", 420, 100, 80, 60, { groupPath: ["g"] }),
+      // A LOOSE arrow bound onto member b with a 6px breathing gap (its tip
+      // sits at b's left edge 420 − 6 = 414; the free end at 385 is outside
+      // both members, in the corridor between them).
+      { id: "bd", type: "arrow", stroke: "#000", strokeWidth: 3, points: [385, 130, 414, 130], bindEnd: { id: "b", angle: 0, gap: 6 } },
     ]);
     // Select the group, then drag the MIDDLE-RIGHT anchor 100px right:
     // unit bounds 300..500 → fx 1.5 about the left edge.
     const sel = await toScreen(page, { x: 340, y: 130 });
     await page.mouse.click(sel.x, sel.y);
     await dragLogical(page, { x: 500, y: 130 }, { x: 600, y: 130 });
-    await expect.poll(async () => (await shape(page, "b")).x).toBeCloseTo(500, 0); // center 460→540
+    // Boxes map fully affinely on the stretched axis: position remaps, width×1.5.
+    await expect.poll(async () => (await shape(page, "b")).x).toBeCloseTo(480, 0); // 300 + 120×1.5
     const a = await shape(page, "a");
     const b = await shape(page, "b");
-    expect(a.x).toBeCloseTo(320, 0); // center 340→360
-    // NO distortion: sizes, vertical placement, and stroke all unchanged.
-    expect([a.width, a.height, b.width, b.height]).toEqual([80, 60, 80, 60]);
-    expect([a.y, b.y]).toEqual([100, 100]);
+    expect(a.x).toBeCloseTo(300, 0);
+    expect(a.width).toBeCloseTo(120, 0);
+    expect(b.width).toBeCloseTo(120, 0);
+    // The untouched axis and stroke stay put (no uniform factor exists;
+    // heights ride fy which the Transformer reports with float noise → closeTo).
+    for (const v of [a.y, b.y]) expect(v).toBeCloseTo(100, 5);
+    for (const v of [a.height, b.height]) expect(v).toBeCloseTo(60, 5);
     expect(a.strokeWidth).toBe(3);
+    // The bound arrow FOLLOWED ITS BINDING: not a member (its free end never
+    // moves) — the settle re-clung its tip to b's stretched border keeping the
+    // ABSOLUTE 6px gap (b center 540 − half-width 60 − 6 = 474), where a naive
+    // remap would have stretched the gap to 9.
+    const bd = await shape(page, "bd");
+    expect(bd.points![0]).toBeCloseTo(385, 0);
+    expect(bd.points![2]).toBeCloseTo(474, 0);
+    expect((bd as { bindEnd?: { gap: number } }).bindEnd?.gap).toBe(6);
   });
 
   test("secret size ladder + size dots scale a selected group/image proportionally", async ({ page }) => {

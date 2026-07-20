@@ -1054,13 +1054,14 @@ function scaleMemberFrom(base: Shape, memberIds: Set<string>, factor: number, or
 }
 
 /** STRETCH a unit member (disproportional axis resize) from its BASE geometry:
- *  box-like members (rect/ellipse/image/text) keep their SIZE and reposition —
- *  their centers remap affinely per axis relative to the dragged box — while
- *  point-based members (line/arrow/pen) remap per-point so connectors keep
- *  spanning what they connect. Nothing distorts: no width/height/fontSize/
- *  strokeWidth change (that's the corner-drag {@link scaleMemberFrom}'s job).
- *  Glue metrics are NOT touched here — the stretchUnit commit re-derives intra
- *  anchors from the final geometry (metric scaling assumes sizes scaled too). */
+ *  internal shapes FOLLOW the scaling — box members (rect/ellipse/image) map
+ *  fully affinely per axis (position remaps, width×fx / height×fy), point
+ *  members (line/arrow/pen) remap per-point. TEXT is the exception: glyphs
+ *  can't stretch, so it keeps its %-position (center remaps affinely) at its
+ *  own size. fontSize/strokeWidth never change — there is no uniform factor
+ *  (that's the corner-drag {@link scaleMemberFrom}'s job). Bound connectors
+ *  are only seeded here — the reflow tail re-clings them to the stretched
+ *  targets (bindings win over the raw remap; unbound ones keep the remap). */
 function stretchMemberFrom(base: Shape, fx: number, fy: number, origin: { x: number; y: number }): Shape {
   const px = (x: number) => origin.x + (x - origin.x) * fx;
   const py = (y: number) => origin.y + (y - origin.y) * fy;
@@ -1068,7 +1069,7 @@ function stretchMemberFrom(base: Shape, fx: number, fy: number, origin: { x: num
     case "rect":
     case "ellipse":
     case "image": {
-      return { ...base, x: px(base.x + base.width / 2) - base.width / 2, y: py(base.y + base.height / 2) - base.height / 2 };
+      return { ...base, x: px(base.x), y: py(base.y), width: base.width * fx, height: base.height * fy };
     }
     case "text": {
       const b = boundingBox(base);
@@ -1111,9 +1112,9 @@ function settleTransformedUnit(shapes: Shape[], memberIds: Set<string>, distScal
 }
 
 /** Per-axis metric stretch for a {@link DormantEdge}: box offsets spread with
- *  the layout (dx×fx, dy×fy); gaps stay — member sizes didn't change, so
- *  absolute touch distances remain valid. Radial angles are best-effort kept
- *  (the ungroup settle-reflow absorbs any residual). */
+ *  the layout (dx×fx, dy×fy). Radial gaps/angles are best-effort kept — an
+ *  anisotropic stretch has no single factor for a radial distance (the ungroup
+ *  settle-reflow absorbs any residual). */
 function stretchDormant(d: DormantEdge, fx: number, fy: number): DormantEdge {
   return {
     ...d,
@@ -1164,8 +1165,9 @@ export type DrawAction =
   // commitResize. `distScale` keeps glue judgments screen-true.
   | { type: "scaleUnit"; ids: string[]; factor: number; origin: { x: number; y: number }; distScale?: number }
   // Live frame of a proxy-rect unit STRETCH (side-anchor disproportional
-  // resize): box members reposition (centers affine per axis, sizes kept),
-  // point members remap per-point. Derived from gestureBase — no compounding.
+  // resize): members FOLLOW the scaling (boxes affine per axis incl. size,
+  // points per-point; text keeps %-position at its own size). Derived from
+  // gestureBase — no compounding.
   | { type: "stretchUnitGhost"; ids: string[]; fx: number; fy: number; origin: { x: number; y: number } }
   // Commit a unit stretch: geometry as the ghost, then intra-unit anchors
   // RE-DERIVED from the final geometry (kept verbatim where underivable),
@@ -1772,11 +1774,13 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       return { ...s, shapes: reflowAll(next, memberIds) };
     }
     case "stretchUnit": {
-      // Commit a disproportional unit stretch (side-anchor resize): reposition
-      // members from the gestureBase, re-derive INTRA-unit anchors from the
-      // final geometry (metric scaling would assume sizes changed too — they
-      // didn't; underivable edges are kept verbatim and settle at ungroup),
-      // stretch dormant offsets, then the shared settle tail.
+      // Commit a disproportional unit stretch (side-anchor resize): remap
+      // members from the gestureBase (boxes stretch, text keeps %-position),
+      // re-derive INTRA-unit anchors from the final geometry (an anisotropic
+      // stretch has no single metric factor; underivable edges are kept
+      // verbatim and settle at ungroup), stretch dormant offsets, then the
+      // shared settle tail — whose reflow re-clings bound member connectors
+      // to the stretched targets (bindings win; unbound ones keep the remap).
       const base = s.gestureBase ?? s.shapes;
       const memberIds = new Set(expandIdsToUnits(base, a.ids));
       if (!memberIds.size) return s;

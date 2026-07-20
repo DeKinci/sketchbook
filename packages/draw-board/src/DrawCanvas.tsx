@@ -1368,7 +1368,8 @@ export function DrawCanvas({
               dispatch({ type: "beginGesture" });
               const anchor = trRef.current?.getActiveAnchor() ?? "bottom-right";
               const b = proxyBounds;
-              // SIDE anchors stretch one axis (members reposition, sizes kept);
+              // SIDE anchors stretch one axis (members follow the scaling —
+              // boxes stretch, text keeps %-position, bound arrows re-cling);
               // corner anchors scale uniformly (keepRatio). The fixed point is
               // the corner/edge OPPOSITE the active anchor (the unused axis'
               // origin is inert — its factor stays 1).
@@ -1413,8 +1414,8 @@ export function DrawCanvas({
           // Group proxy mode: corners scale uniformly (keepRatio stays at
           // Konva's default TRUE — corner drags keep proportion, exactly the
           // uniform constraint the proxy needs), SIDE anchors stretch one axis
-          // (single-axis regardless of keepRatio — members reposition, sizes
-          // kept), and no flip. Same 8 anchors as any other shape.
+          // (single-axis regardless of keepRatio — members follow the scaling,
+          // text undistorted), and no flip. Same 8 anchors as any other shape.
           flipEnabled={!soleUnitKey}
           enabledAnchors={["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]}
           boundBoxFunc={(oldBox, newBox) => (newBox.width < 6 || newBox.height < 6 ? oldBox : newBox)}

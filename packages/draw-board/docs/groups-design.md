@@ -8,9 +8,11 @@ render-cache) is out of scope for v1.
 ## Rules (product)
 
 1. Grouped elements are **rigid**: geometry frozen relative to each other. The
-   group as a whole can be **moved** and **scaled** (uniform only); members can
-   never be individually moved, resized, cropped, retyped, or deleted while
-   grouped.
+   group as a whole can be **moved**, **scaled** (corner anchors, uniform) and
+   **stretched** (side anchors, per-axis: members follow the scaling — boxes
+   stretch, text keeps its %-position undistorted, bound arrows follow their
+   bindings, unbound ones stretch too); members can never be individually
+   moved, resized, cropped, retyped, or deleted while grouped.
 2. A group **acts as a single element**: dragging any member drags the group;
    delete/erase on a member removes the whole group; the glue system sees the
    group as one unit — including glue the group itself initiates, and
@@ -150,6 +152,19 @@ rigidity; text may go sub-8px — accepted); only a unit-level minimum (unit box
 ≥ 6 SCREEN px, enforced in the Transformer's boundBoxFunc which already works
 in screen space) gates the gesture. An all-stroke group IS scalable via the
 proxy (rule 1) even though lone strokes are move-only — intended asymmetry.
+
+**Stretch — the side-anchor analog, `stretchUnit` `{ ids, fx, fy, origin,
+distScale }`** (+ `stretchUnitGhost` live frames): a disproportional per-axis
+resize where members FOLLOW the scaling. Boxes (rect/ellipse/image) map fully
+affinely per axis (position remaps, `width×fx` / `height×fy`); point members
+(line/arrow/pen) remap per-point; TEXT keeps its %-position (center remaps) at
+its own size — glyphs never distort. No `fontSize`/`strokeWidth` change (no
+uniform factor exists). Bound arrows follow their BINDINGS, not the raw remap —
+the settle's `reflowBindings` re-clings them to the stretched targets with
+absolute gaps; unbound ones keep the per-point remap. Intra-unit attach anchors
+re-derive from the final geometry (no single metric factor; underivable edges
+kept verbatim, settle at ungroup); dormant box offsets stretch `dx×fx`/`dy×fy`,
+radial metrics best-effort.
 
 **Restricted edits**: allowed on members — `setColor`, `setStrokeWidth`
 (incl. text font-size semantics), `setText`, label edit. Disallowed while

@@ -686,34 +686,98 @@ describe("stretchUnit (side-anchor disproportional resize)", () => {
     return grouped(s, ["r1", "r2", "t", "ar"], "g1");
   };
 
-  it("box members KEEP size and reposition (centers affine per axis); points remap; text/stroke undistorted; undoable", () => {
+  it("members FOLLOW the scaling: boxes stretch per axis, points remap, text keeps %-position undistorted; undoable", () => {
     let s = grp();
     const past0 = s.past.length;
+    const t0 = boundingBox(byId(s, "t"));
     s = drawReducer(s, { type: "beginGesture" });
     // Stretch ×1.5 horizontally about the unit's left edge (x=100).
     s = drawReducer(s, { type: "stretchUnit", ids: ["r1"], fx: 1.5, fy: 1, origin: { x: 100, y: 0 } });
     s = drawReducer(s, { type: "endGesture" });
     const r1 = byId(s, "r1") as BoxShape;
     const r2 = byId(s, "r2") as BoxShape;
-    // Sizes untouched…
-    expect([r1.width, r1.height, r2.width, r2.height]).toEqual([40, 30, 40, 30]);
+    // Boxes map fully affinely per axis: position remaps AND width×fx…
+    expect([r1.x, r1.width, r2.x, r2.width]).toEqual([100, 60, 250, 60]);
+    // …the untouched axis and stroke stay put (no uniform factor exists).
+    expect([r1.y, r1.height, r2.height]).toEqual([100, 30, 30]);
     expect(r1.strokeWidth).toBe(3);
-    // …centers remapped: r1 center 120→130, r2 center 220→280.
-    expect(r1.x + 20).toBeCloseTo(130, 5);
-    expect(r2.x + 20).toBeCloseTo(280, 5);
-    expect(r1.y).toBe(100); // fy=1 → vertical untouched
-    // The connector's points remapped per-point (it keeps spanning the gap).
+    // Centers land at the same affine image (130 / 280).
+    expect(r1.x + r1.width / 2).toBeCloseTo(130, 5);
+    expect(r2.x + r2.width / 2).toBeCloseTo(280, 5);
+    // The connector's points remapped per-point (it keeps spanning the gap:
+    // 160 = r1's new right edge, 250 = r2's new left edge).
     const ar = byId(s, "ar") as SegmentShape;
-    expect(ar.points[0]).toBeCloseTo(100 + (140 - 100) * 1.5, 5);
-    expect(ar.points[2]).toBeCloseTo(100 + (200 - 100) * 1.5, 5);
+    expect(ar.points[0]).toBeCloseTo(160, 5);
+    expect(ar.points[2]).toBeCloseTo(250, 5);
     expect(ar.points[1]).toBe(115);
-    // Text: fontSize unchanged, center remapped.
+    // Text: glyphs can't stretch — fontSize kept, CENTER remapped in % exactly.
     const t = byId(s, "t") as TextShape;
     expect(t.fontSize).toBe(18);
+    expect(t.x).toBeCloseTo(100 + (t0.x + t0.width / 2 - 100) * 1.5 - t0.width / 2, 5);
     expect(s.past.length).toBe(past0 + 1); // ONE entry (history-neutral in-gesture)
     const before = grp().shapes;
     s = drawReducer(s, { type: "undo" });
     expect(s.shapes).toEqual(before);
+  });
+
+  it("vertical stretch: heights follow fy, text keeps its own size at its %-position on the stretched axis", () => {
+    let s = seeded([
+      box("a", { x: 100, y: 100, width: 40, height: 30 }),
+      box("b", { x: 100, y: 200, width: 40, height: 30 }),
+      text("t", { x: 110, y: 150, fontSize: 18 }),
+    ]);
+    s = grouped(s, ["a", "b", "t"], "g1");
+    const t0 = boundingBox(byId(s, "t"));
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "stretchUnit", ids: ["a"], fx: 1, fy: 2, origin: { x: 0, y: 100 } });
+    s = drawReducer(s, { type: "endGesture" });
+    const a = byId(s, "a") as BoxShape;
+    const b = byId(s, "b") as BoxShape;
+    const t = byId(s, "t") as TextShape;
+    expect([a.y, a.height, a.width]).toEqual([100, 60, 40]);
+    expect([b.y, b.height]).toEqual([300, 60]);
+    expect(t.fontSize).toBe(18); // undistorted
+    expect(t.x).toBe(110); // fx=1 → horizontal untouched
+    expect(t.y).toBeCloseTo(100 + (t0.y + t0.height / 2 - 100) * 2 - t0.height / 2, 5);
+  });
+
+  it("arrows: an inbound BOUND arrow follows its binding (re-clings, absolute gap); member arrows/pens remap and keep spanning", () => {
+    let s = seeded([
+      box("l", { x: 100, y: 100, width: 40, height: 30 }),
+      box("r", { x: 300, y: 100, width: 40, height: 30 }),
+      arrow("mem", [140, 115, 300, 115]), // member: drawn edge-to-edge l→r
+      pen("pn", [150, 150, 250, 180]), // member stroke
+    ]);
+    s = grouped(s, ["l", "r", "mem", "pn"], "g1");
+    // An OUTSIDE arrow bound onto member r with a 5px breathing gap — inbound
+    // edges survive grouping untouched. Its points sit at the reflow fixpoint
+    // for the unstretched r (center 320 + half-width 20 + gap 5 = 345).
+    s = drawReducer(s, {
+      type: "addShapes",
+      shapes: [arrow("bd", [420, 115, 345, 115], { bindEnd: { id: "r", angle: 0, gap: 5 } })],
+    });
+    s = drawReducer(s, { type: "select", ids: ["l"] });
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "stretchUnit", ids: ["l"], fx: 2, fy: 1, origin: { x: 100, y: 0 } });
+    s = drawReducer(s, { type: "endGesture" });
+    // Members stretched: l' spans 100..180, r' spans 500..580.
+    expect((byId(s, "l") as BoxShape).width).toBe(80);
+    expect((byId(s, "r") as BoxShape).x).toBe(500);
+    // The member arrow keeps spanning the stretched gap edge-to-edge…
+    const mem = byId(s, "mem") as SegmentShape;
+    expect(mem.points[0]).toBeCloseTo(180, 5); // l's new right edge
+    expect(mem.points[2]).toBeCloseTo(500, 5); // r's new left edge
+    // …and the pen remapped per-point.
+    expect((byId(s, "pn") as FreehandShape).points).toEqual([200, 150, 400, 180]);
+    // The bound outside arrow FOLLOWED ITS BINDING: it is not a member (no
+    // remap touches it) — the settle re-clung it to r's stretched border,
+    // keeping the ABSOLUTE 5px gap. r's center moved past the arrow's free
+    // end, so the bind swings to the near (left) side: 540 − 40 − 5 = 495.
+    const bd = byId(s, "bd") as SegmentShape;
+    expect(bd.points[0]).toBe(420); // free end untouched
+    expect(bd.points[2]).toBeCloseTo(495, 5);
+    expect(bd.points[3]).toBeCloseTo(115, 5);
+    expect(bd.bindEnd?.gap).toBe(5); // gap never scaled by the stretch
   });
 
   it("ghost frames then commit converges with a direct commit (no compounding)", () => {
@@ -758,21 +822,27 @@ describe("stretchUnit (side-anchor disproportional resize)", () => {
     expect(byId(s, "b").attach?.id).toBe("a");
   });
 
-  it("an outside follower glued to a member rides the stretch (reflow + re-judge)", () => {
+  it("an outside follower glued to a member rides the stretch to its ANCHOR on the stretched box (reflow + re-judge)", () => {
     let s = grp();
     // Attach an outside note under r2 through the real drag path.
     s = drawReducer(s, { type: "addShapes", shapes: [box("note", { x: 205, y: 132, width: 30, height: 20 })], detectAttach: true });
     expect(byId(s, "note").attach?.id).toBe("r2");
-    const note0 = byId(s, "note") as BoxShape;
-    const rel0 = { dx: note0.x - (byId(s, "r2") as BoxShape).x, dy: note0.y - (byId(s, "r2") as BoxShape).y };
+    const att0 = byId(s, "note").attach!; // the PRE-stretch record the reflow rides
+    expect(att0.kind).toBe("box");
     s = drawReducer(s, { type: "beginGesture" });
     s = drawReducer(s, { type: "stretchUnit", ids: ["r1"], fx: 1.5, fy: 1, origin: { x: 100, y: 0 } });
     s = drawReducer(s, { type: "endGesture" });
-    // r2 repositioned; the note kept its anchor and rode along.
+    // r2 stretched (40→60 wide); the note kept its edge and rode to the OLD
+    // anchor applied to the NEW geometry — fractional ax tracks the stretched
+    // width, literal dx/dy stay (no uniform factor exists to scale them).
     expect(byId(s, "note").attach?.id).toBe("r2");
     const note1 = byId(s, "note") as BoxShape;
-    expect(note1.x - (byId(s, "r2") as BoxShape).x).toBeCloseTo(rel0.dx, 5);
-    expect(note1.y - (byId(s, "r2") as BoxShape).y).toBeCloseTo(rel0.dy, 5);
+    const r2b = byId(s, "r2") as BoxShape;
+    expect(r2b.width).toBe(60);
+    if (att0.kind === "box") {
+      expect(note1.x + note1.width / 2).toBeCloseTo(r2b.x + att0.ax * r2b.width + att0.dx, 5);
+      expect(note1.y + note1.height / 2).toBeCloseTo(r2b.y + att0.ay * r2b.height + att0.dy, 5);
+    }
   });
 });
 
