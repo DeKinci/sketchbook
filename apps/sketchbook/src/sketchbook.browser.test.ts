@@ -488,6 +488,52 @@ test("glue preview is bond-specific: the pinned edge lights up, an ellipse arcs,
   }).toBe(0);
 });
 
+test("dblclick on a shape spawns a FREE caption inside it — or engages the existing one, never a duplicate", async ({ page }) => {
+  await openSeeded(page, [rect("R", 100, 100, 200, 120)]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const toScreen = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+  type StoredShape = { id: string; type: string; text?: string; x?: number; attach?: { id: string; ax?: number; ay?: number } };
+  const shapesStored = async () => (await stored(page))[0].doc.shapes as StoredShape[];
+
+  // Dblclick the empty container: a caption session opens at the click point;
+  // typing + Enter mints a FREE text shape bonded by containment — not text
+  // baked into the rect.
+  const at = toScreen({ x: 200, y: 160 });
+  await page.mouse.dblclick(at.x, at.y);
+  await page.waitForSelector(".draw-text-input");
+  await page.keyboard.type("cap");
+  await page.keyboard.press("Enter");
+  await expect.poll(async () => (await shapesStored()).length).toBe(2);
+  const t1 = (await shapesStored()).find((s) => s.type === "text")!;
+  expect(t1.text).toBe("cap");
+  expect(t1.x).toBeCloseTo(200, 0); // spawned where the dblclick aimed
+  expect(t1.attach).toMatchObject({ id: "R", ax: 0.5, ay: 0.5 }); // a bond, not a baked-in label
+
+  // Dblclick elsewhere INSIDE the shape (clear of the caption's block): the
+  // EXISTING caption's editor opens preloaded — engaged, not duplicated.
+  await page.waitForTimeout(700); // outlive the far-apart dblclick suppression
+  const off = toScreen({ x: 130, y: 205 });
+  await page.mouse.dblclick(off.x, off.y);
+  await page.waitForSelector(".draw-text-input");
+  expect(await page.inputValue(".draw-text-input")).toBe("cap");
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("hello");
+  await page.keyboard.press("Enter");
+  await expect.poll(async () => (await shapesStored()).find((s) => s.type === "text")?.text).toBe("hello");
+  expect((await shapesStored()).length).toBe(2); // still ONE caption
+
+  // Dblclick on empty canvas still does nothing.
+  await page.waitForTimeout(700);
+  const empty = toScreen({ x: 600, y: 500 });
+  await page.mouse.dblclick(empty.x, empty.y);
+  await page.waitForTimeout(200);
+  await expect(page.locator(".draw-text-input")).toHaveCount(0);
+});
+
 test.describe("rich exports + import drop surfaces", () => {
   /** Drop a file (bytes given as base64) onto a selector via a synthetic DragEvent. */
   async function dropFile(page: Page, selector: string, b64: string, name: string, type: string) {

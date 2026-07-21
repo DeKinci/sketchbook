@@ -827,14 +827,39 @@ export function DrawCanvas({
     // to the Transformer.
     const parent = e.target.getParent() as Konva.Node | null;
     if (parent && parent.getClassName?.() === "Transformer") return;
-    const hit = smallestAt(logicalPointer(e));
+    const p = logicalPointer(e);
+    const hit = smallestAt(p);
     if (!hit) return;
-    // Double-click: text → edit text; image → crop. A GROUPED image never opens
-    // the crop overlay (crop is a resize in disguise — disallowed on members).
-    // Other shapes have no double-click action — captions are free text shapes
-    // that bond to them.
+    // Double-click: text → edit text; image → crop (a GROUPED image never opens
+    // the crop overlay — crop is a resize in disguise, disallowed on members).
+    // A container (rect/ellipse) engages its CAPTION: the nearest text bonded
+    // to it (or a bond-less text sitting inside it), else a fresh text spawned
+    // at the click point. Captions are always FREE text shapes glued by
+    // containment/edge bonds — never text baked into the shape — so they
+    // relocate, restyle, and rebind like anything else.
     if (hit.type === "text") onEditText(hit.id);
     else if (hit.type === "image" && !hit.groupPath) onCropImage(hit.id);
+    else if (hit.type === "rect" || hit.type === "ellipse") {
+      const b = boundingBox(hit);
+      const inside = (tb: Box) => tb.x >= b.x && tb.y >= b.y && tb.x + tb.width <= b.x + b.width && tb.y + tb.height <= b.y + b.height;
+      const captions = shapes.filter((s) => s.type === "text" && (s.attach ? s.attach.id === hit.id : inside(boundingBox(s))));
+      if (captions.length) {
+        // Nearest caption to the click — a box with several texts engages the
+        // one the user aimed at.
+        const d2 = (s: Shape) => {
+          const sb = boundingBox(s);
+          return (sb.x + sb.width / 2 - p.x) ** 2 + (sb.y + sb.height / 2 - p.y) ** 2;
+        };
+        const caption = captions.reduce((best, s) => (d2(s) < d2(best) ? s : best));
+        dispatch({ type: "select", ids: [caption.id] });
+        onEditText(caption.id);
+      } else {
+        // The pair's first click selected the container — clear it so no
+        // Transformer frames a shape under the typing overlay.
+        dispatch({ type: "select", ids: [] });
+        onTextClick(p.x, p.y);
+      }
+    }
   };
 
   // The parent's LIVE box mid-transform, WITHOUT disturbing its node (the
