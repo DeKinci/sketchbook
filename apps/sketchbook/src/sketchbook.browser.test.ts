@@ -223,6 +223,57 @@ test("a pen TAP (no drag) leaves a visible dot: committed, persisted, inked in t
   expect(px.corner).toBeLessThan(60); // board background, not ink
 });
 
+test("typography: text typed in a shape wraps at its edge (stored as a box), center-anchors, and rides the parent's resize", async ({ page }) => {
+  await openSeeded(page, [rect("r1", 100, 100, 360, 220)]); // right edge 460, bottom 320
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const toScreen = async (pt: { x: number; y: number }) => {
+    const cam = await page.evaluate(() => {
+      const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+      return { x: s.x(), y: s.y(), scale: s.scaleX() };
+    });
+    return { x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale };
+  };
+
+  // Text tool → click well inside the rect (clear of every edge) → type a
+  // sentence far wider than the room to the rect's right edge.
+  await page.getByRole("button", { name: "Text (3)" }).click();
+  const at = await toScreen({ x: 150, y: 160 });
+  await page.mouse.click(at.x, at.y);
+  const source = "the quick brown fox jumps over the lazy dog near the fence";
+  await page.keyboard.type(source);
+  await page.keyboard.press("Enter");
+  await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length ?? 0).toBe(2);
+  type StoredText = { type: string; x: number; y: number; text: string; width?: number; attach?: { id: string; ax: number; ay: number } };
+  const before = ((await stored(page))[0].doc.shapes as StoredText[]).find((sh) => sh.type === "text")!;
+  expect(before.text).toBe(source); // the SOURCE stays unwrapped — lines derive
+  expect(before.width).toBeCloseTo(460 - 150 - 6, 0); // wrap box = room to the parent's right edge (minus inset)
+  expect(before.attach).toMatchObject({ id: "r1", ax: 0.5, ay: 0.5 }); // placed mid-shape → center bond
+
+  // Stretch the rect 100px wider by its middle-right anchor: the caption keeps
+  // its offset from the parent's CENTER → it slides +50 with it.
+  const inRect = await toScreen({ x: 120, y: 300 }); // inside the rect, clear of the text block
+  await page.mouse.click(inRect.x, inRect.y);
+  const handle = await toScreen({ x: 460, y: 210 });
+  await page.mouse.move(handle.x, handle.y);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + 8, handle.y); // arm the transform
+  const target = await toScreen({ x: 560, y: 210 });
+  await page.mouse.move(target.x, target.y);
+  await page.mouse.up();
+  await expect
+    .poll(async () => (((await stored(page))[0].doc.shapes as StoredText[]).find((sh) => sh.type === "text")!.x - before.x))
+    .toBeCloseTo(50, 0);
+
+  // The SVG export carries the wrap: one <text> per rendered line.
+  await page.getByRole("button", { name: "More export options" }).click();
+  const downloadP = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download as SVG" }).click();
+  const svg = fs.readFileSync((await (await downloadP).path())!, "utf8");
+  const lines = [...svg.matchAll(/<text [^>]*>([^<]*)<\/text>/g)].map((m) => m[1]);
+  expect(lines.length).toBeGreaterThan(1); // it wrapped
+  expect(lines.join(" ").replace(/\s+/g, " ")).toContain("lazy dog"); // …into the source's words
+});
+
 test.describe("rich exports + import drop surfaces", () => {
   /** Drop a file (bytes given as base64) onto a selector via a synthetic DragEvent. */
   async function dropFile(page: Page, selector: string, b64: string, name: string, type: string) {

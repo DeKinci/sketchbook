@@ -51,6 +51,18 @@ describe("exportSvg", () => {
     expect(svg.match(/<rect[^>]*x="300"[^>]*stroke-dasharray/)).toBeNull(); // solid: no dash attr
   });
 
+  it("boxed text exports per wrapped line — the model's own wrap, one <text> per line", () => {
+    const svg = exportSvg(
+      doc([{ id: "t", type: "text", stroke: "#f5a623", strokeWidth: 3, x: 20, y: 50, text: "aaa bbb ccc", fontSize: 10, width: 40 } as Shape])
+    );
+    expect(svg).toMatch(/y="60"[^>]*>aaa bbb<\/text>/); // line 1 at y + fontSize
+    expect(svg).toMatch(/y="70"[^>]*>ccc<\/text>/); // line 2 one line-height below
+    // Explicit newlines stack the same way without a box.
+    const free = exportSvg(doc([{ id: "t", type: "text", stroke: "#f5a623", strokeWidth: 3, x: 20, y: 50, text: "one\ntwo", fontSize: 10 } as Shape]));
+    expect(free).toMatch(/y="60"[^>]*>one<\/text>/);
+    expect(free).toMatch(/y="70"[^>]*>two<\/text>/);
+  });
+
   it("labels render: chip on strokes, centered text on areas", () => {
     const shapes: Shape[] = [
       { ...rect("r"), label: "box label" } as Shape,

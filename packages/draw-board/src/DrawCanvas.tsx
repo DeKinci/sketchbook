@@ -3,6 +3,7 @@ import type Konva from "konva";
 import type { KonvaEventObject } from "konva/lib/Node.js";
 import { Stage, Layer, Rect, Ellipse, Line, Arrow, Text, Image as KonvaImage, Group, Label, Tag, Transformer } from "react-konva";
 import { CropLayer, type CropControl } from "./CropLayer.tsx";
+import { wrapLines } from "./textMetrics.ts";
 import { SpatialIndex } from "./spatialIndex.ts";
 import { UnitIndex } from "./unitIndex.ts";
 import { splitGestureLayers } from "./gestureLayers.ts";
@@ -471,8 +472,16 @@ export function DrawCanvas({
     if (!tr || !stage) return;
     if (tool === "select" && soleResizable && selectedIds[0] !== editingId && !croppingId) {
       const node = stage.findOne<Konva.Node>(`#${selectedIds[0]}`);
+      // Text has no free height — it derives from wrapping — so the vertical
+      // side handles go: corners scale the type, left/right resize the wrap box.
+      tr.enabledAnchors(
+        soleSel?.type === "text"
+          ? ["top-left", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-right"]
+          : ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
+      );
       tr.nodes(node ? [node] : []);
     } else if (tool === "select" && soleUnitKey && !editing && !croppingId) {
+      tr.enabledAnchors(["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]);
       const node = stage.findOne<Konva.Node>(`#${UNIT_PROXY_ID}`);
       tr.nodes(node ? [node] : []);
     } else {
@@ -843,7 +852,14 @@ export function DrawCanvas({
     node.scaleX(1);
     node.scaleY(1);
     if (sh.type === "text") {
-      dispatch({ type: "commitResize", id: sh.id, patch: { x: node.x(), y: node.y(), fontSize: Math.max(8, sh.fontSize * sy) }, distScale: 1 / vsRef.current });
+      // Text is a BOX: a side-handle drag (sx moves alone — corners keepRatio)
+      // resizes the WRAP WIDTH and the lines reflow, glyphs unscaled; a corner
+      // drag scales the type (and the box with it, keeping the same lines).
+      const side = Math.abs(sy - 1) < 0.001 && Math.abs(sx - 1) >= 0.001;
+      const patch = side
+        ? { x: node.x(), y: node.y(), width: Math.max(24, boundingBox(sh).width * sx) }
+        : { x: node.x(), y: node.y(), fontSize: Math.max(8, sh.fontSize * sy), ...(sh.width !== undefined && { width: sh.width * sy }) };
+      dispatch({ type: "commitResize", id: sh.id, patch, distScale: 1 / vsRef.current });
     } else if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "image") {
       dispatch({
         type: "commitResize",
@@ -1244,7 +1260,9 @@ export function DrawCanvas({
                 />
               );
             case "text":
-              return <Text key={sh.id} {...common(sh)} x={sh.x} y={sh.y} text={sh.text} fontSize={sh.fontSize} fill={stroke} />;
+              // The MODEL wraps (textMetrics) and the node renders its lines —
+              // never Konva's own wrap — so bbox/hit/exports agree exactly.
+              return <Text key={sh.id} {...common(sh)} x={sh.x} y={sh.y} text={wrapLines(sh.text, sh.fontSize, sh.width).join("\n")} fontSize={sh.fontSize} fill={stroke} />;
             case "image": {
               const img = imgEls[sh.id];
               if (!img || sh.id === croppingId) return null; // decoding, or the crop overlay renders it

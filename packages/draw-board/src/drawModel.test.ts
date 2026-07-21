@@ -37,6 +37,7 @@ import {
   type Shape,
   type Attach,
 } from "./drawModel.ts";
+import { lineWidth } from "./textMetrics.ts";
 
 const box = (id: string, over: Partial<BoxShape> = {}): BoxShape => ({
   id,
@@ -992,14 +993,15 @@ describe("drawReducer — direction-agnostic resize (commitResize / reflowChildr
   });
 
   it("18b. commitResize on TEXT: neighbor follows the derived bbox; no snap-back", () => {
-    const T = text("T", { x: 0, y: 0, text: "hello", fontSize: 20 }); // bbox width ~60
+    const T = text("T", { x: 0, y: 0, text: "hello", fontSize: 20 });
     const R = box("R", { x: 60, y: 4, width: 16, height: 16, attach: { id: "T", kind: "box", ax: 1, ay: 0.5, dx: 8, dy: 0 } });
     let s = seeded([T, R]);
     s = drawReducer(s, { type: "beginGesture" });
     s = drawReducer(s, { type: "commitResize", id: "T", patch: { fontSize: 40 } });
     s = drawReducer(s, { type: "endGesture" });
     expect(s.shapes.find((x) => x.id === "T")).toMatchObject({ fontSize: 40, x: 0 }); // no snap-back
-    expect((s.shapes.find((x) => x.id === "R") as BoxShape).x).toBeCloseTo(120); // bbox 60→120, center 128 → x120
+    // R's center rides T's (metric-true) right edge + dx(8) → x = edge + 8 - 8.
+    expect((s.shapes.find((x) => x.id === "R") as BoxShape).x).toBeCloseTo(lineWidth("hello", 40));
   });
 
   it("18c. reflowChildrenTo converges — the neighbor's spot is frame-order-independent (D9)", () => {
@@ -1040,9 +1042,10 @@ describe("drawReducer — attach-on-create + paste glue", () => {
     // adjacent to p's right edge + flag → attaches
     let s = drawReducer(seeded([p]), { type: "addShapes", detectAttach: true, shapes: [text("adj", { x: 100, y: 44, text: "hi", fontSize: 18 })] });
     expect(attachOf(s.shapes.find((x) => x.id === "adj"))?.id).toBe("p");
-    // centered inside + flag → NOT attached (plain containment)
+    // centered inside + flag → TEXT center-anchors (typography: a caption keeps
+    // its center offset through parent resizes; non-text stays containment-only)
     s = drawReducer(seeded([p]), { type: "addShapes", detectAttach: true, shapes: [text("mid", { x: 40, y: 44, text: "hi", fontSize: 18 })] });
-    expect(attachOf(s.shapes.find((x) => x.id === "mid"))).toBeUndefined();
+    expect(attachOf(s.shapes.find((x) => x.id === "mid"))).toMatchObject({ id: "p", kind: "box", ax: 0.5, ay: 0.5 });
     // adjacent, WITHOUT the flag → never stamped
     s = drawReducer(seeded([p]), { type: "addShapes", shapes: [text("noflag", { x: 100, y: 44, text: "hi", fontSize: 18 })] });
     expect(attachOf(s.shapes.find((x) => x.id === "noflag"))).toBeUndefined();
@@ -1607,5 +1610,79 @@ describe("stroke style (setStrokeStyle / dashFor)", () => {
     s = drawReducer(s, { type: "endDraw" });
     expect(s.draftId).toBeNull();
     expect(s.shapes.find((sh) => sh.id === "d1")!.strokeStyle).toBe("dashed");
+  });
+});
+
+describe("typography: text is a box (wrap width, containment anchors, box resizes)", () => {
+  const tAt = (sh: Shape | undefined) => {
+    const b = boundingBox(sh!);
+    return { cx: b.x + b.width / 2, cy: b.y + b.height / 2 };
+  };
+
+  it("bbox is wrap-aware: newlines stack lines, a boxed text is exactly its box wide", () => {
+    const multi = boundingBox(text("t", { text: "aaa\nbbbbbb", fontSize: 10 }));
+    expect(multi.height).toBe(20); // 2 lines × fontSize (Konva lineHeight 1)
+    const boxed = boundingBox(text("t", { text: "aaa bbb ccc", fontSize: 10, width: 40 }));
+    expect(boxed.width).toBe(40);
+    expect(boxed.height).toBe(20); // wraps to ["aaa bbb", "ccc"]
+  });
+
+  it("text fully inside a container CENTER-anchors to it; edge-hugging text keeps the edge pin", () => {
+    const r = box("r1", { x: 0, y: 0, width: 300, height: 200 });
+    const centered = attachAt(text("t1", { x: 100, y: 80 }), [r]);
+    expect(centered).toMatchObject({ id: "r1", kind: "box", ax: 0.5, ay: 0.5 });
+    // Hugging the right edge (within EDGE_TOUCH) → the edge bond is preferred.
+    const hugging = attachAt(text("t2", { x: 281, y: 90 }), [r]);
+    expect(hugging).toMatchObject({ id: "r1", kind: "box", ax: 1 });
+    // A rect centered inside stays plain containment — no weld for area shapes.
+    expect(attachAt(box("inner", { x: 100, y: 80, width: 40, height: 30 }), [r])).toBeUndefined();
+    // Nested containers: the INNERMOST wins.
+    const outer = box("outer", { x: -50, y: -50, width: 500, height: 400 });
+    expect(attachAt(text("t3", { x: 100, y: 80 }), [outer, r])).toMatchObject({ id: "r1" });
+  });
+
+  it("parent resize re-seats center-anchored text (offset from center preserved); edge-bonded rides its edge", () => {
+    let s = seeded([box("r1", { x: 0, y: 0, width: 300, height: 200 })]);
+    s = drawReducer(s, { type: "addShapes", detectAttach: true, shapes: [text("tc", { x: 100, y: 80 }), text("te", { x: 281, y: 90 })] });
+    const cBefore = tAt(s.shapes.find((sh) => sh.id === "tc"));
+    const eBefore = boundingBox(s.shapes.find((sh) => sh.id === "te")!);
+    const edgeGap = 300 - (eBefore.x + eBefore.width); // its standoff from the right edge
+    // Grow the rect 200px to the right.
+    s = drawReducer(s, { type: "commitResize", id: "r1", patch: { x: 0, y: 0, width: 500, height: 200 } });
+    const cAfter = tAt(s.shapes.find((sh) => sh.id === "tc"));
+    expect(cAfter.cx - cBefore.cx).toBeCloseTo(100, 1); // new center moved +100
+    expect(cAfter.cy - cBefore.cy).toBeCloseTo(0, 1);
+    const eAfter = boundingBox(s.shapes.find((sh) => sh.id === "te")!);
+    expect(500 - (eAfter.x + eAfter.width)).toBeCloseTo(edgeGap, 1); // same standoff from the NEW right edge
+  });
+
+  it("setText restamps the shape's own anchor from its new box — no jump on the next parent op", () => {
+    let s = seeded([box("r1", { x: 0, y: 0, width: 300, height: 200 })]);
+    s = drawReducer(s, { type: "addShapes", detectAttach: true, shapes: [text("t1", { x: 100, y: 80 })] });
+    s = drawReducer(s, { type: "setText", id: "t1", text: "longer caption" }); // grows, stays clear of the touch zone
+    const t = s.shapes.find((sh) => sh.id === "t1") as TextShape;
+    expect(t.x).toBe(100); // the text itself never moved
+    const c = tAt(t);
+    expect(t.attach).toMatchObject({ ax: 0.5, ay: 0.5 });
+    expect((t.attach as Attach & { dx: number }).dx).toBeCloseTo(c.cx - 150, 5); // dx refreshed to the NEW center
+    // …and a text grown past its parent DETACHES (keep-or-drop).
+    s = drawReducer(s, { type: "setText", id: "t1", text: "an enormously long caption that flows far past the right edge of the parent rectangle" });
+    expect(s.shapes.find((sh) => sh.id === "t1")!.attach).toBeUndefined();
+  });
+
+  it("uniform unit scale scales the wrap box with the type; a side stretch reflows the box, glyphs unscaled", () => {
+    let s = seeded([text("t1", { text: "aaa bbb ccc", fontSize: 10, width: 40 })]);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "scaleUnit", ids: ["t1"], factor: 2, origin: { x: 0, y: 0 } });
+    s = drawReducer(s, { type: "endGesture" });
+    let t = s.shapes.find((sh) => sh.id === "t1") as TextShape;
+    expect(t.fontSize).toBe(20);
+    expect(t.width).toBe(80); // same lines, bigger type
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "stretchUnit", ids: ["t1"], fx: 1.5, fy: 1, origin: { x: 0, y: 0 } });
+    s = drawReducer(s, { type: "endGesture" });
+    t = s.shapes.find((sh) => sh.id === "t1") as TextShape;
+    expect(t.fontSize).toBe(20); // glyphs untouched
+    expect(t.width).toBe(120); // the box stretched — lines reflow
   });
 });

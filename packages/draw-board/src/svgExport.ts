@@ -13,6 +13,7 @@
  * sibling of the PNG iTXt chunk.
  */
 import { boundingBox, dashFor, isContrastInk, labelFont, paintOrder, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
+import { wrapLines } from "./textMetrics.ts";
 import { contentCropLogical } from "./exportPng.ts";
 
 export const SVG_META_ID = "draw-board-doc";
@@ -91,7 +92,10 @@ function shapeSvg(sh: Shape): string {
     case "pen":
       return `<path d="${penPath(sh.points)}" fill="none" stroke="${color}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"${dash}/>`;
     case "text":
-      return `<text x="${num(sh.x)}" y="${num(sh.y + sh.fontSize)}" font-family="Arial, sans-serif" font-size="${sh.fontSize}" fill="${color}">${esc(sh.text)}</text>`;
+      // One <text> per rendered line — the SAME wrap the board draws (model-owned).
+      return wrapLines(sh.text, sh.fontSize, sh.width)
+        .map((ln, i) => `<text x="${num(sh.x)}" y="${num(sh.y + sh.fontSize * (i + 1))}" font-family="Arial, sans-serif" font-size="${sh.fontSize}" fill="${color}">${esc(ln)}</text>`)
+        .join("");
     case "image": {
       return `<image x="${num(sh.x)}" y="${num(sh.y)}" width="${num(sh.width)}" height="${num(sh.height)}" href="data:${sh.mediaType};base64,${sh.dataBase64}" preserveAspectRatio="none"/>`;
     }

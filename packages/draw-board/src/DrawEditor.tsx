@@ -37,6 +37,7 @@ import {
   type Shape,
   type TextShape,
 } from "./drawModel.ts";
+import { wrapLines } from "./textMetrics.ts";
 import { exportStagePng, sketchFileName } from "./exportPng.ts";
 import { exportBoardPng, exportBoardSvg, parseBoardFile, parseBoardPayload } from "./boardFile.ts";
 import {
@@ -108,6 +109,15 @@ export interface BoardHandle {
   getDoc(): DrawDoc;
 }
 
+/** Area shapes a text edit wraps INSIDE (its "page"). Deliberately narrower
+ *  than the model's attach targets: another text is never a wrap boundary. */
+const WRAP_CONTAINERS = new Set(["rect", "ellipse", "image"]);
+/** Breathing room between wrapped text and its container's right edge. */
+const TEXT_BOX_INSET = 6;
+/** Below this cap the sliver is no useful column — let the text overflow
+ *  instead of wrapping into a 2-char ribbon ("try its best", not "at any cost"). */
+const MIN_TEXT_WRAP = 30;
+
 /** An in-progress text edit. `kind` selects the target: a NEW standalone text
  *  (nothing exists in the model until commit — so a stray mouse-up can't tear it
  *  down), an EXISTING text shape, or a shape's bound LABEL. Geometry lives here
@@ -119,6 +129,11 @@ interface EditSession {
   y: number;
   fontSize: number;
   color: string;
+  /** Wrap cap (model units): the text's own box width, else the room left to
+   *  its containing shape's right edge — the field wraps there instead of
+   *  growing out of the parent, and a commit that actually wrapped stamps the
+   *  cap as the shape's box width. Absent = uncapped (free text). */
+  maxWidth?: number;
 }
 
 /**
@@ -387,17 +402,42 @@ export function DrawEditor({
   // inert the moment focus leaves it (composer Enter stays the composer's).
   const cropControlRef = useRef<CropControl | null>(null);
 
-  const startText = useCallback((x: number, y: number) => {
-    const s = stateRef.current;
-    setValue("");
-    setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color });
+  /** Wrap cap for a text anchored at (x, y): the room to the INNERMOST
+   *  containing shape's right edge (minus a small inset). Undefined when
+   *  nothing contains the point or the sliver left is too narrow to be a
+   *  useful column ("try its best" — overflow beats a 2-char ribbon). */
+  const containKap = useCallback((x: number, y: number): number | undefined => {
+    let cap: number | undefined;
+    let area = Infinity;
+    for (const sh of stateRef.current.shapes) {
+      if (!WRAP_CONTAINERS.has(sh.type)) continue;
+      const b = boundingBox(sh);
+      if (x < b.x || y < b.y || x > b.x + b.width || y > b.y + b.height) continue;
+      if (b.width * b.height >= area) continue;
+      area = b.width * b.height;
+      cap = b.x + b.width - x - TEXT_BOX_INSET;
+    }
+    return cap !== undefined && cap >= MIN_TEXT_WRAP ? cap : undefined;
   }, []);
-  const startEditText = useCallback((id: string) => {
-    const sh = stateRef.current.shapes.find((s) => s.id === id) as TextShape | undefined;
-    if (!sh || sh.type !== "text") return;
-    setValue(sh.text);
-    setSession({ kind: "edit-text", id, x: sh.x, y: sh.y, fontSize: sh.fontSize, color: sh.stroke });
-  }, []);
+
+  const startText = useCallback(
+    (x: number, y: number) => {
+      const s = stateRef.current;
+      setValue("");
+      setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, maxWidth: containKap(x, y) });
+    },
+    [containKap]
+  );
+  const startEditText = useCallback(
+    (id: string) => {
+      const sh = stateRef.current.shapes.find((s) => s.id === id) as TextShape | undefined;
+      if (!sh || sh.type !== "text") return;
+      setValue(sh.text);
+      // The shape's own box wins; an unboxed text inside a container caps at it.
+      setSession({ kind: "edit-text", id, x: sh.x, y: sh.y, fontSize: sh.fontSize, color: sh.stroke, maxWidth: sh.width ?? containKap(sh.x, sh.y) });
+    },
+    [containKap]
+  );
   const startLabel = useCallback((id: string) => {
     const sh = stateRef.current.shapes.find((s) => s.id === id);
     if (!sh) return;
@@ -411,19 +451,23 @@ export function DrawEditor({
     if (!cur) return;
     sessionRef.current = null; // claim it synchronously → a same-tick second call no-ops
     const text = valueRef.current.trim();
+    // Stamp the wrap cap as the shape's BOX only when the text actually wrapped
+    // at it — a short line inside a parent stays a slim, unboxed text.
+    const wrapped = cur.maxWidth !== undefined && wrapLines(text, cur.fontSize, cur.maxWidth).length > text.split("\n").length;
+    const width = wrapped ? cur.maxWidth : undefined;
     if (cur.kind === "new-text") {
       if (text) {
         dispatch({
           type: "addShapes",
           detectAttach: true, // a placed text glues to a shape it's dropped against
           distScale: distScale(), // screen-true glue range, same as every other placement
-          shapes: [{ id: newShapeId(), type: "text", stroke: cur.color, strokeWidth: stateRef.current.strokeWidth, x: cur.x, y: cur.y, text, fontSize: cur.fontSize }],
+          shapes: [{ id: newShapeId(), type: "text", stroke: cur.color, strokeWidth: stateRef.current.strokeWidth, x: cur.x, y: cur.y, text, fontSize: cur.fontSize, ...(width !== undefined && { width }) }],
         });
         // Text is one-use → snap back to the last selectable tool.
         dispatch({ type: "setTool", tool: stateRef.current.baseTool });
       }
     } else if (cur.kind === "edit-text" && cur.id) {
-      if (text) dispatch({ type: "setText", id: cur.id, text });
+      if (text) dispatch({ type: "setText", id: cur.id, text, width, distScale: distScale() });
       else if (stateRef.current.shapes.find((sh) => sh.id === cur.id)?.groupPath) {
         // A GROUPED text cleared empty must NOT route through deleteShapes — that
         // expands to the whole unit and would nuke the group from a deliberate
@@ -1229,6 +1273,13 @@ export function DrawEditor({
                   caretColor: session.color === CONTRAST_INK ? CONTRAST_OVERLAY : session.color,
                   fontSize: session.fontSize * view.scale,
                   fontFamily: "Arial, sans-serif",
+                  // Capped: the field IS the wrap box — it wraps at the parent's
+                  // edge (or the text's own box) instead of growing out of it.
+                  ...(session.maxWidth !== undefined && {
+                    width: session.maxWidth * view.scale,
+                    whiteSpace: "pre-wrap" as const,
+                    overflowWrap: "break-word" as const,
+                  }),
                 }}
               />
             )}

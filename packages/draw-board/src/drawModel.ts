@@ -9,6 +9,8 @@
  * so the reducer stays deterministic/pure for tests.
  */
 
+import { textBlockSize } from "./textMetrics.ts";
+
 export type Tool = "select" | "pen" | "rect" | "ellipse" | "line" | "arrow" | "darrow" | "text" | "eraser";
 
 /** Tools that place a shape by dragging (not select/text/eraser). */
@@ -119,6 +121,12 @@ export interface TextShape extends BaseShape {
   y: number;
   text: string;
   fontSize: number;
+  /** Wrap-box width (model units) — present once the text is a BOX: stamped by
+   *  a parent-capped edit whose text actually wrapped, or by an explicit
+   *  side-handle resize. Absent = auto width (lines break only at explicit
+   *  newlines). Lines re-wrap from `text` wherever they're rendered — the
+   *  stored text is always the unwrapped source. */
+  width?: number;
 }
 /** A raster placed onto the canvas (dropped/pasted image) — movable/resizable,
  *  distinct from the single full-canvas background. */
@@ -332,8 +340,12 @@ export function boundingBox(sh: Shape): { x: number; y: number; width: number; h
       const y = Math.min(...ys);
       return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
     }
-    case "text":
-      return { x: sh.x, y: sh.y, width: Math.max(8, sh.text.length * sh.fontSize * 0.6), height: sh.fontSize * 1.2 };
+    case "text": {
+      // The REAL rendered block (Arial advances, wrap-aware) — bbox, hit,
+      // attach, and export crops all agree with what the canvas draws.
+      const size = textBlockSize(sh.text, sh.fontSize, sh.width);
+      return { x: sh.x, y: sh.y, width: size.width, height: size.height };
+    }
   }
 }
 
@@ -576,10 +588,16 @@ export function attachAt(child: Shape, shapes: Shape[], distScale = 1): Attach |
   let best: Shape | undefined;
   let bestAnchor = { ax: 0.5, ay: 0.5 };
   let bestGap = ATTACH_DIST * distScale;
+  const containsText = (b: Box) =>
+    child.type === "text" && cb.x >= b.x && cb.y >= b.y && cb.x + cb.width <= b.x + b.width && cb.y + cb.height <= b.y + b.height;
   for (const sh of shapes) {
     if (sh.id === child.id || !CONTAINER_TYPES.has(sh.type)) continue;
     const b = boundingBox(sh);
     if (!b.width || !b.height) continue;
+    // A container FULLY holding a text is judged by the containment bond below,
+    // never by box contact: a parent-capped wrap box spans to its cap by
+    // construction, and that must not read as "touching the right edge".
+    if (containsText(b)) continue;
     const gx = Math.max(b.x - (cb.x + cb.width), cb.x - (b.x + b.width), 0);
     const gy = Math.max(b.y - (cb.y + cb.height), cb.y - (b.y + b.height), 0);
     const gap = Math.hypot(gx, gy);
@@ -589,6 +607,35 @@ export function attachAt(child: Shape, shapes: Shape[], distScale = 1): Attach |
       bestGap = gap;
       best = sh;
       bestAnchor = anchor;
+    }
+  }
+  // TEXT fully inside a container bonds to the innermost one, judged by its
+  // PLACEMENT ANCHOR (where the text was set down): an edge the anchor hugs, else
+  // the center — so a caption keeps its offset from that seam through parent
+  // resizes ("anchor the bonded edge, else center"). A pinned bond to a NEARBY
+  // (non-containing) shape wins first — a label beside a small box belongs to the
+  // box, not the frame around both. Other types keep centered-inside as plain
+  // containment (move-only) — attaching them would weld overlays.
+  if (!best && child.type === "text") {
+    let inner: Shape | undefined;
+    let innerArea = Infinity;
+    for (const sh of shapes) {
+      if (sh.id === child.id || !CONTAINER_TYPES.has(sh.type)) continue;
+      const b = boundingBox(sh);
+      if (!b.width || !b.height || !containsText(b)) continue;
+      const area = b.width * b.height;
+      if (area < innerArea) {
+        innerArea = area;
+        inner = sh;
+      }
+    }
+    if (inner) {
+      const b = boundingBox(inner);
+      const touch = EDGE_TOUCH * distScale;
+      const tx = child as TextShape;
+      const ax = tx.x - b.x <= touch ? 0 : b.x + b.width - tx.x <= touch ? 1 : 0.5;
+      const ay = tx.y - b.y <= touch ? 0 : b.y + b.height - tx.y <= touch ? 1 : 0.5;
+      return { id: inner.id, kind: "box", ax, ay, dx: cc.x - (b.x + ax * b.width), dy: cc.y - (b.y + ay * b.height) };
     }
   }
   if (!best) return undefined;
@@ -1045,7 +1092,8 @@ function scaleMemberFrom(base: Shape, memberIds: Set<string>, factor: number, or
       out = { ...base, x: px(base.x), y: py(base.y), width: base.width * factor, height: base.height * factor };
       break;
     case "text":
-      out = { ...base, x: px(base.x), y: py(base.y), fontSize: base.fontSize * factor };
+      // The wrap box scales with the glyphs — same lines, bigger type.
+      out = { ...base, x: px(base.x), y: py(base.y), fontSize: base.fontSize * factor, ...(base.width !== undefined && { width: base.width * factor }) };
       break;
     case "line":
     case "arrow":
@@ -1091,8 +1139,13 @@ function stretchMemberFrom(base: Shape, fx: number, fy: number, origin: { x: num
       return { ...base, x: px(base.x), y: py(base.y), width: base.width * fx, height: base.height * fy };
     }
     case "text": {
+      // Glyphs can't stretch, but a BOXED text's wrap box does (the lines
+      // reflow into the new width); either way the center remaps affinely and
+      // the block re-centers there at its own rendered size.
       const b = boundingBox(base);
-      return { ...base, x: px(b.x + b.width / 2) - b.width / 2, y: py(b.y + b.height / 2) - b.height / 2 };
+      const next = base.width !== undefined ? { ...base, width: Math.max(24, base.width * fx) } : base;
+      const nb = boundingBox(next);
+      return { ...next, x: px(b.x + b.width / 2) - nb.width / 2, y: py(b.y + b.height / 2) - nb.height / 2 };
     }
     case "line":
     case "arrow":
@@ -1238,7 +1291,7 @@ export type DrawAction =
   | { type: "addShapes"; shapes: Shape[]; detectAttach?: boolean; distScale?: number }
   // Apply an image crop (new display box + source crop region), reversible.
   | { type: "cropImage"; id: string; box: { x: number; y: number; width: number; height: number }; crop?: { x: number; y: number; width: number; height: number }; distScale?: number }
-  | { type: "setText"; id: string; text: string }
+  | { type: "setText"; id: string; text: string; width?: number; distScale?: number }
   | { type: "deleteSelected" }
   | { type: "deleteShapes"; ids: string[] }
   | { type: "clearAll" }
@@ -1944,8 +1997,13 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       return commit(s, next);
     }
     case "setText": {
-      const next = mapShapes(s.shapes, new Set([a.id]), (sh) => (sh.type === "text" ? { ...sh, text: a.text } : sh));
-      return commit(s, next);
+      const next = mapShapes(s.shapes, new Set([a.id]), (sh) =>
+        sh.type === "text" ? { ...sh, text: a.text, ...(a.width !== undefined && { width: a.width }) } : sh
+      );
+      // The new text is a new box: restamp its OWN anchor from where it now
+      // sits (keep-or-drop — a text grown past its parent detaches) so the next
+      // parent move/resize doesn't yank it to stale metrics.
+      return commit(s, reflowBindings(refreshOwnAnchor(next, a.id, a.distScale ?? 1)));
     }
     case "deleteSelected": {
       // Keyboard-only path — ignored while a pointer gesture is in flight (a
