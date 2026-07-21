@@ -392,38 +392,94 @@ test.describe("clipboard fallback", () => {
 });
 
 test.describe("stroke rendering", () => {
-  test("strokes are zoom-true (screen width = model × scale, floored at 1px); exports stay zoom-independent", async ({ page }) => {
+  test("strokes are NATIVELY zoom-true (model width attrs ride the stage transform, floored at 1 screen px); exports stay zoom-independent", async ({ page }) => {
     test.setTimeout(60_000);
     await openSeeded(page, [rect("r", 340, 240, 120, 80, { strokeWidth: 4 })]);
 
-    /** The RENDERED Konva node's stroke width + the live camera scale. */
+    /** The RENDERED node's width ATTR (model units), whether it scales with the
+     *  stage (strokeScaleEnabled — screen width = attr × scale), + the camera. */
     const nodeSw = () =>
       page.evaluate(() => {
-        const s = (window as unknown as { Konva: { stages: { scaleX(): number; findOne(sel: string): { strokeWidth(): number } }[] } }).Konva.stages.at(-1)!;
-        return { sw: s.findOne("#r").strokeWidth(), scale: s.scaleX() };
+        const s = (window as unknown as { Konva: { stages: { scaleX(): number; findOne(sel: string): { strokeWidth(): number; strokeScaleEnabled(): boolean } }[] } }).Konva.stages.at(-1)!;
+        const n = s.findOne("#r");
+        return { sw: n.strokeWidth(), native: n.strokeScaleEnabled(), scale: s.scaleX() };
       });
 
-    // Wherever the camera opens, the on-screen width is model width × scale.
-    await expect
-      .poll(async () => {
-        const { sw, scale } = await nodeSw();
-        return Math.abs(sw - Math.max(1, 4 * scale));
-      })
-      .toBeLessThan(1e-6);
+    // Wherever the camera opens: width attr is the MODEL width and the stage
+    // transform scales it — the screen width is 4 × scale by construction.
+    await expect.poll(async () => (await nodeSw()).sw).toBe(4);
+    expect((await nodeSw()).native).toBe(true);
 
-    // Zoom out twice: the stroke thins WITH the camera (a screen-constant
-    // stroke — the old behavior — would sit at 4 forever).
+    // MID-GESTURE (the glued-on regression): a wheel zoom must move the stroke
+    // in the SAME frame, not on the ~180ms settle. Dispatch a pinch-style wheel
+    // and read back within one evaluate after a single rAF (commit done, settle
+    // timer nowhere near) — the width attr must still be the model 4 with
+    // native scaling on, i.e. the screen width tracked the camera instantly.
+    const mid = await page.evaluate(async () => {
+      const w = window as unknown as { Konva: { stages: { scaleX(): number; content: HTMLElement; findOne(sel: string): { strokeWidth(): number; strokeScaleEnabled(): boolean } }[] } };
+      const s = w.Konva.stages.at(-1)!;
+      const before = s.scaleX();
+      const r = s.content.getBoundingClientRect();
+      // Dispatch on stage.content — Konva's listeners live on the INNER
+      // konvajs-content div, and bubbling never descends from the container.
+      s.content.dispatchEvent(
+        new WheelEvent("wheel", { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, deltaY: -100, ctrlKey: true, bubbles: true, cancelable: true })
+      );
+      // A frame or two for React to commit the camera — even a full 10 stays
+      // legitimate: above the floor the settle changes nothing to hide behind.
+      for (let i = 0; i < 10 && s.scaleX() === before; i++) await new Promise((res) => requestAnimationFrame(res));
+      const n = s.findOne("#r");
+      return { before, after: s.scaleX(), sw: n.strokeWidth(), native: n.strokeScaleEnabled() };
+    });
+    expect(mid.after).toBeGreaterThan(mid.before); // the zoom landed…
+    expect(mid.sw).toBe(4); // …and the width attr needed no glue to follow
+    expect(mid.native).toBe(true); // pre-fix: false + a frozen screen-px width until settle
+
+    // TRANSFORMER pin/restore: during an anchor drag the outline is pinned in
+    // screen px (native scaling off — live node scale must not thicken it);
+    // release restores the exact model attr. The restore is the trap this
+    // guards: a resize never changes the width PROP, so react-konva would never
+    // rewrite it — only the imperative restore puts native scaling back.
+    const box = (await page.locator(".konvajs-content").boundingBox())!;
+    const toScreen = async (pt: { x: number; y: number }) => {
+      const cam = await page.evaluate(() => {
+        const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+        return { x: s.x(), y: s.y(), scale: s.scaleX() };
+      });
+      return { x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale };
+    };
+    const center = await toScreen({ x: 400, y: 280 });
+    await page.mouse.click(center.x, center.y); // select the rect
+    const corner = await toScreen({ x: 460, y: 320 }); // its bottom-right anchor
+    await page.mouse.move(corner.x, corner.y);
+    await page.mouse.down();
+    await page.mouse.move(corner.x + 6, corner.y + 5); // arm the transform
+    await page.mouse.move(corner.x + 40, corner.y + 30);
+    const pinned = await nodeSw();
+    expect(pinned.native).toBe(false); // pinned for the drag…
+    expect(pinned.sw).toBeCloseTo(4 * pinned.scale, 5); // …at the pre-drag screen width
+    await page.mouse.up();
+    const restored = await nodeSw();
+    expect(restored.native).toBe(true); // native scaling is back…
+    expect(restored.sw).toBe(4); // …at the exact model width
+    // (a spot inside the zoomed-in viewport, clear of the grown rect)
+    const empty = await toScreen({ x: 120, y: 150 });
+    await page.mouse.click(empty.x, empty.y); // deselect before the zoom/export flow
+
+    // Zoom out twice (buttons settle immediately): still the plain model attr —
+    // the visible thinning is pure camera scale.
     await page.getByRole("button", { name: "Zoom out" }).click();
     await page.getByRole("button", { name: "Zoom out" }).click();
-    await expect.poll(async () => (await nodeSw()).sw).toBeLessThan(3.9);
     let st = await nodeSw();
-    expect(st.sw).toBeCloseTo(Math.max(1, 4 * st.scale), 5);
+    expect(st.sw).toBe(4);
+    expect(st.scale).toBeLessThan(mid.after);
 
-    // Deep zoom-out: the width floors at 1 screen px instead of thinning away.
+    // Deep zoom-out: the SETTLED width floors at 1 screen px (attr = 1/scale
+    // model units) instead of thinning away.
     for (let i = 0; i < 12; i++) await page.getByRole("button", { name: "Zoom out" }).click();
     await expect.poll(async () => (await nodeSw()).scale).toBeLessThan(0.25);
     st = await nodeSw();
-    expect(st.sw).toBe(1);
+    expect(st.sw * st.scale).toBeCloseTo(1, 5);
 
     // Export while zoomed way out: the PNG renders strokes at the EXPORT scale
     // (model width × s, s=2 for a sketch) — independent of the live zoom and
@@ -469,9 +525,9 @@ test.describe("stroke rendering", () => {
       expect(r).toBeLessThan(10);
     }
 
-    // And the export restored the LIVE widths (still floored at this zoom).
+    // And the export restored the LIVE attrs (still floored at this zoom).
     st = await nodeSw();
-    expect(st.sw).toBe(1);
+    expect(st.sw * st.scale).toBeCloseTo(1, 5);
   });
 });
 

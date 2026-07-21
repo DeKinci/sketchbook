@@ -88,11 +88,13 @@ const MIN_STROKE_PX = 1;
  * likewise drawn at constant screen width. Konva's Transformer already works in
  * absolute coordinates (its anchors don't scale with the stage).
  *
- * Content strokes are the opposite — ZOOM-TRUE: on-screen width = model width ×
- * camera scale, floored at {@link MIN_STROKE_PX}. They stay in screen space
- * (strokeScaleEnabled:false) only so the Transformer's live node scale never
- * thickens outlines mid-resize; the camera factor is applied by hand (see
- * `strokeVs`).
+ * Content strokes are the opposite — ZOOM-TRUE, and NATIVELY so: width attrs
+ * are MODEL units (Konva's default strokeScaleEnabled), so the stage transform
+ * scales them with the geometry on every frame of a zoom gesture. The one
+ * camera-coupled piece is the {@link MIN_STROKE_PX} legibility floor,
+ * re-derived from the SETTLED scale only (`floorVs`); and a Transformer drag
+ * pins the dragged outline in screen space for its duration so live node
+ * scale never thickens it (see `common`).
  */
 export function DrawCanvas({
   state,
@@ -260,6 +262,27 @@ export function DrawCanvas({
   useEffect(() => () => {
     if (wheelIdleTimer.current) clearTimeout(wheelIdleTimer.current);
   }, []);
+
+  // ── Zoom-true strokes, natively ─────────────────────────────────────────────
+  // Content stroke width attrs are MODEL units (Konva's default
+  // strokeScaleEnabled): the stage transform scales them like any geometry, so
+  // they track zoom gestures frame-by-frame with zero element rebuilds. The
+  // only camera-coupled piece is the MIN_STROKE_PX legibility floor — a floored
+  // width is MIN/scale model units, re-derived from the SETTLED scale only (a
+  // floored stroke rides the native transform mid-gesture and crisps to exactly
+  // the floor on settle). Above the floor `floorVs` pins to Infinity: widths
+  // are then plain model values and ordinary zooms rebuild nothing at all.
+  const contentGesture = state.gestureBase !== null || state.draftId !== null;
+  const strokeVsRef = useRef(vs);
+  if (!camGesture && !contentGesture) strokeVsRef.current = vs;
+  const minModelStroke = useMemo(() => {
+    let m = Infinity;
+    for (const sh of shapes) if (sh.type !== "text" && sh.type !== "image" && sh.strokeWidth < m) m = sh.strokeWidth;
+    return m;
+  }, [shapes]);
+  const floorVs = minModelStroke * strokeVsRef.current < MIN_STROKE_PX ? strokeVsRef.current : Infinity;
+  /** A shape's rendered stroke width in MODEL units — the floor applied. */
+  const modelSw = (sh: { strokeWidth: number }) => Math.max(sh.strokeWidth, MIN_STROKE_PX / floorVs);
 
   const containerPoint = (e: KonvaEventObject<unknown>, clientX: number, clientY: number) => {
     const rect = e.target.getStage()?.container().getBoundingClientRect();
@@ -828,6 +851,10 @@ export function DrawCanvas({
     }
   };
 
+  // The node carrying a shape's stroke (an ellipse's sits inside its Group).
+  const strokedNodeOf = (node: Konva.Node): Konva.Shape | null =>
+    node.getClassName?.() === "Group" ? ((node as Konva.Group).findOne<Konva.Shape>("Ellipse") ?? null) : (node as Konva.Shape);
+
   // Per-shape props: identity (for the Transformer + resize baking). Selection,
   // move, and double-click are all handled at the stage level (size-based), so
   // shapes are not individually draggable.
@@ -839,12 +866,23 @@ export function DrawCanvas({
     // per-frame draw work. The Transformer still finds nodes by id (findOne
     // ignores listening) and its own handles stay listening.
     listening: false,
-    // Strokes render in SCREEN space: the zoom-true width is applied by hand in
-    // buildShapeEl (model width × settled camera scale, floored), while the
-    // TRANSFORMER's live node scale never thickens outlines mid-resize (Konva
-    // would scale strokes with it by default).
-    strokeScaleEnabled: false,
-    onTransformStart: () => dispatch({ type: "beginGesture" }),
+    // Strokes are natively zoom-true (model width attrs scaled by the stage) —
+    // but the TRANSFORMER drives node scale live, which would thicken the
+    // dragged outline with it (anisotropically under a free resize). So for the
+    // drag's duration the node is pinned at its current SCREEN width
+    // (strokeScaleEnabled off) and restored on release. The restore must be
+    // imperative and exact: react-konva writes prop CHANGES only, and a resize
+    // never changes the width prop, so nothing else would undo the pin.
+    onTransformStart: (e: KonvaEventObject<Event>) => {
+      dispatch({ type: "beginGesture" });
+      if (sh.type !== "text" && sh.type !== "image") {
+        const n = strokedNodeOf(e.target);
+        if (n) {
+          n.strokeWidth(n.strokeWidth() * vsRef.current);
+          n.strokeScaleEnabled(false);
+        }
+      }
+    },
     // Live: reflow attached/bound shapes against the ghost box so they follow
     // DURING the drag — but leave the parent's own node untouched (touching it
     // mid-transform makes the Transformer resize from both sides).
@@ -854,6 +892,13 @@ export function DrawCanvas({
     },
     onTransformEnd: (e: KonvaEventObject<Event>) => {
       suppressDbl(); // an anchor drag is not a "click" (see suppressDblUntil)
+      if (sh.type !== "text" && sh.type !== "image") {
+        const n = strokedNodeOf(e.target);
+        if (n) {
+          n.strokeScaleEnabled(true);
+          n.strokeWidth(modelSw(sh)); // exactly the element's prop (see pin note)
+        }
+      }
       bakeTransform(e, sh);
       dispatch({ type: "endGesture" });
     },
@@ -991,7 +1036,6 @@ export function DrawCanvas({
   // this gesture's edits, plus the selection: a Transformer target moves at the
   // Konva level without a model identity change). The rest of the board then
   // costs one bitmap per frame while only the moving handful re-rasterizes.
-  const contentGesture = state.gestureBase !== null || state.draftId !== null;
   const baseSet = useMemo(() => new Set<Shape>(state.gestureBase ?? []), [state.gestureBase]);
   const splitRef = useRef<{ stat: Shape[]; dyn: Shape[] }>({ stat: [], dyn: [] });
   const { stat: staticShapes, dyn: dynamicShapes } = useMemo(() => {
@@ -1070,36 +1114,29 @@ export function DrawCanvas({
       })()
     : null;
 
-  // Zoom-true strokes bake the camera scale into elements — but only the
-  // SETTLED scale: while any gesture is live the value freezes, so mid-gesture
-  // frames keep their element identity (never an O(N) rebuild per wheel frame —
-  // the bitmap cache scales strokes along visually) and the settle redraw picks
-  // up the final scale.
-  const strokeVsRef = useRef(vs);
-  if (!camGesture && !contentGesture) strokeVsRef.current = vs;
-  const strokeVs = strokeVsRef.current;
-
   // Shape + label elements, cached PER SHAPE OBJECT (the reducer preserves the
   // identity of untouched shapes): a pen point or a one-shape drag rebuilds ONE
   // element, not N. The cache epoch resets when anything cross-cutting shifts —
   // the raster backdrop (adaptive ink resamples), image decodes, edit/crop
-  // hides, a zoom settling (strokes re-derive) — trading one full rebuild for
-  // correctness. Mid-gesture camera pans/zooms don't touch elements at all
-  // (live values read through refs).
+  // hides, a stroke-floor re-derive on zoom settle (`floorVs`; only ever fires
+  // zoomed out below the floor) — trading one full rebuild for correctness.
+  // Mid-gesture camera pans/zooms don't touch elements at all (live values
+  // read through refs; widths are model units the stage scales natively).
   const shapeElCache = useRef(new WeakMap<Shape, React.ReactElement | null>());
   const labelElCache = useRef(new WeakMap<Shape, React.ReactElement | null>());
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useMemo(() => {
     shapeElCache.current = new WeakMap();
     labelElCache.current = new WeakMap();
-  }, [imgEls, imgSig, bgImage, editingId, editingLabelId, croppingId, lumEpoch, strokeVs]);
+  }, [imgEls, imgSig, bgImage, editingId, editingLabelId, croppingId, lumEpoch, floorVs]);
   const buildShapeEl = (sh: Shape): React.ReactElement | null => {
           if (sh.id === editingId && sh.type === "text") return null; // hidden under the textarea
           // Adaptive ink resolves to a solid color contrasting the background
           // under the shape; other scribbles never affect it.
           const stroke = inkFor(sh);
-          // Zoom-true screen width, floored for legibility (class doc).
-          const sw = Math.max(MIN_STROKE_PX, sh.strokeWidth * strokeVs);
+          // MODEL-unit width, floored for legibility (class doc) — the stage
+          // transform applies the camera natively, no factor here.
+          const sw = modelSw(sh);
           switch (sh.type) {
             case "rect": {
               const b = viewBox(sh);
@@ -1109,7 +1146,7 @@ export function DrawCanvas({
               const b = viewBox(sh);
               return (
                 <Group key={sh.id} {...common(sh)} x={b.x} y={b.y}>
-                  <Ellipse x={b.width / 2} y={b.height / 2} radiusX={b.width / 2} radiusY={b.height / 2} stroke={stroke} strokeWidth={sw} strokeScaleEnabled={false} />
+                  <Ellipse x={b.width / 2} y={b.height / 2} radiusX={b.width / 2} radiusY={b.height / 2} stroke={stroke} strokeWidth={sw} />
                 </Group>
               );
             }
@@ -1124,12 +1161,11 @@ export function DrawCanvas({
                   stroke={stroke}
                   fill={stroke}
                   strokeWidth={sw}
-                  // Pointer geometry is LOGICAL (it scales with the camera), so
-                  // size it from the floored width in logical units — above the
-                  // floor that's exactly sh.strokeWidth; below it the head
+                  // Pointer geometry is LOGICAL, like the width now is — above
+                  // the floor that's 8 + sh.strokeWidth; below it the head
                   // floors along with the tail.
-                  pointerLength={8 + sw / strokeVs}
-                  pointerWidth={8 + sw / strokeVs}
+                  pointerLength={8 + sw}
+                  pointerWidth={8 + sw}
                   pointerAtBeginning={sh.doubleHead}
                  
                 />
@@ -1167,9 +1203,9 @@ export function DrawCanvas({
     });
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const staticShapeNodes = useMemo(() => nodesFor(staticShapes), [staticShapes, imgEls, editingId, croppingId, strokeVs]);
+  const staticShapeNodes = useMemo(() => nodesFor(staticShapes), [staticShapes, imgEls, editingId, croppingId, floorVs]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const dynamicShapeNodes = useMemo(() => nodesFor(dynamicShapes), [dynamicShapes, imgEls, editingId, croppingId, strokeVs]);
+  const dynamicShapeNodes = useMemo(() => nodesFor(dynamicShapes), [dynamicShapes, imgEls, editingId, croppingId, floorVs]);
   const buildLabelEl = (sh: Shape): React.ReactElement | null => {
     return ((sh) => {
         if (!sh.label || sh.id === editingLabelId) return null;

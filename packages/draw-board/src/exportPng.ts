@@ -65,11 +65,12 @@ export async function exportStagePng(stage: Konva.Stage, doc: DrawDoc, name: str
     width: stage.width(),
     height: stage.height(),
   };
-  // Content strokes render in SCREEN space (DrawCanvas: strokeScaleEnabled:false
-  // + width × camera scale, floored for zoomed-out legibility). The export
-  // transform is its own "camera", so drive each stroke to its proportional
-  // width at the export scale — model width × s, WITHOUT the floor (a screen
-  // aid, not part of the artwork) — and restore the live widths after.
+  // Content strokes are natively zoom-true (DrawCanvas: width attrs in MODEL
+  // units, scaled by the stage transform) — EXCEPT when the legibility floor is
+  // active on a zoomed-out camera (attr = MIN/scale, a screen aid, not part of
+  // the artwork). Drive each stroke to its exact model width for the snapshot —
+  // the export transform scales it like any geometry — and restore the live
+  // (possibly floored) attrs after.
   const strokeOverrides: Array<{ node: Konva.Shape; live: number }> = [];
   for (const sh of doc.shapes) {
     if (sh.type === "text" || sh.type === "image") continue; // no stroked outline
@@ -78,7 +79,7 @@ export async function exportStagePng(stage: Konva.Stage, doc: DrawDoc, name: str
     const node = found?.getClassName?.() === "Group" ? (found as Konva.Group).findOne<Konva.Shape>("Ellipse") : (found as Konva.Shape | undefined);
     if (!node) continue;
     strokeOverrides.push({ node, live: node.strokeWidth() });
-    node.strokeWidth(sh.strokeWidth * s);
+    node.strokeWidth(sh.strokeWidth);
   }
   try {
     stage.scale({ x: s, y: s });
