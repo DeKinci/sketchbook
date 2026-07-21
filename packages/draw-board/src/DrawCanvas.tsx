@@ -45,6 +45,12 @@ const RESIZABLE = new Set(["rect", "ellipse", "text", "image"]);
  *  through (members' own nodes never get handles). Reserved — never a shape id. */
 const UNIT_PROXY_ID = "__unit_proxy__";
 const SELECT_COLOR = "#8b5cf6";
+/** The Transformer's full handle set — every shape but text. Text gets ONLY the
+ *  horizontal pair: the side handles resize the WRAP BOX (lines reflow live,
+ *  glyphs unscaled, the block grows vertically); type size lives in the size
+ *  control, so vertical and corner handles have nothing to do. */
+const ALL_ANCHORS = ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"];
+const TEXT_ANCHORS = ["middle-left", "middle-right"];
 /** Widest glue distance (bind/attach/edge-touch) — the candidate-query pad. */
 const GLUE_PAD = 24; // = EDGE_TOUCH, the largest of the three
 
@@ -464,19 +470,11 @@ export function DrawCanvas({
     const stage = stageRef.current;
     if (!tr || !stage) return;
     if (tool === "select" && soleResizable && selectedIds[0] !== editingId && !croppingId) {
+      // (Anchor SET is the render prop's job — enabledAnchors set here would be
+      // silently reverted by react-konva on the next unrelated re-render.)
       const node = stage.findOne<Konva.Node>(`#${selectedIds[0]}`);
-      // Text gets ONLY the horizontal side handles: they resize the WRAP BOX
-      // (lines reflow, glyphs unscaled — the text grows vertically). Height
-      // derives from wrapping and type size lives in the size control, so
-      // vertical and corner handles have nothing to do.
-      tr.enabledAnchors(
-        soleSel?.type === "text"
-          ? ["middle-left", "middle-right"]
-          : ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
-      );
       tr.nodes(node ? [node] : []);
     } else if (tool === "select" && soleUnitKey && !editing && !croppingId) {
-      tr.enabledAnchors(["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]);
       const node = stage.findOne<Konva.Node>(`#${UNIT_PROXY_ID}`);
       tr.nodes(node ? [node] : []);
     } else {
@@ -838,6 +836,11 @@ export function DrawCanvas({
     return { x: node.x(), y: node.y(), width: Math.max(4, sh.width * node.scaleX()), height: Math.max(4, sh.height * node.scaleY()) };
   };
 
+  // Live wrap width while a text side-handle drag is in flight — onTransform
+  // accumulates it (and reflows the node at it each frame); bakeTransform
+  // commits exactly this number, so the release changes nothing on screen.
+  const textResizeRef = useRef<{ id: string; width: number } | null>(null);
+
   // Bake the Transformer's scale into concrete geometry (on release).
   const bakeTransform = (e: KonvaEventObject<Event>, sh: Shape) => {
     const node = e.target;
@@ -846,13 +849,15 @@ export function DrawCanvas({
     node.scaleX(1);
     node.scaleY(1);
     if (sh.type === "text") {
-      // Only the side handles exist for text — the drag resizes the WRAP WIDTH
-      // and the lines reflow, glyphs unscaled (type size lives in the size
-      // control, not the Transformer).
+      // Only the side handles exist for text — the drag resized the WRAP WIDTH
+      // live (see onTransform); commit the accumulated width. Fallback for an
+      // armed-but-motionless drag: no live entry, box unchanged.
+      const live = textResizeRef.current;
+      textResizeRef.current = null;
       dispatch({
         type: "commitResize",
         id: sh.id,
-        patch: { x: node.x(), y: node.y(), width: Math.max(24, boundingBox(sh).width * sx) },
+        patch: { x: node.x(), y: node.y(), width: live?.id === sh.id ? live.width : Math.max(24, boundingBox(sh).width * sx) },
         distScale: 1 / vsRef.current,
       });
     } else if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "image") {
@@ -904,6 +909,19 @@ export function DrawCanvas({
     // DURING the drag — but leave the parent's own node untouched (touching it
     // mid-transform makes the Transformer resize from both sides).
     onTransform: (e: KonvaEventObject<Event>) => {
+      if (sh.type === "text") {
+        // Fold the frame's scale into the WRAP WIDTH and re-run the model's
+        // wrap at it: the box tracks the pointer, the lines reflow LIVE, and
+        // the glyphs never scale. (The node's width prop is the model box, so
+        // the scale always has a real base — see the text element note.)
+        const node = e.target;
+        const w = Math.max(24, node.width() * node.scaleX());
+        node.scaleX(1);
+        node.scaleY(1);
+        node.setAttrs({ width: w, text: wrapLines(sh.text, sh.fontSize, w).join("\n") });
+        textResizeRef.current = { id: sh.id, width: w };
+        return;
+      }
       const box = liveBox(e, sh);
       if (box) dispatch({ type: "reflowChildrenTo", parentId: sh.id, box, distScale: 1 / vsRef.current });
     },
@@ -1254,8 +1272,24 @@ export function DrawCanvas({
               );
             case "text":
               // The MODEL wraps (textMetrics) and the node renders its lines —
-              // never Konva's own wrap — so bbox/hit/exports agree exactly.
-              return <Text key={sh.id} {...common(sh)} x={sh.x} y={sh.y} text={wrapLines(sh.text, sh.fontSize, sh.width).join("\n")} fontSize={sh.fontSize} fill={stroke} />;
+              // never Konva's own wrap (wrap "none") — so bbox/hit/exports agree
+              // exactly. The node also carries the MODEL box width: the
+              // Transformer then clings to the same box everything else uses —
+              // and never measures 0 where canvas font metrics don't exist
+              // (headless box without font files).
+              return (
+                <Text
+                  key={sh.id}
+                  {...common(sh)}
+                  x={sh.x}
+                  y={sh.y}
+                  width={boundingBox(sh).width}
+                  wrap="none"
+                  text={wrapLines(sh.text, sh.fontSize, sh.width).join("\n")}
+                  fontSize={sh.fontSize}
+                  fill={stroke}
+                />
+              );
             case "image": {
               const img = imgEls[sh.id];
               if (!img || sh.id === croppingId) return null; // decoding, or the crop overlay renders it
@@ -1490,7 +1524,9 @@ export function DrawCanvas({
           // (single-axis regardless of keepRatio — members follow the scaling,
           // text undistorted), and no flip. Same 8 anchors as any other shape.
           flipEnabled={!soleUnitKey}
-          enabledAnchors={["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]}
+          // Set per-selection HERE (react-konva re-applies props each render —
+          // an imperatively set anchor list would revert on the next render).
+          enabledAnchors={soleResizable && soleSel?.type === "text" ? TEXT_ANCHORS : ALL_ANCHORS}
           boundBoxFunc={(oldBox, newBox) => (newBox.width < 6 || newBox.height < 6 ? oldBox : newBox)}
         />
 

@@ -330,6 +330,68 @@ test("text editing is WYSIWYG: the field always contains every line it commits (
   expect(m.w).toBeLessThanOrEqual(1); // grew with the typing
 });
 
+test("text width-resize reflows LIVE (glyphs unscaled), and the side-handle pair survives re-renders", async ({ page }) => {
+  const source = "the quick brown fox jumps over the lazy dog near the fence";
+  await openSeeded(page, [{ id: "t1", type: "text", stroke: "#e5484d", strokeWidth: 3, x: 100, y: 100, text: source, fontSize: 18, width: 150 }]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const toScreen = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+  const anchors = () =>
+    page.evaluate(() => {
+      const s = (window as unknown as { Konva: { stages: { find(sel: string): { enabledAnchors(): string[] }[] }[] } }).Konva.stages.at(-1)!;
+      return s.find("Transformer")[0]?.enabledAnchors() ?? [];
+    });
+  const textNode = () =>
+    page.evaluate(() => {
+      const s = (window as unknown as { Konva: { stages: { findOne(sel: string): { scaleX(): number; text(): string; width(): number } }[] } }).Konva.stages.at(-1)!;
+      const n = s.findOne("#t1");
+      return { scaleX: n.scaleX(), lines: n.text().split("\n").length, width: n.width() };
+    });
+
+  // Select the text — the side-handle pair appears.
+  const on = toScreen({ x: 110, y: 110 });
+  await page.mouse.click(on.x, on.y);
+  await expect.poll(anchors).toEqual(["middle-left", "middle-right"]);
+  const before = await textNode();
+  expect(before.lines).toBeGreaterThan(2); // wrapped tight at 150 — room to unwrap
+
+  // Grab the middle-right handle where the Transformer actually drew it and
+  // drag +130. DURING the drag the glyphs must stay unscaled and the model's
+  // wrap must re-run at the dragged width — not stretch-until-release.
+  const grab = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { findOne(sel: string): { getAbsolutePosition(): { x: number; y: number } } }[] } }).Konva.stages.at(-1)!;
+    return s.findOne(".middle-right").getAbsolutePosition();
+  });
+  await page.mouse.move(box.x + grab.x, box.y + grab.y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + grab.x + 30, box.y + grab.y); // arm the transform
+  await page.mouse.move(box.x + grab.x + 130, box.y + grab.y, { steps: 4 });
+  const mid = await textNode();
+  await page.mouse.up();
+  expect(mid.scaleX).toBeCloseTo(1, 2); // never a stretched frame
+  expect(mid.lines).toBeLessThan(before.lines); // the wrap re-ran live — wider box, fewer lines
+  const expected = before.width + 130 / cam.scale; // the dragged edge tracked the pointer
+  expect(Math.abs(mid.width - expected)).toBeLessThanOrEqual(5);
+
+  // The commit is exactly the width the drag showed (WYSIWYG hand-off).
+  await expect
+    .poll(async () => ((await stored(page))[0].doc.shapes as { id: string; width?: number }[]).find((sh) => sh.id === "t1")!.width!)
+    .toBeCloseTo(mid.width, 0);
+  expect((await textNode()).lines).toBe(mid.lines);
+
+  // An unrelated re-render (a camera scroll commits one) must NOT resurrect
+  // the corner/vertical handles on the still-selected text.
+  const camY = () => page.evaluate(() => (window as unknown as { Konva: { stages: { y(): number }[] } }).Konva.stages.at(-1)!.y());
+  const y0 = await camY();
+  await page.mouse.wheel(0, 120);
+  await expect.poll(camY).not.toBe(y0);
+  await page.waitForTimeout(300); // let the trailing camera-state renders land
+  expect(await anchors()).toEqual(["middle-left", "middle-right"]);
+});
+
 test.describe("rich exports + import drop surfaces", () => {
   /** Drop a file (bytes given as base64) onto a selector via a synthetic DragEvent. */
   async function dropFile(page: Page, selector: string, b64: string, name: string, type: string) {
