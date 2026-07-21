@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
 import type { KonvaEventObject } from "konva/lib/Node.js";
 import { Stage, Layer, Rect, Ellipse, Line, Arrow, Text, Image as KonvaImage, Group, Label, Tag, Transformer } from "react-konva";
@@ -1107,6 +1107,46 @@ export function DrawCanvas({
       layerRef.current?.clearCache();
     };
   }, []);
+
+  // ── Live stroke floor ───────────────────────────────────────────────────────
+  // The 1px floor must HOLD through a zoom gesture — "small stays small", never
+  // drift-below-and-crisp-up (or overshoot-and-snap-back) at settle. Element
+  // props can't do that without an O(N) rebuild per wheel frame, so this pass
+  // writes the attrs imperatively after every render: any stroke below the
+  // floor at the LIVE scale gets MIN/vs model units (exactly 1 screen px), and
+  // one crossing back above it is restored to its model width — the handoff is
+  // continuous (at the threshold MIN/vs == the model width). Settle rebuilds
+  // then write the very same values through props. Layout effect so the attrs
+  // land in the same commit's batchDraw as the camera. Zero work above the
+  // floor (quick reject); nodes pinned by a Transformer drag
+  // (strokeScaleEnabled off) are the pin's — skipped.
+  const liveFlooredIds = useRef(new Set<string>());
+  useLayoutEffect(() => {
+    const stage = layerRef.current?.getStage();
+    if (!stage) return;
+    if (minModelStroke * vs >= MIN_STROKE_PX && liveFlooredIds.current.size === 0) return;
+    const byId = new Map<string, Konva.Node>();
+    for (const layer of stage.getLayers()) for (const child of layer.getChildren()) if (child.id()) byId.set(child.id(), child);
+    const next = new Set<string>();
+    let dirty = false;
+    for (const sh of shapes) {
+      if (sh.type === "text" || sh.type === "image") continue;
+      const floored = sh.strokeWidth * vs < MIN_STROKE_PX;
+      if (!floored && !liveFlooredIds.current.has(sh.id)) continue;
+      const raw = byId.get(sh.id);
+      const n = raw ? strokedNodeOf(raw) : null;
+      if (!n || n.strokeScaleEnabled() === false) continue;
+      if (floored) next.add(sh.id);
+      const want = floored ? MIN_STROKE_PX / vs : sh.strokeWidth;
+      if (n.strokeWidth() !== want) {
+        n.strokeWidth(want);
+        dirty = true;
+      }
+    }
+    liveFlooredIds.current = next;
+    if (dirty) stage.batchDraw();
+  });
+
   const infiniteBg = policy === "infinite"
     ? (() => {
         const vis = padBox(visible, sPx(8));

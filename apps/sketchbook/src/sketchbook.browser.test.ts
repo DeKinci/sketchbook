@@ -481,6 +481,24 @@ test.describe("stroke rendering", () => {
     st = await nodeSw();
     expect(st.sw * st.scale).toBeCloseTo(1, 5);
 
+    // …and the floor HOLDS live through a gesture ("small stays small"): a
+    // mid-gesture zoom must keep the screen width at max(4×scale, 1px) in the
+    // SAME frame — no ride-along-then-correct at settle.
+    const midFloor = await page.evaluate(async () => {
+      const w = window as unknown as { Konva: { stages: { scaleX(): number; content: HTMLElement; findOne(sel: string): { strokeWidth(): number } }[] } };
+      const s = w.Konva.stages.at(-1)!;
+      const before = s.scaleX();
+      const r = s.content.getBoundingClientRect();
+      s.content.dispatchEvent(
+        new WheelEvent("wheel", { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, deltaY: -100, ctrlKey: true, bubbles: true, cancelable: true })
+      );
+      for (let i = 0; i < 10 && s.scaleX() === before; i++) await new Promise((res) => requestAnimationFrame(res));
+      const scale = s.scaleX();
+      return { before, scale, sw: s.findOne("#r").strokeWidth() };
+    });
+    expect(midFloor.scale).toBeGreaterThan(midFloor.before); // the zoom landed
+    expect(midFloor.sw * midFloor.scale).toBeCloseTo(Math.max(4 * midFloor.scale, 1), 5);
+
     // Export while zoomed way out: the PNG renders strokes at the EXPORT scale
     // (model width × s, s=2 for a sketch) — independent of the live zoom and
     // its legibility floor. Deny the clipboard so Copy as PNG downloads.
