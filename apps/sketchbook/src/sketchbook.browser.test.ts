@@ -526,11 +526,46 @@ test("dblclick on a shape spawns a FREE caption inside it — or engages the exi
   await expect.poll(async () => (await shapesStored()).find((s) => s.type === "text")?.text).toBe("hello");
   expect((await shapesStored()).length).toBe(2); // still ONE caption
 
-  // Dblclick on empty canvas still does nothing.
+  // Dblclick on empty canvas still does nothing. (Mid-height point — the
+  // bottom-right corner belongs to the minimap, and off-viewport clicks
+  // assert nothing.)
   await page.waitForTimeout(700);
-  const empty = toScreen({ x: 600, y: 500 });
+  const empty = toScreen({ x: 500, y: 150 });
   await page.mouse.dblclick(empty.x, empty.y);
   await page.waitForTimeout(200);
+  await expect(page.locator(".draw-text-input")).toHaveCount(0);
+});
+
+test("dblclick works FIRST time right after a click elsewhere — and two quick clicks at different spots never count as one", async ({ page }) => {
+  await openSeeded(page, [{ id: "t", type: "text", stroke: "#e5484d", strokeWidth: 3, x: 100, y: 100, text: "caption", fontSize: 18 }]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const toScreen = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+  // Mid-height, right of the text: plain empty BOARD. (Not the bottom-right —
+  // the minimap lives there, and a click on it NAVIGATES the camera, silently
+  // teleporting every subsequent screen-space coordinate.)
+  const away = toScreen({ x: 380, y: 110 });
+  const on = toScreen({ x: 130, y: 110 });
+
+  // Deselect-click on empty, then IMMEDIATELY double-click the text: the pair
+  // must open the editor on the FIRST try. (A position-blind dblclick engine
+  // consumes [away-click, first-down] as its pair and the genuine double-click
+  // never fires — the user's "clicking away and dblclicking back ignores it".)
+  await page.mouse.click(away.x, away.y);
+  await page.mouse.dblclick(on.x, on.y);
+  await expect(page.locator(".draw-text-input")).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".draw-text-input")).toHaveCount(0);
+
+  // Protection intact: empty-click then a QUICK single click on the text (what
+  // a position-blind engine "double-clicks") must not open an editor.
+  await page.waitForTimeout(600); // clean pair slate
+  await page.mouse.click(away.x, away.y);
+  await page.mouse.click(on.x, on.y);
+  await page.waitForTimeout(250);
   await expect(page.locator(".draw-text-input")).toHaveCount(0);
 });
 

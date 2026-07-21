@@ -194,30 +194,74 @@ export function DrawCanvas({
   const marqueeStart = useRef<{ x: number; y: number } | null>(null);
   const moveRef = useRef<{ last: { x: number; y: number }; downAt: { x: number; y: number }; ids: string[] } | null>(null);
   const erasing = useRef(false);
-  // Konva synthesizes a dblclick from ANY two down/up pairs inside its 400ms
-  // window — movement-blind, so [click; quick drag/resize] "double-clicks"
-  // wherever the second gesture ENDED and would pop a text/crop editor
-  // mid-flow. Every real drag (move/marquee/transform) arms this deadline;
-  // onStageDblClick ignores synthetic dblclicks until it passes. Genuine
-  // double-clicks (two still clicks) never arm it.
+  // Double-click detection is OURS, not Konva's. Konva synthesizes dblclick
+  // from ANY two down/up pairs inside its 400ms window — movement-blind
+  // ([click; quick drag] "double-clicks" where the drag ended) AND
+  // position-blind ([deselect-click; quick click on a shape] "double-clicks"
+  // the shape). Worse than the false positives: suppressing a far-apart
+  // synthetic pair still lets Konva CONSUME the first down of a genuine
+  // double-click into it, so the genuine pair never emits an event at all —
+  // click away, then double-click a text, and the first double-click is
+  // swallowed. So the stage's down/up handlers feed our own detector: a
+  // double-click is two still clicks in ONE place within DBL_MS, judged on
+  // the pair that actually happened.
+  //
+  // Drags (move/marquee/transform/crop) arm this deadline; an up inside it is
+  // not a "click" and breaks any pending pair.
   const suppressDblUntil = useRef(0);
   const suppressDbl = () => {
     suppressDblUntil.current = performance.now() + 500;
   };
-  // …and it is POSITION-blind too: two still clicks at unrelated spots inside
-  // the window (deselect-click, then a quick click on a shape) "double-click"
-  // the second spot. A genuine double-click is two clicks in ONE place, so a
-  // primary down landing far from the previous one arms the same suppression.
-  // 600ms generously covers Konva's 400ms up-to-up window measured down-to-down.
-  const lastDownRef = useRef<{ x: number; y: number; t: number } | null>(null);
-  const suppressFarApartDblPair = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
-    if ("button" in e.evt && e.evt.button !== 0) return; // Konva pairs primary clicks only
+  const DBL_MS = 500; // down-to-down; ~OS default double-click speed
+  type PairDown = { x: number; y: number; lx: number; ly: number; t: number; touch: boolean; onXfmr: boolean };
+  const pairRef = useRef<{ down: PairDown | null; lastClick: { x: number; y: number; t: number } | null }>({
+    down: null,
+    lastClick: null,
+  });
+  const recordPairDown = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
+    if ("button" in e.evt && e.evt.button !== 0) return; // primary clicks only
     const screen = e.target.getStage()?.getPointerPosition();
     if (!screen) return;
-    const prev = lastDownRef.current;
-    const slop = "button" in e.evt ? 8 : 24; // finger jitter > mouse jitter
-    if (prev && performance.now() - prev.t < 600 && Math.hypot(screen.x - prev.x, screen.y - prev.y) > slop) suppressDbl();
-    lastDownRef.current = { x: screen.x, y: screen.y, t: performance.now() };
+    // Everything the double-click action will need is captured HERE, at down
+    // time — the up's pointer state is not trusted (it can be stale or belong
+    // to another gesture by then; the click happened where the down landed).
+    const { x: lx, y: ly } = logicalPointer(e);
+    const parent = e.target.getParent() as Konva.Node | null;
+    pairRef.current.down = {
+      x: screen.x,
+      y: screen.y,
+      lx,
+      ly,
+      t: performance.now(),
+      touch: !("button" in e.evt),
+      // Same law as onStageDown: input originating on a Transformer handle
+      // belongs to the Transformer.
+      onXfmr: parent?.getClassName?.() === "Transformer",
+    };
+  };
+  /** A camera gesture (pan/pinch) is not a click and voids any pending pair. */
+  const breakClickPair = () => {
+    pairRef.current.down = null;
+    pairRef.current.lastClick = null;
+  };
+  /** Judge the finished click against the previous one; fire on a genuine pair. */
+  const settleClickPair = () => {
+    const pair = pairRef.current;
+    const down = pair.down;
+    pair.down = null;
+    if (!down) return; // no primary down recorded (non-primary button, pan, …)
+    if (performance.now() < suppressDblUntil.current) {
+      pair.lastClick = null; // that gesture was a drag — it breaks any pair
+      return;
+    }
+    const prev = pair.lastClick;
+    const slop = down.touch ? 24 : 8; // finger jitter > mouse jitter
+    if (prev && down.t - prev.t <= DBL_MS && Math.hypot(down.x - prev.x, down.y - prev.y) <= slop) {
+      pair.lastClick = null; // a triple-click starts a fresh pair
+      openDblTarget(down);
+    } else {
+      pair.lastClick = { x: down.x, y: down.y, t: down.t };
+    }
   };
 
   // Spatial index over shape bboxes — every "what's here" query (culling, hit
@@ -303,6 +347,7 @@ export function DrawCanvas({
 
   const startPan = (e: KonvaEventObject<MouseEvent>) => {
     settleGesture(); // a live draft/move/marquee must not keep running under the pan
+    breakClickPair();
     panRef.current = { lx: e.evt.clientX, ly: e.evt.clientY };
     setPanActive(true);
     setCamGesture(true);
@@ -335,6 +380,7 @@ export function DrawCanvas({
   /** Enter pinch mode: the in-flight draw/move/marquee gesture is aborted — a
    *  second finger means the user wants the camera, not more ink. */
   const beginPinch = (t1: Touch, t2: Touch, e: KonvaEventObject<TouchEvent>) => {
+    breakClickPair();
     if (state.draftId) dispatch({ type: "cancelDraw" });
     if (moveRef.current) {
       dispatch({ type: "endGesture" });
@@ -619,8 +665,8 @@ export function DrawCanvas({
 
   const onStageDown = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
     // Before any early-return: even a click that only blurs an editor or lands
-    // during crop is half of a potential synthetic dblclick pair.
-    suppressFarApartDblPair(e);
+    // during crop is half of a potential click pair.
+    recordPairDown(e);
     if (croppingId) return; // the crop overlay owns all input while active
     if (editing) return; // let the click blur+commit the open text, nothing else
     if (pinchRef.current) return; // two fingers own the camera
@@ -778,10 +824,11 @@ export function DrawCanvas({
 
   const onStageUp = () => {
     if (panRef.current) {
-      endPan();
+      endPan(); // startPan already broke the click pair
       return;
     }
-    settleGesture();
+    settleGesture(); // may arm suppressDbl (drag) — must precede the pair judgement
+    settleClickPair();
   };
 
   // ── Touch routing: a second finger switches the gesture to the camera ───────
@@ -818,17 +865,13 @@ export function DrawCanvas({
     onStageUp();
   };
 
-  const onStageDblClick = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
+  /** The double-click ACTION — invoked only by settleClickPair, which already
+   *  vouched the pair is genuine (two still clicks in one place). Operates on
+   *  the recorded DOWN (position + origin), never the up-time pointer. */
+  const openDblTarget = (down: { lx: number; ly: number; onXfmr: boolean }) => {
     if (croppingId || tool !== "select") return;
-    // A dblclick within the suppression window is SYNTHETIC — one of its two
-    // "clicks" was a drag/marquee/resize (Konva's window is movement-blind), so
-    // it would pop an editor wherever that gesture happened to end.
-    if (performance.now() < suppressDblUntil.current) return;
-    // Same law as onStageDown: input originating on a Transformer handle belongs
-    // to the Transformer.
-    const parent = e.target.getParent() as Konva.Node | null;
-    if (parent && parent.getClassName?.() === "Transformer") return;
-    const p = logicalPointer(e);
+    if (down.onXfmr) return;
+    const p = { x: down.lx, y: down.ly };
     const hit = smallestAt(p);
     if (!hit) return;
     // Double-click: text → edit text; image → crop (a GROUPED image never opens
@@ -1387,13 +1430,11 @@ export function DrawCanvas({
       onMouseMove={onStageMove}
       onMouseUp={onStageUp}
       onMouseLeave={() => setHover(null)}
-      onDblClick={onStageDblClick}
       onContextMenu={(e) => e.evt.preventDefault()}
       onWheel={onWheel}
       onTouchStart={onTouchStart}
       onTouchMove={onTouchMove}
       onTouchEnd={onTouchEnd}
-      onDblTap={onStageDblClick}
       style={{ cursor, touchAction: "none" }}
     >
       <Layer ref={layerRef}>
