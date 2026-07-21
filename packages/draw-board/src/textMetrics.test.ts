@@ -2,12 +2,23 @@ import { describe, expect, it } from "vitest";
 import { lineWidth, textBlockSize, wrapLines } from "./textMetrics.ts";
 
 describe("textMetrics", () => {
-  it("lineWidth uses real Arial advances (i is narrow, W is wide), non-ASCII falls back to 0.6em", () => {
+  it("lineWidth uses real Arial advances (i is narrow, W is wide), beyond the tables falls back to 0.6em", () => {
     expect(lineWidth("i", 10)).toBeCloseTo(2.22, 2);
     expect(lineWidth("W", 10)).toBeCloseTo(9.44, 2);
     expect(lineWidth("Hi", 10)).toBeCloseTo(7.22 + 2.22, 2);
     expect(lineWidth("→", 10)).toBeCloseTo(6, 2);
     expect(lineWidth("", 10)).toBe(0);
+  });
+
+  it("Cyrillic uses REAL advances from the embedded face — not a flat guess (wrap points must match the rendered glyphs)", () => {
+    expect(lineWidth("а", 10)).toBeCloseTo(5.56, 2); // metric twin of latin 'a' (Arial-compatible)
+    expect(lineWidth("ы", 10)).toBeCloseTo(7.19, 2); // wide — a flat 0.6em underprices it
+    expect(lineWidth("г", 10)).toBeCloseTo(3.65, 2); // narrow — a flat 0.6em overprices it
+    expect(lineWidth("№", 10)).toBeCloseTo(10.73, 2); // subset straggler outside U+0400-045F
+    // A wrap decision flips with real advances: "ыдвлаподлва" is 6.323em real
+    // vs 6.6em guessed — a 6.5em box keeps the real word whole, while the flat
+    // guess would hard-break it mid-word.
+    expect(wrapLines("ыы ыдвлаподлва", 10, 65)).toEqual(["ыы", "ыдвлаподлва"]);
   });
 
   it("no maxWidth: lines break ONLY at explicit newlines", () => {

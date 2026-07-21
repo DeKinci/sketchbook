@@ -645,6 +645,74 @@ test("edit overlay and committed canvas text render IDENTICAL ink — density pa
   expect(Math.abs(editing.right - committed.right)).toBeLessThanOrEqual(2);
 });
 
+test("wrapped CYRILLIC text breaks at the SAME points committed and editing — wrap parity beyond ASCII", async ({ page }) => {
+  // The committed canvas renders the MODEL's wrap (wrapLines → join("\n"),
+  // wrap "none"); the edit textarea soft-wraps with the browser's real glyph
+  // advances. They agree only while the model prices every glyph at its real
+  // advance — a flat per-char guess for non-ASCII drifts a few px per word,
+  // and after a handful of Cyrillic words the two sides break lines in
+  // different places: the block visibly re-wraps (different line count, so a
+  // whole-line ink-height jump) the moment editing starts.
+  const para =
+    "dfsdfsdf dfsaf dsf sdaf asdf ыфв афывпавы павы дпылваоп лдывап двыаоп ывадопаыв дфодп аволывд подаыпо длывоплд ываопл ывоадлпо ыдвлаподлва опдлавыоп длываопдл ыовадл оваыдлп оывдл п dsgds dfs g sdg dfg d fg dsg df g dsg df gdf g dfg df g dfs g dfsg df g dfg";
+  await openSeeded(page, [{ id: "t", type: "text", stroke: "#e5484d", strokeWidth: 3, x: 100, y: 100, fontSize: 18, width: 220, text: para }]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const toScreen = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+  await page.addStyleTag({ content: ".draw-text-input { caret-color: transparent !important }" });
+
+  // Clip covers the box plus overflow room: a wrap divergence shows as extra
+  // lines below (height) or a line escaping the 220px box to the right.
+  const tl = toScreen({ x: 90, y: 90 });
+  const clip = { x: tl.x, y: tl.y, width: 260 * cam.scale, height: 320 * cam.scale };
+  const inkBox = (png: Buffer) =>
+    page.evaluate(async (b64: string) => {
+      const img = new Image();
+      img.src = "data:image/png;base64," + b64;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+      const d = ctx.getImageData(0, 0, c.width, c.height).data;
+      const bg = [d[0], d[1], d[2]];
+      const rows = new Array<number>(c.height).fill(0);
+      const cols = new Array<number>(c.width).fill(0);
+      for (let y = 0; y < c.height; y++)
+        for (let x = 0; x < c.width; x++) {
+          const i = (y * c.width + x) * 4;
+          if (Math.abs(d[i] - bg[0]) + Math.abs(d[i + 1] - bg[1]) + Math.abs(d[i + 2] - bg[2]) > 90) {
+            rows[y]++;
+            cols[x]++;
+          }
+        }
+      const first = (a: number[]) => a.findIndex((n) => n >= 2);
+      const last = (a: number[]) => a.length - 1 - [...a].reverse().findIndex((n) => n >= 2);
+      return { top: first(rows), bottom: last(rows), left: first(cols), right: last(cols) };
+    }, png.toString("base64"));
+
+  const committed = await inkBox(await page.screenshot({ clip }));
+  expect(committed.top).toBeGreaterThanOrEqual(0); // sanity: the clip caught the text
+
+  const mid = toScreen({ x: 150, y: 110 }); // inside the block's first line
+  await page.mouse.dblclick(mid.x, mid.y);
+  await page.waitForSelector(".draw-text-input");
+  await page.keyboard.press("Control+End"); // collapse the select-all highlight
+  await page.waitForTimeout(120);
+  const editing = await inkBox(await page.screenshot({ clip }));
+
+  // Identical wrap ⇒ identical block. One divergent break shifts the bottom a
+  // whole 18px line and/or lets a committed line overrun the box rightward.
+  expect(Math.abs(editing.top - committed.top)).toBeLessThanOrEqual(3);
+  expect(Math.abs(editing.bottom - committed.bottom)).toBeLessThanOrEqual(3);
+  expect(Math.abs(editing.left - committed.left)).toBeLessThanOrEqual(3);
+  expect(Math.abs(editing.right - committed.right)).toBeLessThanOrEqual(3);
+});
+
 test.describe("rich exports + import drop surfaces", () => {
   /** Drop a file (bytes given as base64) onto a selector via a synthetic DragEvent. */
   async function dropFile(page: Page, selector: string, b64: string, name: string, type: string) {
