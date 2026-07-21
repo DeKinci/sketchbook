@@ -249,6 +249,19 @@ test("typography: text typed in a shape wraps at its edge (stored as a box), cen
   expect(before.width).toBeCloseTo(460 - 150 - 6, 0); // wrap box = room to the parent's right edge (minus inset)
   expect(before.attach).toMatchObject({ id: "r1", ax: 0.5, ay: 0.5 }); // placed mid-shape → center bond
 
+  // A selected text offers ONLY the horizontal side handles — they resize the
+  // wrap box; type size lives in the size control, so corners/verticals are gone.
+  const onText = await toScreen({ x: 160, y: 170 });
+  await page.mouse.click(onText.x, onText.y);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const s = (window as unknown as { Konva: { stages: { find(sel: string): { enabledAnchors(): string[] }[] }[] } }).Konva.stages.at(-1)!;
+        return s.find("Transformer")[0]?.enabledAnchors() ?? [];
+      })
+    )
+    .toEqual(["middle-left", "middle-right"]);
+
   // Stretch the rect 100px wider by its middle-right anchor: the caption keeps
   // its offset from the parent's CENTER → it slides +50 with it.
   const inRect = await toScreen({ x: 120, y: 300 }); // inside the rect, clear of the text block
@@ -272,6 +285,49 @@ test("typography: text typed in a shape wraps at its edge (stored as a box), cen
   const lines = [...svg.matchAll(/<text [^>]*>([^<]*)<\/text>/g)].map((m) => m[1]);
   expect(lines.length).toBeGreaterThan(1); // it wrapped
   expect(lines.join(" ").replace(/\s+/g, " ")).toContain("lazy dog"); // …into the source's words
+});
+
+test("text editing is WYSIWYG: the field always contains every line it commits (no clip, no scroll window)", async ({ page }) => {
+  const source = "the quick brown fox jumps over the lazy dog near the fence";
+  await openSeeded(page, [
+    { id: "tb", type: "text", stroke: "#e5484d", strokeWidth: 3, x: 60, y: 80, text: source, fontSize: 18, width: 150 },
+    { id: "tf", type: "text", stroke: "#3b82f6", strokeWidth: 3, x: 60, y: 400, text: source, fontSize: 18 },
+  ]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const toScreen = async (pt: { x: number; y: number }) => {
+    const cam = await page.evaluate(() => {
+      const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+      return { x: s.x(), y: s.y(), scale: s.scaleX() };
+    });
+    return { x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale };
+  };
+  const fits = () =>
+    page.evaluate(() => {
+      const ta = document.querySelector(".draw-text-input") as HTMLTextAreaElement;
+      return { w: ta.scrollWidth - ta.clientWidth, h: ta.scrollHeight - ta.clientHeight, cw: ta.clientWidth };
+    });
+  // A boxed text wrapping to several lines: the field is the WHOLE block —
+  // not a browser-default 2-row window scrolled to the caret.
+  const onBoxed = await toScreen({ x: 70, y: 88 });
+  await page.mouse.dblclick(onBoxed.x, onBoxed.y);
+  await page.waitForSelector(".draw-text-input");
+  let m = await fits();
+  expect(m.h).toBeLessThanOrEqual(1); // every wrapped line visible
+  expect(m.cw).toBe(150); // capped: the wrap box IS the field width
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(700); // outlive the far-apart dblclick suppression
+  // A free one-line text: the field spans the whole line (no horizontal
+  // clipping) and keeps growing as more is typed.
+  const onFree = await toScreen({ x: 70, y: 408 });
+  await page.mouse.dblclick(onFree.x, onFree.y);
+  await page.waitForSelector(".draw-text-input");
+  m = await fits();
+  expect(m.w).toBeLessThanOrEqual(1);
+  expect(m.h).toBeLessThanOrEqual(1);
+  await page.keyboard.press("End");
+  await page.keyboard.type(" and then some more words");
+  m = await fits();
+  expect(m.w).toBeLessThanOrEqual(1); // grew with the typing
 });
 
 test.describe("rich exports + import drop surfaces", () => {
@@ -1083,19 +1139,19 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
   });
 
   test("two quick clicks at DIFFERENT spots never synthesize a double-click (no phantom editor)", async ({ page }) => {
-    await openSeeded(page, [rect("r", 100, 100, 80, 60)]);
+    await openSeeded(page, [{ id: "t", type: "text", stroke: "#e5484d", strokeWidth: 3, x: 100, y: 100, text: "hello", fontSize: 18 }]);
     // Konva's dblclick window is time-based and position-blind: a deselect-click
     // on empty canvas followed by a quick click on a shape used to "double-click"
-    // the shape and pop its label editor mid-flow.
+    // the shape and pop its text editor mid-flow.
     const empty = await toScreen(page, { x: 500, y: 320 });
-    const onRect = await toScreen(page, { x: 140, y: 130 });
+    const onText = await toScreen(page, { x: 115, y: 108 });
     await page.mouse.click(empty.x, empty.y);
-    await page.mouse.click(onRect.x, onRect.y); // back-to-back: well inside the window
+    await page.mouse.click(onText.x, onText.y); // back-to-back: well inside the window
     await page.waitForTimeout(300);
-    await expect(page.locator(".draw-text-input")).toHaveCount(0); // no phantom label editor
+    await expect(page.locator(".draw-text-input")).toHaveCount(0); // no phantom text editor
     // A GENUINE double-click (two still clicks in one place) still opens it.
     await page.waitForTimeout(500); // let the window from the clicks above lapse
-    await page.mouse.dblclick(onRect.x, onRect.y);
+    await page.mouse.dblclick(onText.x, onText.y);
     await expect(page.locator(".draw-text-input")).toBeVisible();
   });
 });

@@ -55,8 +55,9 @@ export interface BaseShape {
   strokeWidth: number;
   /** Stroke rendering style; absent = solid (keeps persisted docs slim). */
   strokeStyle?: StrokeStyle;
-  /** Optional caption bound to the shape (double-click a shape to edit it). It
-   *  renders centered and follows the shape on move/resize/delete. */
+  /** @deprecated Legacy bound caption — the feature is gone (free text shapes
+   *  bond to shapes instead). Kept in the type so old persisted docs still
+   *  parse; every load path converts it via {@link migrateLabels}. */
   label?: string;
   /** Attachment to a parent shape (see {@link Attach}), or none. */
   attach?: Attach;
@@ -265,9 +266,9 @@ const DEFAULT_STAGE = { width: 720, height: 460 };
 export function initialDrawState(doc?: DrawDoc, opts?: { color?: string }): DrawState {
   return {
     background: doc?.background,
-    // normalizeGroups: cross-version safety for every open path (localStorage,
-    // PNG/SVG board import, host-supplied docs) — see its doc comment.
-    shapes: doc ? normalizeGroups(doc.shapes.map(cloneShape)) : [],
+    // normalizeGroups + migrateLabels: cross-version safety for every open path
+    // (localStorage, PNG/SVG board import, host-supplied docs) — see their docs.
+    shapes: doc ? migrateLabels(normalizeGroups(doc.shapes.map(cloneShape))) : [],
     width: doc?.width ?? DEFAULT_STAGE.width,
     height: doc?.height ?? DEFAULT_STAGE.height,
     // Always open in pen — ready to sketch immediately (cursor is one Tab away).
@@ -349,9 +350,47 @@ export function boundingBox(sh: Shape): { x: number; y: number; width: number; h
   }
 }
 
-/** Font size for a shape's bound label — scaled to fit inside the shape. */
-export function labelFont(bbox: { width: number; height: number }): number {
+/** Font size a legacy bound label rendered at — kept only so {@link
+ *  migrateLabels} can mint its replacement text at the same visual size. */
+function labelFont(bbox: { width: number; height: number }): number {
   return Math.max(12, Math.min(26, bbox.height * 0.45, bbox.width * 0.28));
+}
+
+/** Legacy bound labels → free text shapes. The label feature is gone; shipped
+ *  docs (localStorage boards, PNG/SVG re-imports, clipboard envelopes) may
+ *  still carry `label` on shapes, so every load path funnels through this:
+ *  each label becomes a standalone text at the position it rendered — centered
+ *  on an area shape and bonded to it via the standard placement glue (so it
+ *  still follows), or at a stroke's chip midpoint, free (strokes aren't attach
+ *  parents). Label-free input passes through by identity. */
+export function migrateLabels(shapes: Shape[]): Shape[] {
+  if (!shapes.some((sh) => sh.label)) return shapes;
+  const stripped: Shape[] = shapes.map((sh) => (sh.label ? { ...sh, label: undefined } : sh));
+  const minted: Shape[] = [];
+  for (const sh of shapes) {
+    if (!sh.label) continue;
+    const b = boundingBox(sh);
+    const chip = sh.type === "line" || sh.type === "arrow" || sh.type === "pen";
+    const fontSize = chip ? 15 : labelFont(b); // chips rendered at a fixed 15
+    const mid =
+      sh.type === "line" || sh.type === "arrow"
+        ? { x: (sh.points[0] + sh.points[2]) / 2, y: (sh.points[1] + sh.points[3]) / 2 }
+        : { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    const size = textBlockSize(sh.label, fontSize);
+    const t: TextShape = {
+      id: `${sh.id}-label`,
+      type: "text",
+      stroke: sh.stroke,
+      strokeWidth: sh.strokeWidth,
+      x: mid.x - size.width / 2,
+      y: mid.y - size.height / 2,
+      text: sh.label,
+      fontSize,
+    };
+    const attach = attachAt(t, stripped);
+    minted.push(attach ? { ...t, attach } : t);
+  }
+  return [...stripped, ...minted];
 }
 
 /** Union bounding box of all shapes, or null for an empty board — the content

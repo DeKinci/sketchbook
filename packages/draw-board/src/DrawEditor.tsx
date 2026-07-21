@@ -17,7 +17,7 @@ import {
   fontForStroke,
   groupActionFor,
   isSelectable,
-  labelFont,
+  migrateLabels,
   normalizeGroups,
   scaleStepTarget,
   slotTargetStep,
@@ -120,10 +120,10 @@ const MIN_TEXT_WRAP = 30;
 
 /** An in-progress text edit. `kind` selects the target: a NEW standalone text
  *  (nothing exists in the model until commit — so a stray mouse-up can't tear it
- *  down), an EXISTING text shape, or a shape's bound LABEL. Geometry lives here
- *  so the textarea never depends on a model shape existing. */
+ *  down) or an EXISTING text shape. Geometry lives here so the textarea never
+ *  depends on a model shape existing. */
 interface EditSession {
-  kind: "new-text" | "edit-text" | "label";
+  kind: "new-text" | "edit-text";
   id: string | null;
   x: number;
   y: number;
@@ -139,7 +139,7 @@ interface EditSession {
 /**
  * The drawing editor body: toolbar + pan/zoom Konva canvas + inline text
  * overlay + a Cancel / "Add to message" footer. Owns theme-aware defaults, the
- * CAMERA (pan/zoom per its viewport policy), text/label editing, clipboard +
+ * CAMERA (pan/zoom per its viewport policy), text editing, clipboard +
  * image/text paste + drop, and PNG export; every geometry/history concern is
  * delegated to the pure reducer.
  */
@@ -380,7 +380,7 @@ export function DrawEditor({
     setCamera(content ? fitView(padBox(content, 60), a, { maxScale: 1 }) : { x: 0, y: 0, scale: 1 });
   }, [policy]);
 
-  // ── Text / label editing (model-independent, focus-race safe) ───────────────
+  // ── Text editing (model-independent, focus-race safe) ──────────────────────
   const [session, setSession] = useState<EditSession | null>(null);
   const [value, setValue] = useState("");
   // Refs mirror the latest session/value so `commitEdit` can be a PURE callback
@@ -438,14 +438,6 @@ export function DrawEditor({
     },
     [containKap]
   );
-  const startLabel = useCallback((id: string) => {
-    const sh = stateRef.current.shapes.find((s) => s.id === id);
-    if (!sh) return;
-    const b = boundingBox(sh);
-    setValue(sh.label ?? "");
-    setSession({ kind: "label", id, x: b.x + b.width / 2, y: b.y + b.height / 2, fontSize: labelFont(b), color: sh.stroke });
-  }, []);
-
   const commitEdit = useCallback(() => {
     const cur = sessionRef.current;
     if (!cur) return;
@@ -474,10 +466,6 @@ export function DrawEditor({
         // member-edit context. Keep the (empty) member; ungroup to prune.
         dispatch({ type: "setText", id: cur.id, text: "" });
       } else dispatch({ type: "deleteShapes", ids: [cur.id] });
-    } else if (cur.kind === "label" && cur.id) {
-      dispatch({ type: "beginGesture" });
-      dispatch({ type: "patchShape", id: cur.id, patch: { label: text || undefined } });
-      dispatch({ type: "endGesture" });
     }
     setSession(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -524,6 +512,24 @@ export function DrawEditor({
     });
     return () => cancelAnimationFrame(raf);
   }, [session]);
+
+  // WYSIWYG sizing: the field's box always equals its content's — a capped
+  // field keeps the wrap width and grows DOWNWARD per wrapped line, a free
+  // field grows RIGHTWARD with its longest line; neither ever scrolls or clips
+  // (the canvas text is hidden while editing, so the field IS the shape).
+  // Browser-measured (scroll extents after a collapse) so the box stays
+  // layout-true per keystroke, even where the browser's wrap differs from the
+  // model's by a hair.
+  useLayoutEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    if (sessionRef.current?.maxWidth === undefined) {
+      ta.style.width = "0px";
+      ta.style.width = `${ta.scrollWidth + 2}px`; // + caret room at the line end
+    }
+    ta.style.height = "0px";
+    ta.style.height = `${ta.scrollHeight}px`;
+  }, [value, session]);
 
   // ── Add an image / text (drop or paste from the system) ─────────────────────
   // Placement is CAMERA-relative: "the middle of the board" means the middle of
@@ -609,7 +615,7 @@ export function DrawEditor({
     try {
       const parsed = JSON.parse(text) as Record<string, unknown>;
       const shapes = parsed?.[SHAPES_ENVELOPE] ? (parsed.shapes as Shape[] | undefined) : undefined;
-      return Array.isArray(shapes) && shapes.length ? normalizeGroups(shapes) : null;
+      return Array.isArray(shapes) && shapes.length ? migrateLabels(normalizeGroups(shapes)) : null;
     } catch {
       return null;
     }
@@ -1137,8 +1143,6 @@ export function DrawEditor({
   const onRootBlur = useCallback(() => setSpaceHeld(false), []);
 
   const editingId = session?.kind === "edit-text" ? session.id : null;
-  const editingLabelId = session?.kind === "label" ? session.id : null;
-  const centered = session?.kind === "label";
 
   // The size dots render the SELECTION's remembered position: a whole group /
   // lone image shows its scale step (mid = natural), anything else its stroke.
@@ -1228,11 +1232,9 @@ export function DrawEditor({
               stageRef={stageRef}
               editing={!!session}
               editingId={editingId}
-              editingLabelId={editingLabelId}
               croppingId={croppingId}
               onTextClick={startText}
               onEditText={startEditText}
-              onEditLabel={startLabel}
               onCropImage={onCropImage}
               onCropApply={onCropApply}
               onCropCancel={onCropCancel}
@@ -1262,24 +1264,22 @@ export function DrawEditor({
                 // field must too — any extra leading pushes the glyphs DOWN vs
                 // the canvas text (a visible jump when the editor opens) and
                 // compounds per line on multi-line texts.
-                className="draw-text-input absolute m-0 resize-none overflow-hidden whitespace-pre border-0 bg-transparent p-0 text-center leading-none outline-none"
+                className="draw-text-input absolute m-0 resize-none overflow-hidden whitespace-pre border-0 bg-transparent p-0 text-left leading-none outline-none"
                 style={{
                   left: session.x * view.scale + view.x,
                   top: session.y * view.scale + view.y,
-                  transform: centered ? "translate(-50%, -50%)" : undefined,
-                  minWidth: "2rem",
-                  textAlign: centered ? "center" : "left",
                   color: session.color === CONTRAST_INK ? CONTRAST_OVERLAY : session.color,
                   caretColor: session.color === CONTRAST_INK ? CONTRAST_OVERLAY : session.color,
                   fontSize: session.fontSize * view.scale,
                   fontFamily: "Arial, sans-serif",
                   // Capped: the field IS the wrap box — it wraps at the parent's
                   // edge (or the text's own box) instead of growing out of it.
-                  ...(session.maxWidth !== undefined && {
-                    width: session.maxWidth * view.scale,
-                    whiteSpace: "pre-wrap" as const,
-                    overflowWrap: "break-word" as const,
-                  }),
+                  // Uncapped: no width here — the WYSIWYG effect grows it with
+                  // the longest line (minWidth just keeps an empty field's caret
+                  // clickable).
+                  ...(session.maxWidth !== undefined
+                    ? { width: session.maxWidth * view.scale, whiteSpace: "pre-wrap" as const, overflowWrap: "break-word" as const }
+                    : { minWidth: "2rem" }),
                 }}
               />
             )}

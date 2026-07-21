@@ -3,7 +3,7 @@
  *
  * A reconstruction, not a Konva screenshot: geometry is exact, styling matches
  * the board's renderer (dark ground, stroke widths, arrowheads via the same
- * size formula, label chips), with two documented approximations — pen strokes
+ * size formula), with two documented approximations — pen strokes
  * smooth through midpoint quadratics (Konva uses its own tension spline) and
  * the adaptive contrast ink resolves to bright (the exported ground is the
  * dark board; per-pixel adaptation needs a raster).
@@ -12,7 +12,7 @@
  * {@link SVG_META_ID}, making the file re-importable as a full board — the SVG
  * sibling of the PNG iTXt chunk.
  */
-import { boundingBox, dashFor, isContrastInk, labelFont, paintOrder, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
+import { boundingBox, dashFor, isContrastInk, paintOrder, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
 import { wrapLines } from "./textMetrics.ts";
 import { contentCropLogical } from "./exportPng.ts";
 
@@ -102,28 +102,6 @@ function shapeSvg(sh: Shape): string {
   }
 }
 
-function labelSvg(sh: Shape): string {
-  if (!sh.label) return "";
-  const b = boundingBox(sh);
-  if (sh.type === "line" || sh.type === "arrow" || sh.type === "pen") {
-    const mid =
-      sh.type === "pen"
-        ? { x: b.x + b.width / 2, y: b.y + b.height / 2 }
-        : { x: (sh.points[0] + sh.points[2]) / 2, y: (sh.points[1] + sh.points[3]) / 2 };
-    const fs = 15;
-    const pad = 5;
-    const ink = isContrastInk(sh.stroke) ? BRIGHT_INK : sh.stroke;
-    const w = Math.max(8, sh.label.length * fs * 0.58) + pad * 2;
-    const h = fs * 1.16 + pad * 2;
-    return (
-      `<rect x="${num(mid.x - w / 2)}" y="${num(mid.y - h / 2)}" width="${num(w)}" height="${num(h)}" rx="5" fill="rgba(20,20,24,0.85)" stroke="rgba(245,245,245,0.16)"/>` +
-      `<text x="${num(mid.x)}" y="${num(mid.y + fs * 0.36)}" text-anchor="middle" font-family="Arial, sans-serif" font-size="${fs}" font-weight="500" fill="${ink}">${esc(sh.label)}</text>`
-    );
-  }
-  const fs = labelFont(b);
-  return `<text x="${num(b.x + b.width / 2)}" y="${num(b.y + b.height / 2 + fs * 0.36)}" text-anchor="middle" font-family="Arial, sans-serif" font-size="${fs}" fill="${inkOf(sh)}">${esc(sh.label)}</text>`;
-}
-
 export interface SvgExportOptions {
   /** Embed the doc for full re-import (default true — the "rich" export). */
   rich?: boolean;
@@ -140,7 +118,6 @@ export function exportSvg(doc: DrawDoc, opts?: SvgExportOptions): string {
     ? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 }
     : contentCropLogical(doc, { clamp: false }) ?? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 };
   const body = paintOrder(doc.shapes).map(shapeSvg).join("\n  ");
-  const labels = doc.shapes.map(labelSvg).filter(Boolean).join("\n  ");
   const bg = doc.background
     ? `<image x="0" y="0" width="${num(doc.width)}" height="${num(doc.height)}" href="data:${doc.background.mediaType};base64,${doc.background.dataBase64}" preserveAspectRatio="none"/>`
     : `<rect x="${num(crop.x)}" y="${num(crop.y)}" width="${num(crop.width)}" height="${num(crop.height)}" fill="${CANVAS_BG_DARK}"/>`;
@@ -150,7 +127,6 @@ export function exportSvg(doc: DrawDoc, opts?: SvgExportOptions): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${num(crop.x)} ${num(crop.y)} ${num(crop.width)} ${num(crop.height)}" width="${num(crop.width)}" height="${num(crop.height)}">${meta}
   ${bg}
   ${body}
-  ${labels}
 </svg>`;
 }
 

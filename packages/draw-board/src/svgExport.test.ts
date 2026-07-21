@@ -63,19 +63,8 @@ describe("exportSvg", () => {
     expect(free).toMatch(/y="70"[^>]*>two<\/text>/);
   });
 
-  it("labels render: chip on strokes, centered text on areas", () => {
-    const shapes: Shape[] = [
-      { ...rect("r"), label: "box label" } as Shape,
-      { id: "l", type: "line", stroke: "#e5484d", strokeWidth: 3, points: [0, 0, 100, 0], label: "wire" } as Shape,
-    ];
-    const svg = exportSvg(doc(shapes));
-    expect(svg).toContain(">box label</text>");
-    expect(svg).toContain(">wire</text>");
-    expect(svg).toContain('rx="5" fill="rgba(20,20,24,0.85)"'); // the stroke chip
-  });
-
   it("rich round-trip: readSvgDoc returns the exact doc; slim has no metadata", () => {
-    const d = doc([rect("r"), { id: "p", type: "pen", stroke: "contrast", strokeWidth: 3, points: [1, 2, 3, 4], label: 'q"uote' } as Shape]);
+    const d = doc([rect("r"), { id: "t", type: "text", stroke: "contrast", strokeWidth: 3, x: 1, y: 2, text: 'q"uote', fontSize: 18 } as Shape]);
     expect(readSvgDoc(exportSvg(d))).toEqual(d);
     const slim = exportSvg(d, { rich: false });
     expect(slim).not.toContain("<metadata");

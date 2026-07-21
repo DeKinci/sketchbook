@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
 import type { KonvaEventObject } from "konva/lib/Node.js";
-import { Stage, Layer, Rect, Ellipse, Line, Arrow, Text, Image as KonvaImage, Group, Label, Tag, Transformer } from "react-konva";
+import { Stage, Layer, Rect, Ellipse, Line, Arrow, Text, Image as KonvaImage, Group, Transformer } from "react-konva";
 import { CropLayer, type CropControl } from "./CropLayer.tsx";
 import { wrapLines } from "./textMetrics.ts";
 import { SpatialIndex } from "./spatialIndex.ts";
@@ -16,7 +16,6 @@ import {
   moveClusterIds,
   paintOrder,
   isContrastInk,
-  labelFont,
   shapesInMarquee,
   BIND_DISTANCE,
   EDGE_TOUCH,
@@ -111,11 +110,9 @@ export function DrawCanvas({
   stageRef,
   editing,
   editingId,
-  editingLabelId,
   croppingId,
   onTextClick,
   onEditText,
-  onEditLabel,
   onCropImage,
   onCropApply,
   onCropCancel,
@@ -142,20 +139,16 @@ export function DrawCanvas({
   /** Space is held — a primary-button drag pans instead of drawing/selecting. */
   panning: boolean;
   stageRef: React.RefObject<Konva.Stage | null>;
-  /** A text/label edit is in progress — canvas pointer input is suppressed so a
+  /** A text edit is in progress — canvas pointer input is suppressed so a
    *  click elsewhere just blurs the textarea (committing it) instead of starting
    *  a new action or discarding the text. */
   editing: boolean;
   /** A text shape currently being edited (hidden under the textarea), or null. */
   editingId: string | null;
-  /** A shape whose bound label is being edited (label hidden), or null. */
-  editingLabelId: string | null;
   /** Place + edit a new standalone text at these logical coords (text tool). */
   onTextClick: (x: number, y: number) => void;
   /** Reopen an existing text shape for editing. */
   onEditText: (id: string) => void;
-  /** Edit the bound label of a (non-text) shape. */
-  onEditLabel: (id: string) => void;
   /** An image currently in crop mode (rendered by the crop overlay), or null. */
   croppingId: string | null;
   /** Enter crop mode on an image (double-click). */
@@ -186,7 +179,7 @@ export function DrawCanvas({
   const erasing = useRef(false);
   // Konva synthesizes a dblclick from ANY two down/up pairs inside its 400ms
   // window — movement-blind, so [click; quick drag/resize] "double-clicks"
-  // wherever the second gesture ENDED and would pop a text/label/crop editor
+  // wherever the second gesture ENDED and would pop a text/crop editor
   // mid-flow. Every real drag (move/marquee/transform) arms this deadline;
   // onStageDblClick ignores synthetic dblclicks until it passes. Genuine
   // double-clicks (two still clicks) never arm it.
@@ -472,11 +465,13 @@ export function DrawCanvas({
     if (!tr || !stage) return;
     if (tool === "select" && soleResizable && selectedIds[0] !== editingId && !croppingId) {
       const node = stage.findOne<Konva.Node>(`#${selectedIds[0]}`);
-      // Text has no free height — it derives from wrapping — so the vertical
-      // side handles go: corners scale the type, left/right resize the wrap box.
+      // Text gets ONLY the horizontal side handles: they resize the WRAP BOX
+      // (lines reflow, glyphs unscaled — the text grows vertically). Height
+      // derives from wrapping and type size lives in the size control, so
+      // vertical and corner handles have nothing to do.
       tr.enabledAnchors(
         soleSel?.type === "text"
-          ? ["top-left", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-right"]
+          ? ["middle-left", "middle-right"]
           : ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
       );
       tr.nodes(node ? [node] : []);
@@ -826,13 +821,12 @@ export function DrawCanvas({
     if (parent && parent.getClassName?.() === "Transformer") return;
     const hit = smallestAt(logicalPointer(e));
     if (!hit) return;
-    // Double-click: text → edit text; image → crop; any other shape → bound
-    // label. A GROUPED image never opens the crop overlay (crop is a resize in
-    // disguise — disallowed on members); it gets the label edit instead, which
-    // stays in the permitted member-edit set (as does text content).
+    // Double-click: text → edit text; image → crop. A GROUPED image never opens
+    // the crop overlay (crop is a resize in disguise — disallowed on members).
+    // Other shapes have no double-click action — captions are free text shapes
+    // that bond to them.
     if (hit.type === "text") onEditText(hit.id);
     else if (hit.type === "image" && !hit.groupPath) onCropImage(hit.id);
-    else onEditLabel(hit.id);
   };
 
   // The parent's LIVE box mid-transform, WITHOUT disturbing its node (the
@@ -852,14 +846,15 @@ export function DrawCanvas({
     node.scaleX(1);
     node.scaleY(1);
     if (sh.type === "text") {
-      // Text is a BOX: a side-handle drag (sx moves alone — corners keepRatio)
-      // resizes the WRAP WIDTH and the lines reflow, glyphs unscaled; a corner
-      // drag scales the type (and the box with it, keeping the same lines).
-      const side = Math.abs(sy - 1) < 0.001 && Math.abs(sx - 1) >= 0.001;
-      const patch = side
-        ? { x: node.x(), y: node.y(), width: Math.max(24, boundingBox(sh).width * sx) }
-        : { x: node.x(), y: node.y(), fontSize: Math.max(8, sh.fontSize * sy), ...(sh.width !== undefined && { width: sh.width * sy }) };
-      dispatch({ type: "commitResize", id: sh.id, patch, distScale: 1 / vsRef.current });
+      // Only the side handles exist for text — the drag resizes the WRAP WIDTH
+      // and the lines reflow, glyphs unscaled (type size lives in the size
+      // control, not the Transformer).
+      dispatch({
+        type: "commitResize",
+        id: sh.id,
+        patch: { x: node.x(), y: node.y(), width: Math.max(24, boundingBox(sh).width * sx) },
+        distScale: 1 / vsRef.current,
+      });
     } else if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "image") {
       dispatch({
         type: "commitResize",
@@ -1181,7 +1176,7 @@ export function DrawCanvas({
       })()
     : null;
 
-  // Shape + label elements, cached PER SHAPE OBJECT (the reducer preserves the
+  // Shape elements, cached PER SHAPE OBJECT (the reducer preserves the
   // identity of untouched shapes): a pen point or a one-shape drag rebuilds ONE
   // element, not N. The cache epoch resets when anything cross-cutting shifts —
   // the raster backdrop (adaptive ink resamples), image decodes, edit/crop
@@ -1190,12 +1185,10 @@ export function DrawCanvas({
   // Mid-gesture camera pans/zooms don't touch elements at all (live values
   // read through refs; widths are model units the stage scales natively).
   const shapeElCache = useRef(new WeakMap<Shape, React.ReactElement | null>());
-  const labelElCache = useRef(new WeakMap<Shape, React.ReactElement | null>());
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useMemo(() => {
     shapeElCache.current = new WeakMap();
-    labelElCache.current = new WeakMap();
-  }, [imgEls, imgSig, bgImage, editingId, editingLabelId, croppingId, lumEpoch, floorVs]);
+  }, [imgEls, imgSig, bgImage, editingId, croppingId, lumEpoch, floorVs]);
   const buildShapeEl = (sh: Shape): React.ReactElement | null => {
           if (sh.id === editingId && sh.type === "text") return null; // hidden under the textarea
           // Adaptive ink resolves to a solid color contrasting the background
@@ -1283,65 +1276,6 @@ export function DrawCanvas({
   const staticShapeNodes = useMemo(() => nodesFor(staticShapes), [staticShapes, imgEls, editingId, croppingId, floorVs]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const dynamicShapeNodes = useMemo(() => nodesFor(dynamicShapes), [dynamicShapes, imgEls, editingId, croppingId, floorVs]);
-  const buildLabelEl = (sh: Shape): React.ReactElement | null => {
-    return ((sh) => {
-        if (!sh.label || sh.id === editingLabelId) return null;
-        const b = boundingBox(sh);
-        if (sh.type === "line" || sh.type === "arrow" || sh.type === "pen") {
-          const mid =
-            sh.type === "pen"
-              ? { x: b.x + b.width / 2, y: b.y + b.height / 2 }
-              : { x: (sh.points[0] + sh.points[2]) / 2, y: (sh.points[1] + sh.points[3]) / 2 };
-          const fs = 15;
-          const pad = 5;
-          const ink = isContrastInk(sh.stroke) ? "#f5f5f5" : sh.stroke;
-          const w = Math.max(8, sh.label.length * fs * 0.58) + pad * 2;
-          const h = fs * 1.16 + pad * 2;
-          return (
-            <Label key={`label-${sh.id}`} x={mid.x} y={mid.y} offsetX={w / 2} offsetY={h / 2} listening={false}>
-              <Tag
-                fill="rgba(20,20,24,0.85)"
-                cornerRadius={5}
-                stroke="rgba(245,245,245,0.16)"
-                strokeWidth={1}
-                shadowColor="#000000"
-                shadowBlur={5}
-                shadowOpacity={0.45}
-              />
-              <Text text={sh.label} fontSize={15} fontStyle="500" fill={ink} padding={5} align="center" />
-            </Label>
-          );
-        }
-        const fs = labelFont(b);
-        return (
-          <Text
-            key={`label-${sh.id}`}
-            x={b.x}
-            y={b.y + b.height / 2 - fs * 0.6}
-            width={b.width}
-            text={sh.label}
-            fontSize={fs}
-            fill={inkFor(sh)}
-            align="center"
-            listening={false}
-          />
-        );
-      })(sh);
-  };
-  const labelsFor = (list: Shape[]) => {
-    const cache = labelElCache.current;
-    return list.map((sh) => {
-      if (cache.has(sh)) return cache.get(sh)!;
-      const el = buildLabelEl(sh);
-      cache.set(sh, el);
-      return el;
-    });
-  };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const staticLabelNodes = useMemo(() => labelsFor(staticShapes), [staticShapes, editingLabelId]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const dynamicLabelNodes = useMemo(() => labelsFor(dynamicShapes), [dynamicShapes, editingLabelId]);
-
   return (
     <Stage
       ref={stageRef}
@@ -1383,14 +1317,12 @@ export function DrawCanvas({
             the Stage transform only — rebuilding N shape elements per wheel frame
             was the board's scaling wall. */}
         {staticShapeNodes}
-        {staticLabelNodes}
       </Layer>
 
       {/* DYNAMIC layer: the live gesture's shapes + all chrome. Stays tiny per
           frame while the static layer above rides its bitmap cache. */}
       <Layer>
         {dynamicShapeNodes}
-        {dynamicLabelNodes}
 
         {/* Bind highlight — glows what a line/arrow endpoint or dragged shape
             would glue to. A grouped target glows as its WHOLE unit (the glue

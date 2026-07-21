@@ -12,6 +12,7 @@ import {
   nearestBindableId,
   nearestEdgeBindableId,
   attachAt,
+  migrateLabels,
   reflowAttachments,
   containedIds,
   moveClusterIds,
@@ -370,7 +371,7 @@ describe("drawReducer — selection", () => {
   });
 });
 
-describe("drawReducer — text size (S/M/L) via stroke slots + labels", () => {
+describe("drawReducer — text size (S/M/L) via stroke slots", () => {
   it("stroke width sets fontSize on a selected TEXT (not strokeWidth)", () => {
     let s = seeded([text("t1", { fontSize: 18 })]);
     s = drawReducer(s, { type: "select", ids: ["t1"] });
@@ -379,17 +380,50 @@ describe("drawReducer — text size (S/M/L) via stroke slots + labels", () => {
     expect(t.fontSize).toBe(44); // fontForStroke(10)
     expect(s.strokeWidth).toBe(10);
   });
+});
 
-  it("a bound label patched onto a shape survives a move (follows the shape)", () => {
-    let s = seeded([box("r1")]);
-    s = drawReducer(s, { type: "beginGesture" });
-    s = drawReducer(s, { type: "patchShape", id: "r1", patch: { label: "DB" } });
-    s = drawReducer(s, { type: "endGesture" });
-    s = drawReducer(s, { type: "beginGesture" });
-    s = drawReducer(s, { type: "translateShapes", ids: ["r1"], dx: 20, dy: 20 });
-    s = drawReducer(s, { type: "endGesture" });
-    expect(s.shapes[0].label).toBe("DB");
-    expect(s.shapes[0]).toMatchObject({ x: 30, y: 30 });
+describe("legacy label migration — bound labels become free text shapes on load", () => {
+  it("an area label becomes a centered text bonded to its old owner (and follows it)", () => {
+    const s = initialDrawState({
+      width: 400,
+      height: 300,
+      shapes: [box("r1", { x: 100, y: 100, width: 120, height: 80, label: "DB" })],
+    });
+    expect(s.shapes.find((sh) => sh.id === "r1")!.label).toBeUndefined();
+    const t = s.shapes.find((sh) => sh.type === "text") as TextShape;
+    expect(t.text).toBe("DB");
+    expect(t.fontSize).toBe(26); // labelFont of a 120×80 box — the size it rendered at
+    const b = boundingBox(t);
+    expect(b.x + b.width / 2).toBeCloseTo(160); // centered where the label sat
+    expect(b.y + b.height / 2).toBeCloseTo(140);
+    expect(t.attach).toMatchObject({ id: "r1", kind: "box", ax: 0.5, ay: 0.5 });
+    let s2 = drawReducer(s, { type: "beginGesture" });
+    // Drag as the editor does: the move cluster expands to glued followers.
+    s2 = drawReducer(s2, { type: "translateShapes", ids: moveClusterIds(s.shapes, ["r1"]), dx: 20, dy: 0 });
+    s2 = drawReducer(s2, { type: "endGesture" });
+    const t2 = s2.shapes.find((sh) => sh.type === "text") as TextShape;
+    expect(t2.x).toBeCloseTo(t.x + 20); // the bond carries the caption along
+  });
+
+  it("a stroke chip label becomes a free text at the chip position (strokes aren't attach parents)", () => {
+    const s = initialDrawState({
+      width: 400,
+      height: 300,
+      shapes: [{ id: "l1", type: "line", stroke: "#e5484d", strokeWidth: 3, points: [40, 40, 140, 40], label: "wire" }],
+    });
+    expect(s.shapes.find((sh) => sh.id === "l1")!.label).toBeUndefined();
+    const t = s.shapes.find((sh) => sh.type === "text") as TextShape;
+    expect(t.text).toBe("wire");
+    expect(t.fontSize).toBe(15); // the chip's fixed size
+    const b = boundingBox(t);
+    expect(b.x + b.width / 2).toBeCloseTo(90); // segment midpoint — where the chip hung
+    expect(b.y + b.height / 2).toBeCloseTo(40);
+    expect(t.attach).toBeUndefined();
+  });
+
+  it("label-free shape arrays pass through migrateLabels untouched (identity)", () => {
+    const shapes: Shape[] = [box("r1"), text("t1")];
+    expect(migrateLabels(shapes)).toBe(shapes);
   });
 });
 
