@@ -392,6 +392,102 @@ test("text width-resize reflows LIVE (glyphs unscaled), and the side-handle pair
   expect(await anchors()).toEqual(["middle-left", "middle-right"]);
 });
 
+test("glue preview is bond-specific: the pinned edge lights up, an ellipse arcs, an endpoint bind frames the body, containment stays silent", async ({ page }) => {
+  await openSeeded(page, [
+    rect("A", 100, 100, 120, 80), // edge target — right edge x=220, v-center 140
+    { id: "E", type: "ellipse", stroke: "#e5484d", strokeWidth: 3, x: 400, y: 100, width: 120, height: 80 }, // arc target
+    rect("C", 100, 300, 300, 200), // container for the text drop
+    rect("D", 300, 125, 40, 30), // the dragged probe (v-centered on A)
+    { id: "T", type: "text", stroke: "#e5484d", strokeWidth: 3, x: 600, y: 400, text: "cap", fontSize: 18 },
+  ]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const toScreen = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+  const drag = async (from: { x: number; y: number }, to: { x: number; y: number }) => {
+    const a = toScreen(from);
+    const b = toScreen(to);
+    await page.mouse.move(a.x, a.y);
+    await page.mouse.down();
+    await page.mouse.move(b.x, b.y, { steps: 5 });
+  };
+  /** The live glue chrome, by kind: edge/arc polyline points, body frame widths. */
+  const glue = () =>
+    page.evaluate(() => {
+      const s = (window as unknown as { Konva: { stages: { find(sel: string): { points?(): number[]; width?(): number }[] }[] } }).Konva.stages.at(-1)!;
+      return {
+        edge: s.find(".glue-edge").map((n) => n.points!()),
+        arc: s.find(".glue-arc").map((n) => n.points!()),
+        body: s.find(".glue-body").map((n) => n.width!()),
+      };
+    });
+
+  // Dragging D against A's RIGHT edge lights ONLY that edge — a vertical
+  // segment hugging x=220 — never the whole frame.
+  await drag({ x: 320, y: 140 }, { x: 250, y: 140 }); // D.x 300 → 230, left edge 10px off A's right
+  await expect.poll(async () => (await glue()).edge.length).toBe(1);
+  let g = await glue();
+  expect(g.body.length + g.arc.length).toBe(0);
+  expect(g.edge[0]).toHaveLength(4); // one edge, not a corner polyline
+  expect(g.edge[0][0]).toBeCloseTo(g.edge[0][2], 5); // vertical
+  expect(Math.abs(g.edge[0][0] - 220)).toBeLessThanOrEqual(8); // hugging A's right edge (+ screen pad)
+  await page.mouse.up(); // D glues to A
+
+  // Dragging D against the ELLIPSE arcs its border around the bond angle
+  // (leftmost point ≈ (400, 140) for an approach from the left).
+  await drag({ x: 250, y: 140 }, { x: 375, y: 140 }); // D.x 230 → 355, right edge 5px off E's left
+  await expect.poll(async () => (await glue()).arc.length).toBe(1);
+  g = await glue();
+  expect(g.edge.length).toBe(0);
+  const arc = g.arc[0];
+  expect(Math.abs(arc[24] - 400)).toBeLessThanOrEqual(8); // arc midpoint at the bond spot…
+  expect(Math.abs(arc[25] - 140)).toBeLessThanOrEqual(2); // …on the horizontal axis
+  await page.mouse.up(); // D re-glues to E, radially
+
+  // Dragging the TEXT into the container's middle bonds by CONTAINMENT — the
+  // bond is real (persisted on drop) but the chrome stays SILENT: the text is
+  // visibly inside, nothing to announce.
+  await drag({ x: 614, y: 409 }, { x: 250, y: 400 }); // T's center → C's center, ≥24px from every edge
+  await expect.poll(async () => {
+    const q = await glue();
+    return q.edge.length + q.arc.length + q.body.length;
+  }).toBe(0);
+  await page.mouse.up();
+  await expect
+    .poll(async () => ((await stored(page))[0].doc.shapes as { id: string; attach?: { id: string; ax?: number } }[]).find((sh) => sh.id === "T")?.attach)
+    .toMatchObject({ id: "C", ax: 0.5, ay: 0.5 });
+
+  // A line ENDPOINT binds to the BODY (anywhere inside) — the whole frame
+  // glows, not an edge. Deselect first so the digit arms the tool cleanly.
+  const empty = toScreen({ x: 700, y: 550 });
+  await page.mouse.click(empty.x, empty.y);
+  await page.keyboard.press("2"); // arm the connector cluster (line)
+  await drag({ x: 560, y: 250 }, { x: 150, y: 140 }); // draw a line into A's interior
+  await expect.poll(async () => (await glue()).body.length).toBe(1);
+  g = await glue();
+  expect(g.edge.length).toBe(0);
+  expect(Math.abs(g.body[0] - 120)).toBeLessThanOrEqual(12); // frames A's whole box (+ pads)
+  await page.mouse.up();
+
+  // Hovering with the RECT tool near a border previews the edge it would pin
+  // to; the deep interior is mere containment — silent.
+  await page.keyboard.press("1"); // arm the shape cluster (rect)
+  const nearEdge = toScreen({ x: 215, y: 140 }); // 5px inside A's right edge
+  await page.mouse.move(nearEdge.x, nearEdge.y);
+  await expect.poll(async () => (await glue()).edge.length).toBe(1);
+  g = await glue();
+  expect(g.edge[0][0]).toBeCloseTo(g.edge[0][2], 5); // the right edge again
+  expect(Math.abs(g.edge[0][0] - 220)).toBeLessThanOrEqual(8);
+  const center = toScreen({ x: 160, y: 140 }); // A's middle — every edge ≥ 40px away
+  await page.mouse.move(center.x, center.y);
+  await expect.poll(async () => {
+    const q = await glue();
+    return q.edge.length + q.arc.length + q.body.length;
+  }).toBe(0);
+});
+
 test.describe("rich exports + import drop surfaces", () => {
   /** Drop a file (bytes given as base64) onto a selector via a synthetic DragEvent. */
   async function dropFile(page: Page, selector: string, b64: string, name: string, type: string) {

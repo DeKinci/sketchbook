@@ -12,6 +12,7 @@ import {
   nearestBindableId,
   nearestEdgeBindableId,
   attachAt,
+  sideAnchor,
   migrateLabels,
   reflowAttachments,
   containedIds,
@@ -616,6 +617,15 @@ describe("shape-to-shape attachment", () => {
     expect(nearestEdgeBindableId({ x: -40, y: 150 }, [p], "")).toBeUndefined(); // well outside → no glow
     // contrast: the interior-inclusive predicate DOES glow at the center
     expect(nearestBindableId({ x: 200, y: 150 }, [p], "")).toBe("p");
+  });
+
+  it("sideAnchor classifies a zero-size point-box to the hugged edge(s) — the hover preview's edge picker", () => {
+    const p = { x: 100, y: 100, width: 200, height: 100 }; // 100..300 × 100..200
+    const pt = (x: number, y: number) => ({ x, y, width: 0, height: 0 });
+    expect(sideAnchor(pt(295, 150), p)).toEqual({ ax: 1, ay: 0.5 }); // 5px inside the right edge
+    expect(sideAnchor(pt(310, 105), p)).toEqual({ ax: 1, ay: 0 }); // outside, hugging the top-right corner
+    expect(sideAnchor(pt(200, 195), p)).toEqual({ ax: 0.5, ay: 1 }); // hugging the bottom, centered horizontally
+    expect(sideAnchor(pt(200, 150), p)).toEqual({ ax: 0.5, ay: 0.5 }); // dead center — unpinned
   });
 
   it("attachAt uses a radial anchor for an ellipse parent", () => {

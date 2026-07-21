@@ -589,8 +589,9 @@ type Box = { x: number; y: number; width: number; height: number };
  *  (works whether the child sits just inside, straddling, or just outside a
  *  parent edge — not a center-position band). ax/ay ∈ {0, 0.5, 1}; 0.5 = not
  *  pinned on that axis (the child is central along it → merely contained, not
- *  attached). */
-function sideAnchor(c: Box, p: Box, touch = EDGE_TOUCH): { ax: number; ay: number } {
+ *  attached). A zero-size box classifies a POINT — the hover preview asks which
+ *  edge a hovered spot would pin to. */
+export function sideAnchor(c: Box, p: Box, touch = EDGE_TOUCH): { ax: number; ay: number } {
   const tx = touch;
   const ty = touch;
   const ccx = c.x + c.width / 2;

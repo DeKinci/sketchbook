@@ -11,6 +11,7 @@ import {
   nearestBindableId,
   nearestEdgeBindableId,
   attachAt,
+  sideAnchor,
   boundingBox,
   contentBounds,
   moveClusterIds,
@@ -21,6 +22,7 @@ import {
   EDGE_TOUCH,
   CANVAS_BG_DARK,
   dashFor,
+  type Attach,
   type DrawAction,
   type DrawState,
   type Shape,
@@ -53,6 +55,14 @@ const ALL_ANCHORS = ["top-left", "top-center", "top-right", "middle-left", "midd
 const TEXT_ANCHORS = ["middle-left", "middle-right"];
 /** Widest glue distance (bind/attach/edge-touch) — the candidate-query pad. */
 const GLUE_PAD = 24; // = EDGE_TOUCH, the largest of the three
+
+/** Bond-specific glue-preview chrome: `edge` lights ONLY the pinned edge(s) of
+ *  the target's own box (the seam that will hold), `arc` sweeps the ellipse
+ *  border around the bond angle, `body` frames the whole target unit (a line/
+ *  arrow endpoint binds to the shape as a whole — every edge is "the" edge).
+ *  Centered containment gets NO chrome at all: the child is visibly inside its
+ *  container, so a glow would announce the obvious. */
+type GlueGlow = { kind: "body" } | { kind: "edge"; ax: number; ay: number; box: Box } | { kind: "arc"; angle: number; box: Box };
 
 /** Distance from a point to a line segment (for stroke hit-testing). */
 function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
@@ -940,13 +950,25 @@ export function DrawCanvas({
     },
   });
 
-  // Highlight the shape a to-be-drawn/moved thing would bind or attach to — while
+  // Highlight what a to-be-drawn/moved thing would bind or attach to — while
   // drawing (line endpoints, or a box's own attach), and while just hovering with
   // any binding tool in hand. All glue distances are zoom-scaled (screen-true).
-  const bindHighlights = new Set<string>();
+  // Each target carries its BOND KIND ({@link GlueGlow}) so the chrome can light
+  // exactly what will glue: the pinned edge(s), an ellipse arc, or — for a body
+  // bind — the whole frame. Centered containment adds no entry at all.
+  const bindHighlights = new Map<string, GlueGlow>();
   const draft = state.draftId ? shapes.find((s) => s.id === state.draftId) : null;
   // Glue-range candidate pool around a box: the widest glue distance, zoom-scaled.
   const glueNear = (b: Box) => index.query({ x: b.x - GLUE_PAD * sPx(1), y: b.y - GLUE_PAD * sPx(1), width: b.width + 2 * GLUE_PAD * sPx(1), height: b.height + 2 * GLUE_PAD * sPx(1) });
+  // Classify a would-be attach into its preview chrome. Null = centered
+  // containment (a bond, but a visually obvious one — stays silent).
+  const glowOf = (at: Attach): GlueGlow | null => {
+    const target = shapes.find((s) => s.id === at.id);
+    if (!target) return null;
+    if (at.kind === "radial") return { kind: "arc", angle: at.angle, box: boundingBox(target) };
+    if (at.ax === 0.5 && at.ay === 0.5) return null;
+    return { kind: "edge", ax: at.ax, ay: at.ay, box: boundingBox(target) };
+  };
   if (draft && (draft.type === "line" || draft.type === "arrow")) {
     for (const end of [
       { x: draft.points[0], y: draft.points[1] },
@@ -954,42 +976,57 @@ export function DrawCanvas({
     ]) {
       const near = index.queryPoint(end, BIND_DISTANCE * sPx(1)).filter((s) => s.id !== draft.id);
       const id = nearestBindableId(end, near, draft.id, BIND_DISTANCE * sPx(1));
-      if (id) bindHighlights.add(id);
+      if (id) bindHighlights.set(id, { kind: "body" });
     }
   } else if (draft && (draft.type === "rect" || draft.type === "ellipse")) {
     const at = attachAt(draft, glueNear(boundingBox(draft)), sPx(1));
-    if (at) bindHighlights.add(at.id);
+    const g = at && glowOf(at);
+    if (g) bindHighlights.set(at!.id, g);
   } else if (draft && draft.type === "pen") {
     // A scribble drawn along a shape's edge attaches on release — preview it too.
     const at = attachAt(draft, glueNear(boundingBox(draft)).filter((s) => s.id !== draft.id), sPx(1));
-    if (at) bindHighlights.add(at.id);
+    const g = at && glowOf(at);
+    if (g) bindHighlights.set(at!.id, g);
   } else if (!state.draftId && hover) {
-    // Pre-draw hover preview. A box tool (rect/ellipse) binds only edge-to-edge, so
-    // it glows a shape ONLY near its border — hovering the deep interior is mere
-    // containment, no bind. A line/arrow endpoint DOES bind anywhere inside a shape,
-    // so it keeps the bbox-interior test.
+    // Pre-draw hover preview. A line/arrow endpoint binds anywhere inside a shape
+    // (a BODY bind — the whole frame glows). A box tool binds only edge-to-edge,
+    // so it previews the edge the hovered spot hugs (or the ellipse arc at its
+    // angle) — the deep interior is mere containment and stays silent.
     const hoverNear = index.queryPoint(hover, GLUE_PAD * sPx(1));
-    const id =
-      tool === "rect" || tool === "ellipse"
-        ? nearestEdgeBindableId(hover, hoverNear, "", EDGE_TOUCH * sPx(1))
-        : tool === "line" || tool === "arrow" || tool === "darrow"
-          ? nearestBindableId(hover, hoverNear, "", BIND_DISTANCE * sPx(1))
-          : undefined;
-    if (id) bindHighlights.add(id);
+    if (tool === "line" || tool === "arrow" || tool === "darrow") {
+      const id = nearestBindableId(hover, hoverNear, "", BIND_DISTANCE * sPx(1));
+      if (id) bindHighlights.set(id, { kind: "body" });
+    } else if (tool === "rect" || tool === "ellipse") {
+      const id = nearestEdgeBindableId(hover, hoverNear, "", EDGE_TOUCH * sPx(1));
+      const target = id ? shapes.find((s) => s.id === id) : undefined;
+      if (target) {
+        const b = boundingBox(target);
+        if (target.type === "ellipse") {
+          const angle = Math.atan2(hover.y - (b.y + b.height / 2), hover.x - (b.x + b.width / 2));
+          bindHighlights.set(target.id, { kind: "arc", angle, box: b });
+        } else {
+          const { ax, ay } = sideAnchor({ x: hover.x, y: hover.y, width: 0, height: 0 }, b, EDGE_TOUCH * sPx(1));
+          if (ax !== 0.5 || ay !== 0.5) bindHighlights.set(target.id, { kind: "edge", ax, ay, box: b });
+        }
+      }
+    }
   }
-  // While dragging shape(s), highlight what they'd attach to on drop — at UNIT
-  // level and nearest-only, mirroring reattach's ≤1-outward-edge-per-unit rule
-  // (the glow frames the would-be partner unit's bounds, never a lone member
-  // box). Skip a member whose `attach` points INTRA-cluster — reattach keeps
-  // that edge verbatim (the parent rode along), so there's nothing new to glue.
+  // While dragging shape(s), highlight what they'd attach to on drop — nearest
+  // VISIBLE bond only, mirroring reattach's ≤1-outward-edge-per-unit rule. Skip
+  // a member whose `attach` points INTRA-cluster — reattach keeps that edge
+  // verbatim (the parent rode along), so there's nothing new to glue. A
+  // centered-containment bond doesn't compete: it draws nothing, and letting it
+  // win the race would hide a real edge bond another member is about to make.
   if (moveRef.current) {
     const moving = new Set(moveRef.current.ids);
-    let best: { id: string; gap: number } | null = null;
+    let best: { id: string; glow: GlueGlow; gap: number } | null = null;
     for (const id of moveRef.current.ids) {
       const sh = shapes.find((s) => s.id === id);
       if (!sh || (sh.attach && moving.has(sh.attach.id))) continue;
       const at = attachAt(sh, glueNear(boundingBox(sh)).filter((o) => !moving.has(o.id)), sPx(1));
       if (!at) continue;
+      const glow = glowOf(at);
+      if (!glow) continue;
       const target = shapes.find((s) => s.id === at.id);
       if (!target) continue;
       const sb = boundingBox(sh);
@@ -998,9 +1035,9 @@ export function DrawCanvas({
         Math.max(tb.x - (sb.x + sb.width), sb.x - (tb.x + tb.width), 0),
         Math.max(tb.y - (sb.y + sb.height), sb.y - (tb.y + tb.height), 0)
       );
-      if (!best || gap < best.gap) best = { id: at.id, gap };
+      if (!best || gap < best.gap) best = { id: at.id, glow, gap };
     }
-    if (best) bindHighlights.add(best.id);
+    if (best) bindHighlights.set(best.id, best.glow);
   }
 
   const cursor = panActive
@@ -1358,35 +1395,69 @@ export function DrawCanvas({
       <Layer>
         {dynamicShapeNodes}
 
-        {/* Bind highlight — glows what a line/arrow endpoint or dragged shape
-            would glue to. A grouped target glows as its WHOLE unit (the glue
-            system sees the group as one element); loose targets as themselves.
-            Chrome is drawn at constant SCREEN size (offsets/strokes ÷ zoom). */}
+        {/* Glue preview — bond-specific chrome for what a drawn/moved thing
+            would glue to ({@link GlueGlow}). An EDGE bond lights only the
+            pinned edge(s) of the target's OWN box — the seam that will hold;
+            an ellipse bond ARCs the border around the bond angle; a BODY bind
+            (line/arrow endpoint) frames the whole unit — a grouped target as
+            its unit bounds (the glue system sees the group as one element).
+            ≤1 glow per target unit; chrome at constant SCREEN size (÷ zoom). */}
         {(() => {
           const seen = new Set<string>();
           const els: React.ReactElement[] = [];
-          for (const id of bindHighlights) {
+          const glow = {
+            stroke: SELECT_COLOR,
+            strokeWidth: sPx(2),
+            shadowColor: SELECT_COLOR,
+            shadowBlur: sPx(10),
+            shadowOpacity: 0.7,
+            listening: false,
+          };
+          for (const [id, g] of bindHighlights) {
             const key = units.rootOf(id);
             if (!key || seen.has(key)) continue;
             seen.add(key);
-            const b = units.boundsOf(key);
-            if (!b) continue;
-            els.push(
-              <Rect
-                key={`bind-${key}`}
-                x={b.x - sPx(4)}
-                y={b.y - sPx(4)}
-                width={b.width + sPx(8)}
-                height={b.height + sPx(8)}
-                stroke="#8b5cf6"
-                strokeWidth={sPx(2)}
-                cornerRadius={sPx(4)}
-                shadowColor="#8b5cf6"
-                shadowBlur={sPx(10)}
-                shadowOpacity={0.7}
-                listening={false}
-              />
-            );
+            if (g.kind === "body") {
+              const b = units.boundsOf(key);
+              if (!b) continue;
+              els.push(
+                <Rect
+                  key={`bind-${key}`}
+                  name="glue-body"
+                  x={b.x - sPx(4)}
+                  y={b.y - sPx(4)}
+                  width={b.width + sPx(8)}
+                  height={b.height + sPx(8)}
+                  cornerRadius={sPx(4)}
+                  {...glow}
+                />
+              );
+            } else if (g.kind === "edge") {
+              // The pinned edge(s) of the padded target box — a corner bond
+              // draws both edges as one polyline through the shared corner.
+              const b = padBox(g.box, sPx(4));
+              const ex = g.ax === 0 ? b.x : b.x + b.width; // the pinned vertical edge
+              const ey = g.ay === 0 ? b.y : b.y + b.height; // the pinned horizontal edge
+              const pts =
+                g.ax !== 0.5 && g.ay !== 0.5
+                  ? [ex, g.ay === 0 ? b.y + b.height : b.y, ex, ey, g.ax === 0 ? b.x + b.width : b.x, ey]
+                  : g.ax !== 0.5
+                    ? [ex, b.y, ex, b.y + b.height]
+                    : [b.x, ey, b.x + b.width, ey];
+              els.push(<Line key={`bind-${key}`} name="glue-edge" points={pts} lineCap="round" lineJoin="round" {...glow} />);
+            } else {
+              // Sample the padded ellipse border ±45° around the bond angle.
+              const cx = g.box.x + g.box.width / 2;
+              const cy = g.box.y + g.box.height / 2;
+              const rx = g.box.width / 2 + sPx(4);
+              const ry = g.box.height / 2 + sPx(4);
+              const pts: number[] = [];
+              for (let i = 0; i <= 24; i++) {
+                const a = g.angle + (i / 24 - 0.5) * (Math.PI / 2);
+                pts.push(cx + rx * Math.cos(a), cy + ry * Math.sin(a));
+              }
+              els.push(<Line key={`bind-${key}`} name="glue-arc" points={pts} lineCap="round" {...glow} />);
+            }
           }
           return els;
         })()}
