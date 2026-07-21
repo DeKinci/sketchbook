@@ -4,6 +4,7 @@ import type { KonvaEventObject } from "konva/lib/Node.js";
 import { Stage, Layer, Rect, Ellipse, Line, Arrow, Text, Image as KonvaImage, Group, Transformer } from "react-konva";
 import { CropLayer, type CropControl } from "./CropLayer.tsx";
 import { wrapLines } from "./textMetrics.ts";
+import { BOARD_FONT_STACK } from "./boardFont.ts";
 import { SpatialIndex } from "./spatialIndex.ts";
 import { UnitIndex } from "./unitIndex.ts";
 import { splitGestureLayers } from "./gestureLayers.ts";
@@ -1349,6 +1350,7 @@ export function DrawCanvas({
                   wrap="none"
                   text={wrapLines(sh.text, sh.fontSize, sh.width).join("\n")}
                   fontSize={sh.fontSize}
+                  fontFamily={BOARD_FONT_STACK}
                   fill={stroke}
                 />
               );

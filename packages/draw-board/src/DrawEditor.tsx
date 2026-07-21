@@ -38,6 +38,7 @@ import {
   type TextShape,
 } from "./drawModel.ts";
 import { wrapLines } from "./textMetrics.ts";
+import { BOARD_FONT_STACK, useBoardFont } from "./boardFont.ts";
 import { exportStagePng, sketchFileName } from "./exportPng.ts";
 import { exportBoardPng, exportBoardSvg, parseBoardFile, parseBoardPayload } from "./boardFile.ts";
 import {
@@ -216,6 +217,10 @@ export function DrawEditor({
   const bgColor = bgImage ? "transparent" : CANVAS_BG_DARK;
 
   const { state, dispatch } = useDrawing(doc, CONTRAST_INK);
+  // The stage may not mount before the board face is registered: a Konva
+  // context that measures text pre-registration keeps a stale font binding,
+  // and committed text would forever disagree with the edit textarea.
+  const fontReady = useBoardFont();
   const stageRef = useRef<Konva.Stage>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -1217,7 +1222,7 @@ export function DrawEditor({
             {expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
           </button>
         )}
-        {avail && view && (
+        {avail && view && fontReady && (
           <>
             <DrawCanvas
               state={state}
@@ -1271,7 +1276,7 @@ export function DrawEditor({
                   color: session.color === CONTRAST_INK ? CONTRAST_OVERLAY : session.color,
                   caretColor: session.color === CONTRAST_INK ? CONTRAST_OVERLAY : session.color,
                   fontSize: session.fontSize * view.scale,
-                  fontFamily: "Arial, sans-serif",
+                  fontFamily: BOARD_FONT_STACK,
                   // Capped: the field IS the wrap box — it wraps at the parent's
                   // edge (or the text's own box) instead of growing out of it.
                   // Uncapped: no width here — the WYSIWYG effect grows it with

@@ -4,11 +4,11 @@
  * (canvas render, bbox/hit/attach, SVG export, the edit overlay's box) derives
  * from the SAME wrap, so they can never disagree.
  *
- * Measurement uses the canonical Arial/Helvetica advance-width table (Arial is
- * metric-compatible with Helvetica by design) — the board renders text in Arial
- * everywhere (Konva's default, the textarea's fontFamily, the SVG export), so
- * the pure estimate tracks real glyphs within ~1%. Non-ASCII falls back to a
- * 0.6em average (the old whole-string heuristic).
+ * Measurement uses the canonical Arial/Helvetica advance-width table — the
+ * board renders text in the embedded Arimo face everywhere (boardFont.ts:
+ * Konva nodes, the textarea, the SVG export), and Arimo is metric-compatible
+ * with Arial by design, so the pure estimate tracks real glyphs within ~1%.
+ * Non-ASCII falls back to a 0.6em average (the old whole-string heuristic).
  */
 
 /** Arial/Helvetica advance widths for ASCII 32..126, in 1/1000 em. */

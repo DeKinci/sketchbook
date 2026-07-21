@@ -534,6 +534,82 @@ test("dblclick on a shape spawns a FREE caption inside it — or engages the exi
   await expect(page.locator(".draw-text-input")).toHaveCount(0);
 });
 
+test("edit overlay and committed canvas text render IDENTICAL ink — density parity in both axes", async ({ page }) => {
+  // The committed Konva render and the edit textarea must use the same physical
+  // font with the same advances and leading — otherwise the text visibly
+  // reflows/densifies the moment the editor opens. Canvas font resolution is
+  // NOT guaranteed to match DOM font resolution (family-list and fallback
+  // binding can diverge per context), so this asserts on rendered pixels: the
+  // ink bounding box of the same 4-line text, committed vs editing, must
+  // coincide in all four edges.
+  await openSeeded(page, [
+    {
+      id: "t",
+      type: "text",
+      stroke: "#e5484d",
+      strokeWidth: 3,
+      x: 100,
+      y: 100,
+      fontSize: 18,
+      text: "Alpha beta gamma delta\nEpsilon zeta eta theta\nIota kappa lambda mu\nNu xi omicron pi rho",
+    },
+  ]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const toScreen = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+  // Caret off — the edit shot must be pure glyph ink.
+  await page.addStyleTag({ content: ".draw-text-input { caret-color: transparent !important }" });
+
+  const tl = toScreen({ x: 90, y: 90 });
+  const clip = { x: tl.x, y: tl.y, width: 280 * cam.scale, height: 100 * cam.scale };
+  /** Bounding box of all ink (≥2 non-background pixels per row/column) in a screenshot. */
+  const inkBox = (png: Buffer) =>
+    page.evaluate(async (b64: string) => {
+      const img = new Image();
+      img.src = "data:image/png;base64," + b64;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+      const d = ctx.getImageData(0, 0, c.width, c.height).data;
+      const bg = [d[0], d[1], d[2]];
+      const rows = new Array<number>(c.height).fill(0);
+      const cols = new Array<number>(c.width).fill(0);
+      for (let y = 0; y < c.height; y++)
+        for (let x = 0; x < c.width; x++) {
+          const i = (y * c.width + x) * 4;
+          if (Math.abs(d[i] - bg[0]) + Math.abs(d[i + 1] - bg[1]) + Math.abs(d[i + 2] - bg[2]) > 90) {
+            rows[y]++;
+            cols[x]++;
+          }
+        }
+      const first = (a: number[]) => a.findIndex((n) => n >= 2);
+      const last = (a: number[]) => a.length - 1 - [...a].reverse().findIndex((n) => n >= 2);
+      return { top: first(rows), bottom: last(rows), left: first(cols), right: last(cols) };
+    }, png.toString("base64"));
+
+  const committed = await inkBox(await page.screenshot({ clip }));
+  expect(committed.top).toBeGreaterThanOrEqual(0); // sanity: the clip caught the text
+
+  const mid = toScreen({ x: 160, y: 136 });
+  await page.mouse.dblclick(mid.x, mid.y); // text → edit
+  await page.waitForSelector(".draw-text-input");
+  await page.keyboard.press("Control+End"); // collapse the select-all highlight
+  await page.waitForTimeout(120);
+  const editing = await inkBox(await page.screenshot({ clip }));
+
+  // Same glyphs at the same metrics ⇒ the ink boxes coincide (±2px antialias slack).
+  expect(Math.abs(editing.top - committed.top)).toBeLessThanOrEqual(2);
+  expect(Math.abs(editing.bottom - committed.bottom)).toBeLessThanOrEqual(2);
+  expect(Math.abs(editing.left - committed.left)).toBeLessThanOrEqual(2);
+  expect(Math.abs(editing.right - committed.right)).toBeLessThanOrEqual(2);
+});
+
 test.describe("rich exports + import drop surfaces", () => {
   /** Drop a file (bytes given as base64) onto a selector via a synthetic DragEvent. */
   async function dropFile(page: Page, selector: string, b64: string, name: string, type: string) {
