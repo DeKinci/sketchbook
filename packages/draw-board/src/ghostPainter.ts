@@ -63,7 +63,9 @@ export async function renderDocThumbnail(canvas: HTMLCanvasElement, doc: DrawDoc
     ? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 }
     : contentBounds(doc.shapes) ?? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 };
   const world = padBox(frame, Math.max(frame.width, frame.height) * 0.04);
-  const m = fitView(world, size);
+  // minScale: 0 — a thumbnail is a miniature camera; sprawling content may
+  // need a fit below the interactive camera's MIN_SCALE floor.
+  const m = fitView(world, size, { minScale: 0 });
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = CANVAS_BG_DARK;
   ctx.fillRect(0, 0, size.w, size.h);

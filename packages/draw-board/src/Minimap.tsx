@@ -55,8 +55,10 @@ export function Minimap({
 
   const dragWorld = useRef<Box | null>(null);
   const world = dragWorld.current ?? liveWorld;
-  // logical → minimap px (fitView IS that mapping — the minimap is a tiny fixed camera).
-  const m = fitView(world, { w: MINI_W, h: MINI_H });
+  // logical → minimap px (fitView IS that mapping — the minimap is a tiny fixed
+  // camera; minScale: 0 because a deep zoom-out's world legitimately needs a
+  // scale below the human camera's floor — clamped, the map stops fitting).
+  const m = fitView(world, { w: MINI_W, h: MINI_H }, { minScale: 0 });
   const mRef = useRef(m);
   mRef.current = m;
   const boardRef = useRef(board);

@@ -103,6 +103,25 @@ describe("fitScale / fitView", () => {
   it("degenerate box falls back to scale 1", () => {
     expect(fitScale({ x: 0, y: 0, width: 0, height: 10 }, avail)).toBe(1);
   });
+
+  it("minScale: 0 lets a tiny target (minimap/thumbnail) fit below the camera floor", () => {
+    // A deep zoom-out makes the minimap's world huge: mapping ~10k logical px
+    // into 168 minimap px needs a scale BELOW the camera's MIN_SCALE. The floor
+    // is camera policy, not fit math — a pure mapping opts out with minScale: 0,
+    // else the "fit" stops fitting (the minimap bug at zoom < ~25%).
+    const world = { x: 0, y: 0, width: 10800, height: 3000 };
+    const mini = { w: 168, h: 112 };
+    expect(168 / 10800).toBeLessThan(MIN_SCALE); // the scenario is real
+    expect(fitScale(world, mini, MAX_SCALE, 0)).toBeCloseTo(168 / 10800, 6);
+    const view = fitView(world, mini, { minScale: 0 });
+    expect(view.scale).toBeCloseTo(168 / 10800, 6);
+    // The fit actually FITS: the world's far corner lands inside the target.
+    const br = logicalToScreen(view, { x: 10800, y: 3000 });
+    expect(br.x).toBeLessThanOrEqual(mini.w);
+    expect(br.y).toBeLessThanOrEqual(mini.h);
+    // Default (no minScale) keeps today's camera behavior: floored at MIN_SCALE.
+    expect(fitScale(world, mini)).toBe(MIN_SCALE);
+  });
 });
 
 describe("box helpers", () => {

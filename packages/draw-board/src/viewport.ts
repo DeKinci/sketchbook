@@ -72,15 +72,19 @@ export function visibleLogicalRect(v: Viewport, avail: Size): Box {
 }
 
 /** The scale at which `box` exactly fits inside `avail` (letterboxing the other
- *  axis), clamped to the camera's range. */
-export function fitScale(box: Box, avail: Size, maxScale = MAX_SCALE): number {
+ *  axis), clamped to the camera's range. `minScale` defaults to the camera's
+ *  {@link MIN_SCALE} — right for every real camera, but a MINIATURE camera
+ *  (minimap, thumbnail) mapping a huge world into a strip of pixels needs a
+ *  legitimately smaller scale: those pass `minScale: 0`, else the "fit" stops
+ *  fitting and overflows its target. */
+export function fitScale(box: Box, avail: Size, maxScale = MAX_SCALE, minScale = MIN_SCALE): number {
   if (box.width <= 0 || box.height <= 0 || avail.w <= 0 || avail.h <= 0) return 1;
-  return clampScale(Math.min(avail.w / box.width, avail.h / box.height), MIN_SCALE, maxScale);
+  return clampScale(Math.min(avail.w / box.width, avail.h / box.height), minScale, maxScale);
 }
 
 /** The camera that shows `box` centered at its fit scale. */
-export function fitView(box: Box, avail: Size, opts?: { maxScale?: number }): Viewport {
-  const scale = fitScale(box, avail, opts?.maxScale ?? MAX_SCALE);
+export function fitView(box: Box, avail: Size, opts?: { maxScale?: number; minScale?: number }): Viewport {
+  const scale = fitScale(box, avail, opts?.maxScale ?? MAX_SCALE, opts?.minScale ?? MIN_SCALE);
   return {
     scale,
     x: (avail.w - box.width * scale) / 2 - box.x * scale,
