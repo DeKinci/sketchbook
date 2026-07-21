@@ -1,32 +1,49 @@
 import type Konva from "konva";
-import { contentBounds, type DrawDoc } from "./drawModel.ts";
+import { contentBounds, type DrawDoc, type ImageShape } from "./drawModel.ts";
 
 /** Padding (logical px) kept around the drawn content when a blank sketch is
  *  trimmed to its used region on export. */
 const EXPORT_PAD = 30;
+
+/** Hairline slop (logical px) for the framed-export containment test — an
+ *  edge-hugging stroke that strays a pixel past the image must not demote the
+ *  export to the padded-union crop. */
+const FRAME_EPS = 2;
 
 /** Hard cap on the exported PNG's width/height (px) — an infinite board can hold
  *  content spread over a huge logical area; the flattened attachment must stay a
  *  sane raster. */
 const MAX_EXPORT_PX = 4096;
 
-/** The logical crop rect for a blank sketch — the union bbox of every shape grown
- *  by {@link EXPORT_PAD}. With `clamp` (the bounded/fixed policies) the rect is
- *  clamped to the canvas box, so the trimmed piece keeps its dark board background
- *  but discards the empty rest; without it (the infinite policy) content lives
- *  anywhere in the plane and the rect is used as-is. Null = export the whole
- *  canvas: an image annotation (the image IS the content) or an empty board. */
+/** The logical crop rect for a blank sketch. A placed image that FRAMES the
+ *  whole drawing (every shape within its box, {@link FRAME_EPS} overhang
+ *  forgiven) is the artwork's own canvas: the crop is EXACTLY the image box —
+ *  no padding, no board-background border — so the export is "drawing on an
+ *  image", matching annotation mode's whole-canvas semantics. Otherwise the
+ *  union bbox of every shape grown by {@link EXPORT_PAD}. With `clamp` (the
+ *  bounded/fixed policies) the rect is clamped to the canvas box, so the
+ *  trimmed piece keeps its dark board background but discards the empty rest;
+ *  without it (the infinite policy) content lives anywhere in the plane and the
+ *  rect is used as-is. Null = export the whole canvas: an image annotation (the
+ *  image IS the content) or an empty board. */
 export function contentCropLogical(doc: DrawDoc, opts?: { clamp?: boolean }): { x: number; y: number; width: number; height: number } | null {
   if (doc.background || doc.shapes.length === 0) return null;
   const b = contentBounds(doc.shapes)!;
-  if (opts?.clamp === false) {
-    return { x: b.x - EXPORT_PAD, y: b.y - EXPORT_PAD, width: Math.max(1, b.width + EXPORT_PAD * 2), height: Math.max(1, b.height + EXPORT_PAD * 2) };
-  }
-  const x = Math.max(0, b.x - EXPORT_PAD);
-  const y = Math.max(0, b.y - EXPORT_PAD);
-  const width = Math.max(1, Math.min(doc.width, b.x + b.width + EXPORT_PAD) - x);
-  const height = Math.max(1, Math.min(doc.height, b.y + b.height + EXPORT_PAD) - y);
-  return { x, y, width, height };
+  const frame = doc.shapes.find(
+    (sh): sh is ImageShape =>
+      sh.type === "image" &&
+      b.x >= sh.x - FRAME_EPS &&
+      b.y >= sh.y - FRAME_EPS &&
+      b.x + b.width <= sh.x + sh.width + FRAME_EPS &&
+      b.y + b.height <= sh.y + sh.height + FRAME_EPS
+  );
+  const raw = frame
+    ? { x: frame.x, y: frame.y, width: frame.width, height: frame.height }
+    : { x: b.x - EXPORT_PAD, y: b.y - EXPORT_PAD, width: Math.max(1, b.width + EXPORT_PAD * 2), height: Math.max(1, b.height + EXPORT_PAD * 2) };
+  if (opts?.clamp === false) return raw;
+  const x = Math.max(0, raw.x);
+  const y = Math.max(0, raw.y);
+  return { x, y, width: Math.max(1, Math.min(doc.width, raw.x + raw.width) - x), height: Math.max(1, Math.min(doc.height, raw.y + raw.height) - y) };
 }
 
 /**

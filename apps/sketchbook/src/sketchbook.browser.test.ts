@@ -324,6 +324,61 @@ test.describe("round-trips: SVG, paste, slim, clipboard copy", () => {
     expect(page2?.doc.shapes).toHaveLength(0);
   });
 
+  test("a drawing made fully ON a placed image exports as JUST the image — no padded border", async ({ page }) => {
+    await open(page);
+    // Select tool first: the board opens in pen, and the focus click must not ink.
+    await page.getByRole("button", { name: "Cursor — select / move (Tab)" }).click();
+    // Paste a solid-blue plain PNG over the board → a placed image shape.
+    const blueB64 = await page.evaluate(() => {
+      const c = document.createElement("canvas");
+      c.width = 300;
+      c.height = 200;
+      const ctx = c.getContext("2d")!;
+      ctx.fillStyle = "#0037ff";
+      ctx.fillRect(0, 0, 300, 200);
+      return c.toDataURL("image/png").split(",")[1];
+    });
+    await page.locator(".konvajs-content").click({ position: { x: 400, y: 300 } });
+    await pasteFile(page, blueB64, "image/png");
+    await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length ?? 0).toBe(1);
+    const img = (await stored(page))[0].doc.shapes[0] as { x: number; y: number; width: number; height: number };
+    // Ink fully INSIDE the image — mapped through the live camera, wherever the
+    // paste placed it.
+    const cam = await page.evaluate(() => {
+      const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+      return { x: s.x(), y: s.y(), scale: s.scaleX() };
+    });
+    const toScreen = (p: { x: number; y: number }) => ({ x: p.x * cam.scale + cam.x, y: p.y * cam.scale + cam.y });
+    await page.getByRole("button", { name: "Pen — draw freehand (Tab)" }).click();
+    await drawStroke(page, toScreen({ x: img.x + 40, y: img.y + 40 }), toScreen({ x: img.x + img.width - 40, y: img.y + img.height - 40 }));
+    await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length ?? 0).toBe(2);
+
+    const downloadP = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download as PNG" }).click();
+    const bytes = fs.readFileSync((await (await downloadP).path())!);
+    // IHDR dims: exactly the image box × exportScale(2) — no +30 pad anywhere.
+    expect(bytes.readUInt32BE(16)).toBe(Math.round(img.width * 2));
+    expect(bytes.readUInt32BE(20)).toBe(Math.round(img.height * 2));
+    // And the export's corner pixel IS the image (blue), not board background.
+    const corner = await page.evaluate(async (b64: string) => {
+      const im = new Image();
+      await new Promise((res, rej) => {
+        im.onload = res;
+        im.onerror = rej;
+        im.src = `data:image/png;base64,${b64}`;
+      });
+      const c = document.createElement("canvas");
+      c.width = im.width;
+      c.height = im.height;
+      const ctx = c.getContext("2d")!;
+      ctx.drawImage(im, 0, 0);
+      const d = ctx.getImageData(2, 2, 1, 1).data;
+      return { r: d[0], b: d[2] };
+    }, bytes.toString("base64"));
+    expect(corner.b).toBeGreaterThan(200);
+    expect(corner.r).toBeLessThan(80);
+  });
+
   test("COPY as PNG: Chromium strips PNG chunks, so the rich copy pairs pixels with a text payload — pasting restores the board", async ({ page }) => {
     await open(page);
     await drawStroke(page, { x: 140, y: 140 }, { x: 260, y: 200 });
