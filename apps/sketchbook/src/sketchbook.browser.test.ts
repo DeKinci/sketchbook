@@ -187,6 +187,42 @@ test("stroke styles: 4 cycles solid→dashed→dotted, ink carries the style to 
   expect(text).toContain("stroke-dasharray");
 });
 
+test("a pen TAP (no drag) leaves a visible dot: committed, persisted, inked in the export", async ({ page }) => {
+  await open(page);
+  // The board opens in pen — this bare click IS the tap under test.
+  await page.locator(".konvajs-content").click({ position: { x: 300, y: 220 } });
+  await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length ?? 0).toBe(1);
+  const dot = (await stored(page))[0].doc.shapes[0] as { type: string; points: number[] };
+  expect(dot.type).toBe("pen");
+  // Committed as the epsilon segment (round caps inflate it to a stroke-width dot).
+  expect(dot.points).toHaveLength(4);
+  expect(Math.abs(dot.points[2] - dot.points[0])).toBeLessThan(0.01);
+
+  // And it actually MARKS: the export (content +30 pad at 2× → the dot sits at
+  // the raster's center) carries bright ink there, dark board at the corner.
+  const downloadP = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download as PNG" }).click();
+  const bytes = fs.readFileSync((await (await downloadP).path())!);
+  const px = await page.evaluate(async (b64: string) => {
+    const im = new Image();
+    await new Promise((res, rej) => {
+      im.onload = res;
+      im.onerror = rej;
+      im.src = `data:image/png;base64,${b64}`;
+    });
+    const c = document.createElement("canvas");
+    c.width = im.width;
+    c.height = im.height;
+    const ctx = c.getContext("2d")!;
+    ctx.drawImage(im, 0, 0);
+    const mid = ctx.getImageData(Math.round(im.width / 2), Math.round(im.height / 2), 1, 1).data;
+    const corner = ctx.getImageData(2, 2, 1, 1).data;
+    return { mid: Math.max(mid[0], mid[1], mid[2]), corner: Math.max(corner[0], corner[1], corner[2]) };
+  }, bytes.toString("base64"));
+  expect(px.mid).toBeGreaterThan(150); // the dot's ink (contrast ink → bright on the dark ground)
+  expect(px.corner).toBeLessThan(60); // board background, not ink
+});
+
 test.describe("rich exports + import drop surfaces", () => {
   /** Drop a file (bytes given as base64) onto a selector via a synthetic DragEvent. */
   async function dropFile(page: Page, selector: string, b64: string, name: string, type: string) {

@@ -1658,16 +1658,25 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
     }
     case "endDraw": {
       if (!s.draftId) return s;
-      const draft = s.shapes.find((sh) => sh.id === s.draftId);
+      let draft = s.shapes.find((sh) => sh.id === s.draftId);
       const base = s.gestureBase ?? s.shapes;
       const distScale = a.distScale ?? 1;
-      // Drop a degenerate draft (a click that didn't drag).
+      let shapes = s.shapes;
+      // Drop a degenerate draft (a click that didn't drag) — EXCEPT the pen:
+      // a pencil touching the canvas marks. The tap commits as an epsilon
+      // segment the round line cap inflates to a strokeWidth-diameter dot in
+      // every renderer (the zero-length-dash trick the dotted style rides on;
+      // TRUE zero-length segments are elided by canvas renderers).
       if (draft && isDegenerate(draft, a.minSize ?? 2)) {
-        return { ...s, shapes: base, draftId: null, gestureBase: null };
+        if (draft.type !== "pen") return { ...s, shapes: base, draftId: null, gestureBase: null };
+        const [x, y] = draft.points;
+        const dot: Shape = { ...draft, points: [x, y, x + PEN_DOT_EPS, y] };
+        draft = dot;
+        shapes = mapShapes(s.shapes, new Set([dot.id]), () => dot);
       }
-      let normalized = s.shapes;
+      let normalized = shapes;
       if (draft && (draft.type === "rect" || draft.type === "ellipse")) {
-        normalized = mapShapes(s.shapes, new Set([draft.id]), (sh) => normalizeBox(sh as BoxShape));
+        normalized = mapShapes(shapes, new Set([draft.id]), (sh) => normalizeBox(sh as BoxShape));
         // A shape drawn edge-to-edge with another attaches to it (like an arrow
         // binds) — so drawing a box on/against a shape links them.
         const drawn = normalized.find((sh) => sh.id === draft.id)!;
@@ -1677,15 +1686,15 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         // Bind each endpoint drawn near an area shape, capturing its polar offset
         // relative to the other endpoint — stays where drawn, rotates on move.
         const [x1, y1, x2, y2] = draft.points;
-        const bindStart = bindAt({ x: x1, y: y1 }, { x: x2, y: y2 }, s.shapes, draft.id, BIND_DISTANCE * distScale);
-        const bindEnd = bindAt({ x: x2, y: y2 }, { x: x1, y: y1 }, s.shapes, draft.id, BIND_DISTANCE * distScale);
-        normalized = mapShapes(s.shapes, new Set([draft.id]), (sh) => ({ ...sh, bindStart, bindEnd } as Shape));
+        const bindStart = bindAt({ x: x1, y: y1 }, { x: x2, y: y2 }, shapes, draft.id, BIND_DISTANCE * distScale);
+        const bindEnd = bindAt({ x: x2, y: y2 }, { x: x1, y: y1 }, shapes, draft.id, BIND_DISTANCE * distScale);
+        normalized = mapShapes(shapes, new Set([draft.id]), (sh) => ({ ...sh, bindStart, bindEnd } as Shape));
       } else if (draft && draft.type === "pen") {
         // A scribble drawn edge-to-edge with a shape attaches to it (like a box) —
         // so annotating a shape with a stroke glues them (it's massless: it follows
         // but never pulls). (attachAt skips the draft itself.)
-        const attach = attachAt(draft, s.shapes, distScale);
-        if (attach) normalized = mapShapes(s.shapes, new Set([draft.id]), (sh) => ({ ...sh, attach } as Shape));
+        const attach = attachAt(draft, shapes, distScale);
+        if (attach) normalized = mapShapes(shapes, new Set([draft.id]), (sh) => ({ ...sh, attach } as Shape));
       }
       // Pen is a persistent tool (stay in it). A one-use shape tool snaps back to
       // the last selectable — auto-selecting the new shape only if we return to
@@ -2005,6 +2014,11 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       return s;
   }
 }
+
+/** A pen tap has no extent — endDraw commits it as this epsilon-length segment
+ *  so the round line cap renders a strokeWidth-diameter dot (the same trick as
+ *  the dotted dash pattern; see dashFor). */
+const PEN_DOT_EPS = 0.001;
 
 function isDegenerate(sh: Shape, minSize = 2): boolean {
   switch (sh.type) {

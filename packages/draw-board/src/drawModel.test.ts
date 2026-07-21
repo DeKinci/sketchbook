@@ -163,6 +163,26 @@ describe("drawReducer — draw gesture", () => {
     expect(pen.type === "pen" && pen.points).toEqual([0, 0, 5, 5, 9, 2]);
     expect(s.past).toHaveLength(1);
   });
+
+  it("a pen TAP commits a dot (epsilon segment) — a pencil touch marks, undoably", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "p1", type: "pen", stroke: "#000", strokeWidth: 3, points: [100, 100] } });
+    s = drawReducer(s, { type: "endDraw", minSize: 2 });
+    const pen = s.shapes[0];
+    expect(pen?.type === "pen" && pen.points).toEqual([100, 100, 100.001, 100]);
+    expect(s.past).toHaveLength(1);
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes).toHaveLength(0);
+  });
+
+  it("zoomed out, a sub-threshold pen micro-scribble collapses to the dot too", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "p1", type: "pen", stroke: "#000", strokeWidth: 3, points: [100, 100] } });
+    s = drawReducer(s, { type: "extendFreehand", point: { x: 102, y: 101 } });
+    s = drawReducer(s, { type: "endDraw", minSize: 8 }); // deep zoom-out: 2 screen px ≫ 2 model px
+    const pen = s.shapes[0];
+    expect(pen?.type === "pen" && pen.points).toEqual([100, 100, 100.001, 100]);
+  });
 });
 
 describe("drawReducer — move gesture (single + group)", () => {
@@ -1361,19 +1381,21 @@ describe("drawReducer — viewport-scaled thresholds (minSize / distScale)", () 
     expect(s.past).toHaveLength(0);
   });
 
-  it("endDraw minSize drops a multi-point pen micro-scribble (bbox under threshold)", () => {
+  it("endDraw minSize judges a multi-point pen micro-scribble degenerate (bbox under threshold) → it collapses to a tap-dot", () => {
     let s = seeded([]);
     s = drawReducer(s, { type: "beginDraw", shape: { id: "p1", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0] } });
     s = drawReducer(s, { type: "extendFreehand", point: { x: 3, y: 2 } });
     s = drawReducer(s, { type: "extendFreehand", point: { x: 5, y: 4 } });
     s = drawReducer(s, { type: "endDraw", minSize: 40 });
-    expect(s.shapes).toHaveLength(0);
-    // …while the default threshold keeps the same stroke (legacy behavior).
+    const dot = s.shapes[0];
+    expect(dot?.type === "pen" && dot.points).toEqual([0, 0, 0.001, 0]); // a dot, not the scribble (and not a drop)
+    // …while the default threshold keeps the same stroke intact (legacy behavior).
     let k = seeded([]);
     k = drawReducer(k, { type: "beginDraw", shape: { id: "p1", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0] } });
     k = drawReducer(k, { type: "extendFreehand", point: { x: 3, y: 2 } });
     k = drawReducer(k, { type: "endDraw" });
-    expect(k.shapes).toHaveLength(1);
+    const pen = k.shapes[0];
+    expect(pen?.type === "pen" && pen.points).toEqual([0, 0, 3, 2]);
   });
 
   it("endDraw distScale widens line-endpoint binding at zoom-out", () => {
