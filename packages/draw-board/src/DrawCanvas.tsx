@@ -276,8 +276,8 @@ export function DrawCanvas({
     const pt = containerPoint(e, e.evt.clientX, e.evt.clientY);
     if (e.evt.ctrlKey || e.evt.metaKey) {
       // Trackpad pinches arrive as ctrl+wheel with small deltas; mouse notches are
-      // ~100 — clamp so one notch is a pleasant step, not a 2.7× jump.
-      const factor = Math.exp(-clampN(e.evt.deltaY, -50, 50) * 0.006);
+      // ~100 — clamp so one notch is a pleasant step (~1.48×), not a huge jump.
+      const factor = Math.exp(-clampN(e.evt.deltaY, -50, 50) * 0.0078);
       onViewChange((v) => zoomAt(v, pt, factor));
     } else {
       const dx = e.evt.shiftKey && !e.evt.deltaX ? e.evt.deltaY : e.evt.deltaX;
