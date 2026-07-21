@@ -12,6 +12,7 @@ import {
   nearestBindableId,
   nearestEdgeBindableId,
   attachAt,
+  growthOrigin,
   sideAnchor,
   migrateLabels,
   reflowAttachments,
@@ -691,6 +692,86 @@ describe("shape-to-shape attachment", () => {
       new Set()
     );
     expect(attachOf(out[0])).toBeUndefined();
+  });
+});
+
+describe("bond-aware text growth (a bound text grows AWAY from its glued edge)", () => {
+  const shapeOf = (s: DrawState, id: string) => s.shapes.find((x) => x.id === id)!;
+
+  it("growthOrigin: the glued edge pins per axis — seam side from the offset sign, center bond pins the center", () => {
+    // Text ABOVE a parent (bond at the top seam, text outside) → bottom pinned.
+    expect(growthOrigin({ id: "p", kind: "box", ax: 0.5, ay: 0, dx: -7, dy: -10 })).toEqual({ gx: 0, gy: 1 });
+    // Corner bond, text up-right of the parent's top-right → left + bottom pinned.
+    expect(growthOrigin({ id: "p", kind: "box", ax: 1, ay: 0, dx: 9, dy: -10 })).toEqual({ gx: 0, gy: 1 });
+    // Centered caption (pure-center containment bond) → grows symmetrically.
+    expect(growthOrigin({ id: "p", kind: "box", ax: 0.5, ay: 0.5, dx: 0, dy: 0 })).toEqual({ gx: 0.5, gy: 0.5 });
+    // Radial above the pole: bottom pinned, sideways symmetric (the bond centers on the ray).
+    expect(growthOrigin({ id: "e", kind: "radial", angle: -Math.PI / 2, gap: 20 })).toEqual({ gx: 0.5, gy: 1 });
+    // Unbound → today's top-left growth.
+    expect(growthOrigin(undefined)).toEqual({ gx: 0, gy: 0 });
+  });
+
+  it("setText on a bottom-glued text grows UP (bottom edge pinned) and lifts a chip bound to its top", () => {
+    const parent = box("p", { x: 0, y: 100, width: 100, height: 50 });
+    // "a" @10 → block 5.56×10; box y∈[85,95], bottom 5 above the parent's top seam.
+    const t = { ...text("t", { x: 40, y: 85, fontSize: 10, text: "a" }), attach: { id: "p", kind: "box", ax: 0.5, ay: 0, dx: -7.2, dy: -10 } } as Shape;
+    // A chip riding the TEXT's top seam from above (its follower).
+    const c = { ...box("c", { x: 40, y: 70, width: 10, height: 10 }), attach: { id: "t", kind: "box", ax: 0.5, ay: 0, dx: 2.2, dy: -10 } } as Shape;
+    let s = seeded([parent, t, c]);
+    s = drawReducer(s, { type: "setText", id: "t", text: "a\na\na" }); // 10 → 30 tall
+    expect(shapeOf(s, "t")).toMatchObject({ y: 65 }); // bottom stays 95 (65 + 30)
+    expect(shapeOf(s, "c")).toMatchObject({ y: 50 }); // lifted by the same 20
+    expect(shapeOf(s, "p")).toMatchObject({ y: 100 }); // the parent never moves
+  });
+
+  it("setText on a top-glued text (below the parent) keeps y and pushes a follower under it DOWN", () => {
+    const parent = box("p", { x: 0, y: 0, width: 100, height: 50 });
+    const t = { ...text("t", { x: 40, y: 55, fontSize: 10, text: "a" }), attach: { id: "p", kind: "box", ax: 0.5, ay: 1, dx: -7.2, dy: 10 } } as Shape;
+    const f = { ...box("f", { x: 40, y: 73, width: 10, height: 10 }), attach: { id: "t", kind: "box", ax: 0.5, ay: 1, dx: 2.2, dy: 13 } } as Shape;
+    let s = seeded([parent, t, f]);
+    s = drawReducer(s, { type: "setText", id: "t", text: "a\na\na" });
+    expect(shapeOf(s, "t")).toMatchObject({ y: 55 }); // top glued — grows down as before
+    expect(shapeOf(s, "f")).toMatchObject({ y: 93 }); // rides the bottom seam down 20
+  });
+
+  it("a centered caption grows symmetrically — its center never drifts", () => {
+    const parent = box("p", { x: 0, y: 0, width: 100, height: 100 });
+    // "a" @10 measures as an 8×10 BLOCK (min-box floor) — center it at (50,50).
+    const t = { ...text("t", { x: 46, y: 45, fontSize: 10, text: "a" }), attach: { id: "p", kind: "box", ax: 0.5, ay: 0.5, dx: 0, dy: 0 } } as Shape;
+    let s = seeded([parent, t]);
+    s = drawReducer(s, { type: "setText", id: "t", text: "aaa\na\na" }); // 16.68×30
+    const grown = shapeOf(s, "t") as TextShape;
+    expect(grown.x + lineWidth("aaa", 10) / 2).toBeCloseTo(50, 1);
+    expect(grown.y + 15).toBeCloseTo(50, 1);
+  });
+
+  it("an unbound text still grows down — but a follower attached to its bottom seam rides the growth", () => {
+    const t = text("t", { x: 5, y: 5, fontSize: 10, text: "a" });
+    const f = { ...box("f", { x: 5, y: 23, width: 10, height: 10 }), attach: { id: "t", kind: "box", ax: 0.5, ay: 1, dx: 2.2, dy: 13 } } as Shape;
+    let s = seeded([t, f]);
+    s = drawReducer(s, { type: "setText", id: "t", text: "a\na" });
+    expect(shapeOf(s, "t")).toMatchObject({ y: 5 });
+    expect(shapeOf(s, "f")).toMatchObject({ y: 33 }); // bottom seam moved 10 down
+  });
+
+  it("radial: a text above an ellipse keeps its border gap (bottom edge pinned)", () => {
+    const ell = box("e", { x: 0, y: 100, width: 100, height: 60 }); // center (50,130), semi-minor 30
+    const t = { ...text("t", { x: 47.22, y: 75, fontSize: 10, text: "a" }), attach: { id: "e", kind: "radial", angle: -Math.PI / 2, gap: 20 } } as Shape;
+    let s = seeded([{ ...ell, type: "ellipse" } as Shape, t]);
+    s = drawReducer(s, { type: "setText", id: "t", text: "a\na\na" });
+    const grown = shapeOf(s, "t") as TextShape;
+    expect(grown.y).toBeCloseTo(55, 1); // bottom stays at 85 (55 + 30)
+  });
+
+  it("setStrokeWidth (the font-size slots) grows a bottom-glued text upward and lifts its follower", () => {
+    const parent = box("p", { x: 0, y: 100, width: 100, height: 50 });
+    const t = { ...text("t", { x: 40, y: 85, fontSize: 10, text: "a" }), attach: { id: "p", kind: "box", ax: 0.5, ay: 0, dx: -7.2, dy: -10 } } as Shape;
+    const c = { ...box("c", { x: 40, y: 70, width: 10, height: 10 }), attach: { id: "t", kind: "box", ax: 0.5, ay: 0, dx: 2.2, dy: -10 } } as Shape;
+    let s = seeded([parent, t, c]);
+    s = drawReducer(s, { type: "select", ids: ["t"] });
+    s = drawReducer(s, { type: "setStrokeWidth", width: 2 }); // fontSize 10 → 14, one line → Δh 4
+    expect(shapeOf(s, "t")).toMatchObject({ y: 81, fontSize: 14 }); // bottom stays 95
+    expect(shapeOf(s, "c")).toMatchObject({ y: 66 }); // lifted 4
   });
 });
 
@@ -1703,10 +1784,14 @@ describe("typography: text is a box (wrap width, containment anchors, box resize
   it("setText restamps the shape's own anchor from its new box — no jump on the next parent op", () => {
     let s = seeded([box("r1", { x: 0, y: 0, width: 300, height: 200 })]);
     s = drawReducer(s, { type: "addShapes", detectAttach: true, shapes: [text("t1", { x: 100, y: 80 })] });
+    const before = tAt(s.shapes.find((sh) => sh.id === "t1"));
     s = drawReducer(s, { type: "setText", id: "t1", text: "longer caption" }); // grows, stays clear of the touch zone
     const t = s.shapes.find((sh) => sh.id === "t1") as TextShape;
-    expect(t.x).toBe(100); // the text itself never moved
     const c = tAt(t);
+    // Center-bonded caption: the new box grows SYMMETRICALLY around the held
+    // center (bond-aware growth) and the anchor restamps from the new box.
+    expect(c.cx).toBeCloseTo(before.cx, 5);
+    expect(c.cy).toBeCloseTo(before.cy, 5);
     expect(t.attach).toMatchObject({ ax: 0.5, ay: 0.5 });
     expect((t.attach as Attach & { dx: number }).dx).toBeCloseTo(c.cx - 150, 5); // dx refreshed to the NEW center
     // …and a text grown past its parent DETACHES (keep-or-drop).

@@ -631,12 +631,16 @@ export function DrawCanvas({
       return;
     }
     if (moveRef.current) {
-      // Re-detect attachments for what was dragged (attach if dropped edge-to-edge
-      // with a shape, detach if dragged away), then commit the whole gesture. The
-      // glue distance is zoom-scaled: "touching" is judged on SCREEN.
       const m = moveRef.current;
-      if (m.last.x !== m.downAt.x || m.last.y !== m.downAt.y) suppressDbl(); // a real drag, not a click
-      dispatch({ type: "reattach", ids: m.ids, distScale: sPx(1) });
+      if (m.last.x !== m.downAt.x || m.last.y !== m.downAt.y) {
+        suppressDbl(); // a real drag, not a click
+        // Re-detect attachments for what was dragged (attach if dropped
+        // edge-to-edge with a shape, detach if dragged away). The glue distance
+        // is zoom-scaled: "touching" is judged on SCREEN. ONLY on a real drag —
+        // a zero-distance click must not re-judge glue: nothing moved, and the
+        // stayer-rejudge would DROP a distant follower's bond on a mere click.
+        dispatch({ type: "reattach", ids: m.ids, distScale: sPx(1) });
+      }
       dispatch({ type: "endGesture" });
       moveRef.current = null;
       return;

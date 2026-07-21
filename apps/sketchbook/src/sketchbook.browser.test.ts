@@ -713,6 +713,53 @@ test("wrapped CYRILLIC text breaks at the SAME points committed and editing — 
   expect(Math.abs(editing.right - committed.right)).toBeLessThanOrEqual(3);
 });
 
+test("a text glued ABOVE a shape grows UPWARD — the edit field live, the commit in the model, followers lifted", async ({ page }) => {
+  // Bond-aware growth: the text's bottom edge is glued to the parent's top
+  // seam, so extending it must keep that edge pinned (extend up), and a chip
+  // bound to the text's TOP seam must ride the rising edge. "cap" @18 measures
+  // 29.016×18 (block y∈[170,188], 12px above the parent — inside glue range).
+  await openSeeded(page, [
+    rect("p", 100, 200, 160, 80),
+    { id: "t", type: "text", stroke: "#e5484d", strokeWidth: 3, x: 120, y: 170, fontSize: 18, text: "cap", attach: { id: "p", kind: "box", ax: 0.5, ay: 0, dx: -45.5, dy: -21 } },
+    rect("c", 150, 130, 30, 20, { attach: { id: "t", kind: "box", ax: 0.5, ay: 0, dx: 30.5, dy: -30 } }),
+  ]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const toScreen = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+
+  const mid = toScreen({ x: 134, y: 179 });
+  await page.mouse.dblclick(mid.x, mid.y);
+  const ta = page.locator(".draw-text-input");
+  await ta.waitFor();
+  await page.keyboard.press("Control+End"); // collapse the select-all highlight
+  const before = (await ta.boundingBox())!;
+
+  // Two more lines: the field's BOTTOM must hold (bond-pinned) while its top
+  // rises by two 18px lines (screen-scaled).
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.type("more");
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.type("lines");
+  const after = (await ta.boundingBox())!;
+  expect(Math.abs(after.y + after.height - (before.y + before.height))).toBeLessThanOrEqual(2);
+  expect(before.y - after.y).toBeGreaterThan(30 * cam.scale); // ≈36px up, minus wrap hair
+
+  await page.keyboard.press("Enter"); // commit
+  type Stored = { id: string; x: number; y: number };
+  const shapeIn = (list: unknown[], id: string) => (list as Stored[]).find((sh) => sh.id === id);
+  // Committed: "cap\nmore\nlines" is 54 tall — the text keeps its bottom at 188
+  // (y 170 → 134), the chip rides the top seam up the same 36, the parent holds.
+  await expect.poll(async () => shapeIn((await stored(page))[0].doc.shapes, "t")?.y).toBeCloseTo(134, 1);
+  const shapes = (await stored(page))[0].doc.shapes;
+  expect(shapeIn(shapes, "t")!.x).toBeCloseTo(120, 1);
+  expect(shapeIn(shapes, "c")!.y).toBeCloseTo(94, 1);
+  expect(shapeIn(shapes, "c")!.x).toBeCloseTo(156, 0); // +6: it tracks the WIDER box's mid-top ("more" = 41px)
+  expect(shapeIn(shapes, "p")!.y).toBe(200);
+});
+
 test.describe("rich exports + import drop surfaces", () => {
   /** Drop a file (bytes given as base64) onto a selector via a synthetic DragEvent. */
   async function dropFile(page: Page, selector: string, b64: string, name: string, type: string) {

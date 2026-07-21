@@ -1113,6 +1113,43 @@ function refreshOwnAnchor(shapes: Shape[], id: string, distScale = 1): Shape[] {
   });
 }
 
+/** Where a bound text's box stays PINNED when its own size changes (typing, the
+ *  font-size slots) — the fraction of the box that must not move, per axis:
+ *  0 pins the left/top edge (grow right/down — the free-text default), 1 pins
+ *  the right/bottom edge (grow left/up), 0.5 pins the center (grow both ways).
+ *  Derived from the bond alone: on a seamed axis (box anchor 0 | 1) the child
+ *  edge FACING the seam pins — which side the child sits on is the stored
+ *  offset's sign — so a text glued above a shape grows upward, away from it.
+ *  A seamless axis keeps the default, except the pure-center containment bond
+ *  (a caption): that one pins the center on both axes. Radial bonds pin the
+ *  along-ray edge (the border gap is what the bond preserves) and center the
+ *  cross axis of a near-pole ray (within ±22.5° — the bond centers on the ray,
+ *  matching the 8-way quantization boxes get). */
+export function growthOrigin(at: Attach | undefined): { gx: number; gy: number } {
+  if (!at) return { gx: 0, gy: 0 };
+  if (at.kind === "radial") {
+    const pole = Math.sin(Math.PI / 8);
+    const g = (v: number) => (v < -pole ? 1 : v > pole ? 0 : 0.5);
+    return { gx: g(Math.cos(at.angle)), gy: g(Math.sin(at.angle)) };
+  }
+  const center = at.ax === 0.5 && at.ay === 0.5;
+  const g = (a: number, d: number) => (a === 0.5 ? (center ? 0.5 : 0) : d < 0 ? 1 : d > 0 ? 0 : 0.5);
+  return { gx: g(at.ax, at.dx), gy: g(at.ay, at.dy) };
+}
+
+/** Apply a content/size patch to a text shape and REPOSITION it so its bond's
+ *  pinned point (see {@link growthOrigin}) stays put. Callers then restamp the
+ *  shape's own anchor and reflow its followers — chips glued to a seam ride
+ *  the edge that moved. */
+function retypeset(sh: TextShape, patch: Partial<Pick<TextShape, "text" | "fontSize" | "width">>): TextShape {
+  const next = { ...sh, ...patch };
+  const { gx, gy } = growthOrigin(sh.attach);
+  if (!gx && !gy) return next;
+  const was = textBlockSize(sh.text, sh.fontSize, sh.width);
+  const is = textBlockSize(next.text, next.fontSize, next.width);
+  return { ...next, x: next.x - gx * (is.width - was.width), y: next.y - gy * (is.height - was.height) };
+}
+
 /** Uniform-scale a unit member about `origin` from its BASE (gesture-start)
  *  geometry: position/extent/points affine; fontSize & strokeWidth ×factor
  *  (continuous values allowed — the toolbar slots highlight nearest); live
@@ -1443,7 +1480,10 @@ export function normalizeGroups(shapes: Shape[]): Shape[] {
     const out: string[] = [];
     for (let i = 0; i < path.length; i++) {
       const gid = path[i];
-      const prefixKey = `${out.join(" ")} ${gid}`;
+      // NUL-joined so a gid can never collide with a prefix boundary. Built
+      // via fromCharCode: a literal NUL byte in source makes greps read the
+      // whole file as binary.
+      const prefixKey = [...out, gid].join(String.fromCharCode(0));
       let eff = contextGid.get(prefixKey);
       if (!eff) {
         const first = firstContextOf.get(gid);
@@ -1570,13 +1610,19 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         return { ...s, strokeWidth: a.width, shapes: mapShapes(s.shapes, new Set([s.draftId]), (sh) => ({ ...sh, strokeWidth: a.width })) };
       }
       if (s.selectedIds.length) {
-        // For text the stroke slots mean font size (small/medium/large).
-        return {
-          ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), (sh) =>
-            sh.type === "text" ? { ...sh, fontSize: fontForStroke(a.width) } : { ...sh, strokeWidth: a.width }
-          )),
-          strokeWidth: a.width,
-        };
+        // For text the stroke slots mean font size (small/medium/large) —
+        // retypeset so a bound text grows away from its glued edge, then
+        // restamp each text's own anchor and reflow followers (same contract
+        // as setText: the pinned seam holds, glued chips ride the moved edges).
+        const sel = new Set(s.selectedIds);
+        let next = mapShapes(s.shapes, sel, (sh) =>
+          sh.type === "text" ? retypeset(sh, { fontSize: fontForStroke(a.width) }) : { ...sh, strokeWidth: a.width }
+        );
+        if (s.shapes.some((sh) => sel.has(sh.id) && sh.type === "text")) {
+          for (const sh of s.shapes) if (sel.has(sh.id) && sh.type === "text") next = refreshOwnAnchor(next, sh.id);
+          next = reflowAll(next, sel);
+        }
+        return { ...commit(s, next), strokeWidth: a.width };
       }
       return { ...s, strokeWidth: a.width };
     }
@@ -2038,12 +2084,14 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
     }
     case "setText": {
       const next = mapShapes(s.shapes, new Set([a.id]), (sh) =>
-        sh.type === "text" ? { ...sh, text: a.text, ...(a.width !== undefined && { width: a.width }) } : sh
+        sh.type === "text" ? retypeset(sh, { text: a.text, ...(a.width !== undefined && { width: a.width }) }) : sh
       );
-      // The new text is a new box: restamp its OWN anchor from where it now
-      // sits (keep-or-drop — a text grown past its parent detaches) so the next
-      // parent move/resize doesn't yank it to stale metrics.
-      return commit(s, reflowBindings(refreshOwnAnchor(next, a.id, a.distScale ?? 1)));
+      // The new text is a new box, PLACED so its bond-pinned edge stayed put
+      // (retypeset): restamp its OWN anchor from where it now sits (keep-or-drop
+      // — a text grown past its parent detaches) so the next parent move/resize
+      // doesn't yank it to stale metrics, then reflow its FOLLOWERS — shapes
+      // glued to its seams ride the edges that moved, arrows re-cling.
+      return commit(s, reflowAll(refreshOwnAnchor(next, a.id, a.distScale ?? 1), new Set([a.id])));
     }
     case "deleteSelected": {
       // Keyboard-only path — ignored while a pointer gesture is in flight (a

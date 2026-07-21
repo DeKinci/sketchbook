@@ -16,6 +16,7 @@ import {
   contentBounds,
   fontForStroke,
   groupActionFor,
+  growthOrigin,
   isSelectable,
   migrateLabels,
   normalizeGroups,
@@ -37,7 +38,7 @@ import {
   type Shape,
   type TextShape,
 } from "./drawModel.ts";
-import { wrapLines } from "./textMetrics.ts";
+import { textBlockSize, wrapLines } from "./textMetrics.ts";
 import { BOARD_FONT_STACK, useBoardFont } from "./boardFont.ts";
 import { exportStagePng, sketchFileName } from "./exportPng.ts";
 import { exportBoardPng, exportBoardSvg, parseBoardFile, parseBoardPayload } from "./boardFile.ts";
@@ -135,6 +136,15 @@ interface EditSession {
    *  growing out of the parent, and a commit that actually wrapped stamps the
    *  cap as the shape's box width. Absent = uncapped (free text). */
   maxWidth?: number;
+  /** Bond-pinned growth (see {@link growthOrigin}): the fraction of the field's
+   *  box that stays put as it grows, and the pinned point (model coords) it
+   *  grows away from — so editing a text glued above a shape extends the field
+   *  UPWARD live, exactly like the commit will. 0/0 + the top-left = the free
+   *  default. */
+  gx: number;
+  gy: number;
+  anchorX: number;
+  anchorY: number;
 }
 
 /**
@@ -429,7 +439,7 @@ export function DrawEditor({
     (x: number, y: number) => {
       const s = stateRef.current;
       setValue("");
-      setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, maxWidth: containKap(x, y) });
+      setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, maxWidth: containKap(x, y), gx: 0, gy: 0, anchorX: x, anchorY: y });
     },
     [containKap]
   );
@@ -438,8 +448,25 @@ export function DrawEditor({
       const sh = stateRef.current.shapes.find((s) => s.id === id) as TextShape | undefined;
       if (!sh || sh.type !== "text") return;
       setValue(sh.text);
+      // Bond-pinned growth: the field extends away from the shape's glued edge
+      // (a text bound above its parent grows UP), mirroring what the commit's
+      // retypeset will do to the model.
+      const { gx, gy } = growthOrigin(sh.attach);
+      const b = textBlockSize(sh.text, sh.fontSize, sh.width);
       // The shape's own box wins; an unboxed text inside a container caps at it.
-      setSession({ kind: "edit-text", id, x: sh.x, y: sh.y, fontSize: sh.fontSize, color: sh.stroke, maxWidth: sh.width ?? containKap(sh.x, sh.y) });
+      setSession({
+        kind: "edit-text",
+        id,
+        x: sh.x,
+        y: sh.y,
+        fontSize: sh.fontSize,
+        color: sh.stroke,
+        maxWidth: sh.width ?? containKap(sh.x, sh.y),
+        gx,
+        gy,
+        anchorX: sh.x + gx * b.width,
+        anchorY: sh.y + gy * b.height,
+      });
     },
     [containKap]
   );
@@ -519,22 +546,30 @@ export function DrawEditor({
   }, [session]);
 
   // WYSIWYG sizing: the field's box always equals its content's — a capped
-  // field keeps the wrap width and grows DOWNWARD per wrapped line, a free
-  // field grows RIGHTWARD with its longest line; neither ever scrolls or clips
-  // (the canvas text is hidden while editing, so the field IS the shape).
-  // Browser-measured (scroll extents after a collapse) so the box stays
-  // layout-true per keystroke, even where the browser's wrap differs from the
-  // model's by a hair.
+  // field keeps the wrap width, a free field tracks its longest line; neither
+  // ever scrolls or clips (the canvas text is hidden while editing, so the
+  // field IS the shape). Browser-measured (scroll extents after a collapse) so
+  // the box stays layout-true per keystroke, even where the browser's wrap
+  // differs from the model's by a hair. GROWTH DIRECTION follows the bond
+  // (session.gx/gy): the box is re-placed off its pinned anchor after every
+  // measure, so a text glued above a shape grows UPWARD live — the free
+  // default (anchor = top-left) reduces to plain left/top placement.
   useLayoutEffect(() => {
     const ta = taRef.current;
-    if (!ta) return;
-    if (sessionRef.current?.maxWidth === undefined) {
+    const cur = sessionRef.current;
+    if (!ta || !cur || !view) return;
+    let w = (cur.maxWidth ?? 0) * view.scale;
+    if (cur.maxWidth === undefined) {
       ta.style.width = "0px";
-      ta.style.width = `${ta.scrollWidth + 2}px`; // + caret room at the line end
+      w = ta.scrollWidth + 2; // + caret room at the line end
+      ta.style.width = `${w}px`;
     }
     ta.style.height = "0px";
-    ta.style.height = `${ta.scrollHeight}px`;
-  }, [value, session]);
+    const h = ta.scrollHeight;
+    ta.style.height = `${h}px`;
+    ta.style.left = `${cur.anchorX * view.scale + view.x - cur.gx * w}px`;
+    ta.style.top = `${cur.anchorY * view.scale + view.y - cur.gy * h}px`;
+  }, [value, session, view]);
 
   // ── Add an image / text (drop or paste from the system) ─────────────────────
   // Placement is CAMERA-relative: "the middle of the board" means the middle of
@@ -1270,9 +1305,9 @@ export function DrawEditor({
                 // the canvas text (a visible jump when the editor opens) and
                 // compounds per line on multi-line texts.
                 className="draw-text-input absolute m-0 resize-none overflow-hidden whitespace-pre border-0 bg-transparent p-0 text-left leading-none outline-none"
+                // No left/top here — the WYSIWYG sizing effect places the box
+                // off its bond-pinned anchor (pre-paint) after each measure.
                 style={{
-                  left: session.x * view.scale + view.x,
-                  top: session.y * view.scale + view.y,
                   color: session.color === CONTRAST_INK ? CONTRAST_OVERLAY : session.color,
                   caretColor: session.color === CONTRAST_INK ? CONTRAST_OVERLAY : session.color,
                   fontSize: session.fontSize * view.scale,
