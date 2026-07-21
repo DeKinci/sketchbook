@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { watchWorkspacePackages } from "../../vite.watchPackages.ts";
 
 // Port precedence: the injected web port (Operator guesses a run's preview URL on
 // OPERATOR_WEB_PORT — a frontend dev server MUST bind it or its URL is treated as an
@@ -16,7 +17,10 @@ const port = Number(
 );
 
 export default defineConfig({
-  plugins: [react()],
+  // watchWorkspacePackages: `@operator/draw-board` is imported as out-of-root source,
+  // which vite watches per-file — a mode chokidar 4 permanently loses on git file
+  // replaces (every Operator land). Dir-level coverage keeps HMR alive; see the plugin.
+  plugins: [react(), watchWorkspacePackages()],
   // `.ts.net` so the dev server is reachable at its own tailnet origin through Tailscale
   // Serve (the own-origin preview path — see apps/server/src/previewOrigins.ts).
   server: { port, allowedHosts: [".ts.net"] },
