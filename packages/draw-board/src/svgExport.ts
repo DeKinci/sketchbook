@@ -12,7 +12,7 @@
  * {@link SVG_META_ID}, making the file re-importable as a full board — the SVG
  * sibling of the PNG iTXt chunk.
  */
-import { boundingBox, isContrastInk, labelFont, paintOrder, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
+import { boundingBox, dashFor, isContrastInk, labelFont, paintOrder, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
 import { contentCropLogical } from "./exportPng.ts";
 
 export const SVG_META_ID = "draw-board-doc";
@@ -61,30 +61,35 @@ function arrowHead(x1: number, y1: number, x2: number, y2: number, sw: number, c
 function shapeSvg(sh: Shape): string {
   const color = inkOf(sh);
   const sw = sh.strokeWidth;
+  // Stroke style → dasharray (same width-derived pattern the board renders);
+  // dotted boxes need the round cap the open strokes already carry.
+  const dashArr = dashFor(sh.strokeStyle, sw);
+  const dash = dashArr ? ` stroke-dasharray="${dashArr.map(num).join(" ")}"` : "";
+  const boxCap = sh.strokeStyle === "dotted" ? ' stroke-linecap="round"' : "";
   switch (sh.type) {
     case "rect": {
       const b = boundingBox(sh);
-      return `<rect x="${num(b.x)}" y="${num(b.y)}" width="${num(b.width)}" height="${num(b.height)}" fill="none" stroke="${color}" stroke-width="${sw}"/>`;
+      return `<rect x="${num(b.x)}" y="${num(b.y)}" width="${num(b.width)}" height="${num(b.height)}" fill="none" stroke="${color}" stroke-width="${sw}"${dash}${boxCap}/>`;
     }
     case "ellipse": {
       const b = boundingBox(sh);
-      return `<ellipse cx="${num(b.x + b.width / 2)}" cy="${num(b.y + b.height / 2)}" rx="${num(b.width / 2)}" ry="${num(b.height / 2)}" fill="none" stroke="${color}" stroke-width="${sw}"/>`;
+      return `<ellipse cx="${num(b.x + b.width / 2)}" cy="${num(b.y + b.height / 2)}" rx="${num(b.width / 2)}" ry="${num(b.height / 2)}" fill="none" stroke="${color}" stroke-width="${sw}"${dash}${boxCap}/>`;
     }
     case "line": {
       const [x1, y1, x2, y2] = sh.points;
-      return `<line x1="${num(x1)}" y1="${num(y1)}" x2="${num(x2)}" y2="${num(y2)}" stroke="${color}" stroke-width="${sw}" stroke-linecap="round"/>`;
+      return `<line x1="${num(x1)}" y1="${num(y1)}" x2="${num(x2)}" y2="${num(y2)}" stroke="${color}" stroke-width="${sw}" stroke-linecap="round"${dash}/>`;
     }
     case "arrow": {
       const [x1, y1, x2, y2] = sh.points;
       const parts = [
-        `<line x1="${num(x1)}" y1="${num(y1)}" x2="${num(x2)}" y2="${num(y2)}" stroke="${color}" stroke-width="${sw}" stroke-linecap="round"/>`,
+        `<line x1="${num(x1)}" y1="${num(y1)}" x2="${num(x2)}" y2="${num(y2)}" stroke="${color}" stroke-width="${sw}" stroke-linecap="round"${dash}/>`,
         arrowHead(x1, y1, x2, y2, sw, color),
       ];
       if ((sh as SegmentShape).doubleHead) parts.push(arrowHead(x2, y2, x1, y1, sw, color));
       return parts.join("");
     }
     case "pen":
-      return `<path d="${penPath(sh.points)}" fill="none" stroke="${color}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"/>`;
+      return `<path d="${penPath(sh.points)}" fill="none" stroke="${color}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"${dash}/>`;
     case "text":
       return `<text x="${num(sh.x)}" y="${num(sh.y + sh.fontSize)}" font-family="Arial, sans-serif" font-size="${sh.fontSize}" fill="${color}">${esc(sh.text)}</text>`;
     case "image": {

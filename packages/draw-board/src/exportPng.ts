@@ -1,5 +1,5 @@
 import type Konva from "konva";
-import { contentBounds, type DrawDoc, type ImageShape } from "./drawModel.ts";
+import { contentBounds, dashFor, type DrawDoc, type ImageShape } from "./drawModel.ts";
 
 /** Padding (logical px) kept around the drawn content when a blank sketch is
  *  trimmed to its used region on export. */
@@ -88,15 +88,18 @@ export async function exportStagePng(stage: Konva.Stage, doc: DrawDoc, name: str
   // the artwork). Drive each stroke to its exact model width for the snapshot —
   // the export transform scales it like any geometry — and restore the live
   // (possibly floored) attrs after.
-  const strokeOverrides: Array<{ node: Konva.Shape; live: number }> = [];
+  const strokeOverrides: Array<{ node: Konva.Shape; live: number; liveDash: number[] }> = [];
   for (const sh of doc.shapes) {
     if (sh.type === "text" || sh.type === "image") continue; // no stroked outline
     const found = stage.findOne<Konva.Node>(`#${sh.id}`);
     // An ellipse's id sits on its positioning Group; the stroked node is inside.
     const node = found?.getClassName?.() === "Group" ? (found as Konva.Group).findOne<Konva.Shape>("Ellipse") : (found as Konva.Shape | undefined);
     if (!node) continue;
-    strokeOverrides.push({ node, live: node.strokeWidth() });
+    strokeOverrides.push({ node, live: node.strokeWidth(), liveDash: node.dash() });
     node.strokeWidth(sh.strokeWidth);
+    // The dash pattern is width-derived (may be floored live) — drive it to the
+    // exact model pattern alongside the width.
+    node.dash(dashFor(sh.strokeStyle, sh.strokeWidth) ?? []);
   }
   try {
     stage.scale({ x: s, y: s });
@@ -109,7 +112,10 @@ export async function exportStagePng(stage: Konva.Stage, doc: DrawDoc, name: str
     if (!blob) throw new Error("the browser could not render the export (canvas too large?)");
     return new File([blob], name, { type: "image/png" });
   } finally {
-    for (const { node, live } of strokeOverrides) node.strokeWidth(live);
+    for (const { node, live, liveDash } of strokeOverrides) {
+      node.strokeWidth(live);
+      node.dash(liveDash);
+    }
     stage.scale({ x: prev.scaleX, y: prev.scaleY });
     stage.position({ x: prev.x, y: prev.y });
     stage.size({ width: prev.width, height: prev.height });

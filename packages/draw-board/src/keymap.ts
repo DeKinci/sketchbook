@@ -30,6 +30,7 @@ export const DRAW_KEYMAP: DrawShortcut[] = [
   { keys: ["1"], description: "Shape tool (again: rect ⇄ ellipse)" },
   { keys: ["2"], description: "Connector tool (again: line → arrow → double)" },
   { keys: ["3"], description: "Text tool" },
+  { keys: ["4"], description: "Cycle stroke style (solid → dashed → dotted)" },
   { keys: ["tab"], description: "Toggle primary tool" },
   { keys: ["backspace", "delete"], description: "Delete selection / eraser" },
   { keys: ["-", "="], description: "Size down / up (keeps stepping past the 3 shown; scales a selected group or image)" },

@@ -156,6 +156,37 @@ test("the full story: open → create+name → rename → draw → reload persis
   expect(final.find((d) => d.name === "My Plan")!.doc.shapes.length).toBe(1); // untouched
 });
 
+test("stroke styles: 4 cycles solid→dashed→dotted, ink carries the style to persistence, selection restyles via the toolbar, SVG export emits the dash", async ({ page }) => {
+  await open(page);
+  // Focus lands inside the board root via a toolbar click (no stray ink).
+  await page.getByRole("button", { name: "Cursor — select / move (Tab)" }).click();
+
+  // 4 → dashed (from the default solid); the swatch well follows.
+  await page.keyboard.press("4");
+  await expect(page.getByRole("button", { name: "Dashed stroke (4)" })).toHaveAttribute("aria-pressed", "true");
+
+  // Ink drawn now carries the armed style.
+  await page.getByRole("button", { name: "Pen — draw freehand (Tab)" }).click();
+  await drawStroke(page, { x: 150, y: 150 }, { x: 300, y: 240 });
+  await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length ?? 0).toBe(1);
+  expect(((await stored(page))[0].doc.shapes[0] as { strokeStyle?: string }).strokeStyle).toBe("dashed");
+
+  // Select the stroke; a toolbar swatch restyles the SELECTION (undoably).
+  await page.getByRole("button", { name: "Cursor — select / move (Tab)" }).click();
+  await page.locator(".konvajs-content").click({ position: { x: 225, y: 195 } });
+  await page.getByRole("button", { name: "Dotted stroke (4)" }).click();
+  await expect
+    .poll(async () => ((await stored(page))[0].doc.shapes[0] as { strokeStyle?: string }).strokeStyle)
+    .toBe("dotted");
+
+  // …and the style flows through the SVG export (zero-length dash = dots).
+  await page.getByRole("button", { name: "More export options" }).click();
+  const downloadP = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download as SVG" }).click();
+  const text = fs.readFileSync((await (await downloadP).path())!, "utf8");
+  expect(text).toContain("stroke-dasharray");
+});
+
 test.describe("rich exports + import drop surfaces", () => {
   /** Drop a file (bytes given as base64) onto a selector via a synthetic DragEvent. */
   async function dropFile(page: Page, selector: string, b64: string, name: string, type: string) {

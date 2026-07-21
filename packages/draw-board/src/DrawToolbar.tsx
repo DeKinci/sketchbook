@@ -19,7 +19,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { IconButton } from "./IconButton.tsx";
-import { CONTRAST_INK, STROKE_WIDTHS, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type Tool, type ShapeVariant, type LineVariant } from "./drawModel.ts";
+import { CONTRAST_INK, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
 
 /** The two persistent tools live in a segmented "well" that slides to whichever
  *  is armed; the one-use tools (shape / connector clusters + text) follow it. */
@@ -106,6 +106,7 @@ export function DrawToolbar({
   lineVariant,
   color,
   strokeWidth,
+  strokeStyle,
   sizeStep = null,
   palette,
   hasSelection,
@@ -116,6 +117,7 @@ export function DrawToolbar({
   onTool,
   onArmCluster,
   onColor,
+  onStrokeStyle,
   onSizeSlot,
   onUndo,
   onRedo,
@@ -134,6 +136,8 @@ export function DrawToolbar({
   color: string;
   /** The width the size dots display (the selection's own when it has one). */
   strokeWidth: number;
+  /** The armed stroke style (solid/dashed/dotted) — the 4 key cycles it. */
+  strokeStyle: StrokeStyle;
   /** Scale mode: the selected group's / lone image's size-control step (0 =
    *  natural "medium"), or null for stroke mode. The dots then read the unit's
    *  position — mid resets, extremes step — instead of stroke widths. */
@@ -152,6 +156,8 @@ export function DrawToolbar({
   /** Arm a one-use cluster (select its variant, or cycle if already armed). */
   onArmCluster: (cluster: "shape" | "line") => void;
   onColor: (c: string) => void;
+  /** A stroke-style swatch was pressed (also restyles the selection). */
+  onStrokeStyle: (s: StrokeStyle) => void;
   /** A size dot was pressed (0 small · 1 mid · 2 large). The EDITOR owns the
    *  semantics (secret-ladder stepping / group scaling) — the toolbar only
    *  reports which dot. */
@@ -383,6 +389,44 @@ export function DrawToolbar({
                   style={{ width: dot, height: dot, transition: `width 220ms ${SPRING}, height 220ms ${SPRING}` }}
                 />
               )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Stroke style — solid / dashed / dotted, same sliding well; 4 cycles.
+          Swatches are literal line previews (an icon set has no honest glyphs
+          for these). */}
+      <div className="relative flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5">
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0.5 left-0.5 w-7 rounded-full bg-accent-600/25 ring-1 ring-inset ring-accent-500/40 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]"
+          style={{ transform: `translateX(${STROKE_STYLES.indexOf(strokeStyle) * 100}%)` }}
+        />
+        {STROKE_STYLES.map((st) => {
+          const name = `${st[0].toUpperCase()}${st.slice(1)}`;
+          return (
+            <button
+              key={st}
+              type="button"
+              aria-label={`${name} stroke (4)`}
+              aria-pressed={strokeStyle === st}
+              title={`${name} stroke — 4 cycles the styles`}
+              onClick={() => onStrokeStyle(st)}
+              className="relative z-10 flex h-7 w-7 items-center justify-center rounded-full text-ink-100"
+            >
+              <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+                <line
+                  x1="2"
+                  y1="9"
+                  x2="16"
+                  y2="9"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeDasharray={st === "dashed" ? "4 3" : st === "dotted" ? "0.1 3.6" : undefined}
+                />
+              </svg>
             </button>
           );
         })}

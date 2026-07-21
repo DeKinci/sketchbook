@@ -37,6 +37,20 @@ describe("exportSvg", () => {
     expect(svg).toContain('href="data:image/png;base64,QUJD"');
   });
 
+  it("stroke styles: dasharray scales with the width; dotted boxes gain round caps; solid emits none", () => {
+    const svg = exportSvg(
+      doc([
+        { ...rect("d"), strokeStyle: "dashed" },
+        { id: "o", type: "ellipse", stroke: "#e5484d", strokeWidth: 4, x: 200, y: 100, width: 80, height: 40, strokeStyle: "dotted" },
+        rect("s", 300, 100),
+      ])
+    );
+    expect(svg).toContain('stroke-dasharray="9 6"'); // dashed at width 3
+    expect(svg).toContain('stroke-dasharray="0.00 10"'); // dotted at width 4 (zero-length dash + round cap = dots)
+    expect(svg.match(/<ellipse[^>]*stroke-linecap="round"/)).toBeTruthy();
+    expect(svg.match(/<rect[^>]*x="300"[^>]*stroke-dasharray/)).toBeNull(); // solid: no dash attr
+  });
+
   it("labels render: chip on strokes, centered text on areas", () => {
     const shapes: Shape[] = [
       { ...rect("r"), label: "box label" } as Shape,

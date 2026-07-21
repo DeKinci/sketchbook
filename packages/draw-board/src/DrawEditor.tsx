@@ -28,6 +28,7 @@ import {
   unitSizeStep,
   rootUnitKeyOf,
   STROKE_WIDTHS,
+  STROKE_STYLES,
   CANVAS_BG_DARK,
   CONTRAST_INK,
   PALETTE,
@@ -1058,6 +1059,14 @@ export function DrawEditor({
         cycleColor(e.shiftKey ? -1 : 1);
         return;
       }
+      // 4 → cycle the stroke style (solid → dashed → dotted). Falls through the
+      // draft guard like -/=/`: mid-draw it live-restyles the draft.
+      if (e.key === "4") {
+        e.preventDefault();
+        const cur = stateRef.current.strokeStyle;
+        dispatch({ type: "setStrokeStyle", style: STROKE_STYLES[(STROKE_STYLES.indexOf(cur) + 1) % STROKE_STYLES.length] });
+        return;
+      }
       // 1 → shape cluster (rect⇄ellipse), 2 → connector cluster
       // (line→arrow→double-arrow) — press again to cycle the variant; 3 → text.
       if (e.key === "1") {
@@ -1098,6 +1107,7 @@ export function DrawEditor({
       lineVariant={state.lineVariant}
       color={state.color}
       strokeWidth={strokeBase(state)}
+      strokeStyle={state.strokeStyle}
       sizeStep={sizeTarget ? unitSizeStep(state.shapes, sizeTarget) : null}
       palette={palette}
       hasSelection={state.selectedIds.length > 0}
@@ -1113,6 +1123,7 @@ export function DrawEditor({
       onTool={(tool) => dispatch({ type: "setTool", tool })}
       onArmCluster={(cluster) => dispatch({ type: "armCluster", cluster })}
       onColor={(color) => dispatch({ type: "setColor", color })}
+      onStrokeStyle={(style) => dispatch({ type: "setStrokeStyle", style })}
       onSizeSlot={onSizeSlot}
       onUndo={() => dispatch({ type: "undo" })}
       onRedo={() => dispatch({ type: "redo" })}

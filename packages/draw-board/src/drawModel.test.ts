@@ -27,6 +27,7 @@ import {
   slotTargetStep,
   fontForStroke,
   strokeForFont,
+  dashFor,
   PALETTE,
   CONTRAST_INK,
   isContrastInk,
@@ -1544,5 +1545,45 @@ describe("drawReducer — history is inert while a gesture/draft is in flight", 
     s = drawReducer(s, { type: "deleteShapes", ids: ["A"] });
     expect(s.shapes).toHaveLength(0);
     expect(s.past).toHaveLength(1);
+  });
+});
+
+describe("stroke style (setStrokeStyle / dashFor)", () => {
+  it("dashFor: solid → undefined; patterns scale with the width", () => {
+    expect(dashFor(undefined, 3)).toBeUndefined();
+    expect(dashFor("solid", 3)).toBeUndefined();
+    expect(dashFor("dashed", 3)).toEqual([9, 6]);
+    expect(dashFor("dashed", 10)).toEqual([30, 20]);
+    expect(dashFor("dotted", 4)).toEqual([0.001, 10]);
+  });
+
+  it("nothing selected → just the pref, no history entry", () => {
+    let s = initialDrawState();
+    expect(s.strokeStyle).toBe("solid");
+    s = drawReducer(s, { type: "setStrokeStyle", style: "dashed" });
+    expect(s.strokeStyle).toBe("dashed");
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("restyles the selection (undoable); text is left alone", () => {
+    let s = seeded([box("r1"), text("t1")]);
+    s = drawReducer(s, { type: "select", ids: ["r1", "t1"] });
+    s = drawReducer(s, { type: "setStrokeStyle", style: "dotted" });
+    expect(s.shapes.find((sh) => sh.id === "r1")!.strokeStyle).toBe("dotted");
+    expect(s.shapes.find((sh) => sh.id === "t1")!.strokeStyle).toBeUndefined();
+    expect(s.strokeStyle).toBe("dotted");
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes.find((sh) => sh.id === "r1")!.strokeStyle).toBeUndefined();
+  });
+
+  it("live-restyles a draft mid-draw; the style survives the commit", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "beginDraw", shape: box("d1", { width: 0, height: 0 }) });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 60, y: 50 } });
+    s = drawReducer(s, { type: "setStrokeStyle", style: "dashed" });
+    expect(s.shapes.find((sh) => sh.id === "d1")!.strokeStyle).toBe("dashed");
+    s = drawReducer(s, { type: "endDraw" });
+    expect(s.draftId).toBeNull();
+    expect(s.shapes.find((sh) => sh.id === "d1")!.strokeStyle).toBe("dashed");
   });
 });

@@ -42,11 +42,17 @@ export type Attach =
  *  consumers. See docs/groups-design.md. */
 export type DormantEdge = { gid: string; attach?: Attach; bindStart?: Bind; bindEnd?: Bind };
 
+/** Stroke rendering styles, in the cycle order the toolbar / the 4 key walk. */
+export const STROKE_STYLES = ["solid", "dashed", "dotted"] as const;
+export type StrokeStyle = (typeof STROKE_STYLES)[number];
+
 export interface BaseShape {
   id: string;
   /** Stroke color (also the fill for text). */
   stroke: string;
   strokeWidth: number;
+  /** Stroke rendering style; absent = solid (keeps persisted docs slim). */
+  strokeStyle?: StrokeStyle;
   /** Optional caption bound to the shape (double-click a shape to edit it). It
    *  renders centered and follows the shape on move/resize/delete. */
   label?: string;
@@ -169,6 +175,7 @@ export interface DrawState extends DrawDoc {
   lineVariant: LineVariant;
   color: string;
   strokeWidth: number;
+  strokeStyle: StrokeStyle;
   /** Currently selected shapes (move/resize/delete/copy), in no particular order. */
   selectedIds: string[];
   /** The shape being drawn/edited during an active gesture, or none. */
@@ -181,6 +188,17 @@ export interface DrawState extends DrawDoc {
 }
 
 export const DEFAULT_STROKE_WIDTH = 3;
+
+/** Dash pattern for a stroke style at width `w` — in the same units as the
+ *  width (model), so the pattern rides the stage transform with the geometry
+ *  and the style reads the same at every zoom and stroke size. Undefined =
+ *  solid. Dotted relies on ROUND line caps to render dots (the canvas paints a
+ *  cap circle per zero-length dash). */
+export function dashFor(style: StrokeStyle | undefined, w: number): number[] | undefined {
+  if (style === "dashed") return [w * 3, w * 2];
+  if (style === "dotted") return [0.001, w * 2.5];
+  return undefined;
+}
 /** Stroke widths for shapes; for TEXT these same three slots mean small/medium/
  *  large font size (see {@link fontForStroke}). */
 export const STROKE_WIDTHS = [3, 6, 10] as const;
@@ -252,6 +270,7 @@ export function initialDrawState(doc?: DrawDoc, opts?: { color?: string }): Draw
     lineVariant: "arrow",
     color: opts?.color ?? CONTRAST_INK,
     strokeWidth: DEFAULT_STROKE_WIDTH,
+    strokeStyle: "solid",
     selectedIds: [],
     draftId: null,
     gestureBase: null,
@@ -1145,6 +1164,7 @@ export type DrawAction =
   | { type: "armCluster"; cluster: "shape" | "line" }
   | { type: "setColor"; color: string }
   | { type: "setStrokeWidth"; width: number }
+  | { type: "setStrokeStyle"; style: StrokeStyle }
   // Select shapes. Non-deep selects NORMALIZE: every id expands to its full root
   // unit (click + marquee + select-all all funnel here). `deep: true` (⌘-click on
   // a member) passes ids through raw — the deep-select context (a proper subset
@@ -1466,6 +1486,18 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         };
       }
       return { ...s, strokeWidth: a.width };
+    }
+    case "setStrokeStyle": {
+      // Mirrors setColor: live-restyle a draft, else the selection (undoable),
+      // else just the pref. Text/images carry no stroke outline to style.
+      const styled = (sh: Shape): Shape => (sh.type === "text" || sh.type === "image" ? sh : { ...sh, strokeStyle: a.style });
+      if (s.draftId) {
+        return { ...s, strokeStyle: a.style, shapes: mapShapes(s.shapes, new Set([s.draftId]), styled) };
+      }
+      if (s.selectedIds.length) {
+        return { ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), styled)), strokeStyle: a.style };
+      }
+      return { ...s, strokeStyle: a.style };
     }
     case "resizeCanvas":
       return { ...s, width: a.width, height: a.height };

@@ -20,6 +20,7 @@ import {
   BIND_DISTANCE,
   EDGE_TOUCH,
   CANVAS_BG_DARK,
+  dashFor,
   type DrawAction,
   type DrawState,
   type Shape,
@@ -175,7 +176,7 @@ export function DrawCanvas({
   newId: () => string;
 }) {
   const trRef = useRef<Konva.Transformer>(null);
-  const { tool, shapes, selectedIds, color, strokeWidth } = state;
+  const { tool, shapes, selectedIds, color, strokeWidth, strokeStyle } = state;
   const selected = new Set(selectedIds);
   const [marquee, setMarquee] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
@@ -684,17 +685,19 @@ export function DrawCanvas({
       return;
     }
     const id = newId();
+    // Solid is the absent default — only a non-solid style is stamped.
+    const style = strokeStyle !== "solid" ? { strokeStyle } : null;
     if (tool === "pen") {
-      dispatch({ type: "beginDraw", shape: { id, type: "pen", stroke: color, strokeWidth, points: [x, y] } });
+      dispatch({ type: "beginDraw", shape: { id, type: "pen", stroke: color, strokeWidth, ...style, points: [x, y] } });
     } else if (tool === "rect" || tool === "ellipse") {
-      dispatch({ type: "beginDraw", shape: { id, type: tool, stroke: color, strokeWidth, x, y, width: 0, height: 0 } });
+      dispatch({ type: "beginDraw", shape: { id, type: tool, stroke: color, strokeWidth, ...style, x, y, width: 0, height: 0 } });
     } else if (tool === "line" || tool === "arrow" || tool === "darrow") {
       // A double-arrow is a normal arrow shape flagged `doubleHead` (identical
       // geometry, a head at both ends in the view).
       const type = tool === "line" ? "line" : "arrow";
       dispatch({
         type: "beginDraw",
-        shape: { id, type, stroke: color, strokeWidth, points: [x, y, x, y], ...(tool === "darrow" && { doubleHead: true }) },
+        shape: { id, type, stroke: color, strokeWidth, ...style, points: [x, y, x, y], ...(tool === "darrow" && { doubleHead: true }) },
       });
     }
   };
@@ -879,6 +882,9 @@ export function DrawCanvas({
         const n = strokedNodeOf(e.target);
         if (n) {
           n.strokeWidth(n.strokeWidth() * vsRef.current);
+          // strokeScaleEnabled(false) renders the WHOLE stroke unscaled — the
+          // dash pattern too, so pin it in screen units alongside the width.
+          if (n.dash()?.length) n.dash(n.dash().map((d) => d * vsRef.current));
           n.strokeScaleEnabled(false);
         }
       }
@@ -897,6 +903,7 @@ export function DrawCanvas({
         if (n) {
           n.strokeScaleEnabled(true);
           n.strokeWidth(modelSw(sh)); // exactly the element's prop (see pin note)
+          n.dash(dashFor(sh.strokeStyle, modelSw(sh)) ?? []);
         }
       }
       bakeTransform(e, sh);
@@ -1140,6 +1147,10 @@ export function DrawCanvas({
       const want = floored ? MIN_STROKE_PX / vs : sh.strokeWidth;
       if (n.strokeWidth() !== want) {
         n.strokeWidth(want);
+        // The dash pattern is width-derived — ride the floored width so
+        // dashes/dots stay legible at the floor too.
+        const dash = dashFor(sh.strokeStyle, want);
+        if (dash) n.dash(dash);
         dirty = true;
       }
     }
@@ -1177,21 +1188,27 @@ export function DrawCanvas({
           // MODEL-unit width, floored for legibility (class doc) — the stage
           // transform applies the camera natively, no factor here.
           const sw = modelSw(sh);
+          // Dash pattern in the same model units (it scales with the geometry);
+          // derived from the RENDERED width so a floored stroke keeps a legible
+          // pattern too. Dotted needs round caps to paint dots — boxes opt in
+          // per style, open strokes are round-capped anyway.
+          const dash = dashFor(sh.strokeStyle, sw);
+          const dotCap = sh.strokeStyle === "dotted" ? ("round" as const) : undefined;
           switch (sh.type) {
             case "rect": {
               const b = viewBox(sh);
-              return <Rect key={sh.id} {...common(sh)} {...b} stroke={stroke} strokeWidth={sw} />;
+              return <Rect key={sh.id} {...common(sh)} {...b} stroke={stroke} strokeWidth={sw} dash={dash} lineCap={dotCap} />;
             }
             case "ellipse": {
               const b = viewBox(sh);
               return (
                 <Group key={sh.id} {...common(sh)} x={b.x} y={b.y}>
-                  <Ellipse x={b.width / 2} y={b.height / 2} radiusX={b.width / 2} radiusY={b.height / 2} stroke={stroke} strokeWidth={sw} />
+                  <Ellipse x={b.width / 2} y={b.height / 2} radiusX={b.width / 2} radiusY={b.height / 2} stroke={stroke} strokeWidth={sw} dash={dash} lineCap={dotCap} />
                 </Group>
               );
             }
             case "line":
-              return <Line key={sh.id} {...common(sh)} points={sh.points} stroke={stroke} strokeWidth={sw} lineCap="round" />;
+              return <Line key={sh.id} {...common(sh)} points={sh.points} stroke={stroke} strokeWidth={sw} dash={dash} lineCap="round" />;
             case "arrow":
               return (
                 <Arrow
@@ -1207,7 +1224,8 @@ export function DrawCanvas({
                   pointerLength={8 + sw}
                   pointerWidth={8 + sw}
                   pointerAtBeginning={sh.doubleHead}
-                 
+                  dash={dash}
+                  lineCap={dotCap}
                 />
               );
             case "pen":
@@ -1218,10 +1236,11 @@ export function DrawCanvas({
                   points={sh.points}
                   stroke={stroke}
                   strokeWidth={sw}
+                  dash={dash}
                   lineCap="round"
                   lineJoin="round"
                   tension={0.4}
-                 
+
                 />
               );
             case "text":
