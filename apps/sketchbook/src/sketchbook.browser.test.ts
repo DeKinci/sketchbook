@@ -76,6 +76,33 @@ async function drawStroke(page: Page, from: { x: number; y: number }, to: { x: n
   await page.mouse.up();
 }
 
+type SeedShape = Record<string, unknown>;
+const rect = (id: string, x: number, y: number, width = 80, height = 60, over: SeedShape = {}): SeedShape => ({
+  id,
+  type: "rect",
+  stroke: "#e5484d",
+  strokeWidth: 3,
+  x,
+  y,
+  width,
+  height,
+  ...over,
+});
+
+/** Boot the app on a seeded single-drawing store (precise geometry beats
+ *  fragile mouse-drawing for glue/scale assertions). */
+async function openSeeded(page: Page, shapes: SeedShape[]) {
+  await page.addInitScript((list: SeedShape[]) => {
+    window.localStorage.setItem(
+      "sketchbook:drawings",
+      JSON.stringify([{ id: "seeded", name: "Seeded", doc: { shapes: list, width: 800, height: 600 }, createdAt: 1 }])
+    );
+  }, shapes);
+  await open(page);
+  // Select tool (the board opens in pen — a stray drag must not ink).
+  await page.getByRole("button", { name: "Cursor — select / move (Tab)" }).click();
+}
+
 test("the full story: open → create+name → rename → draw → reload persists → switch isolates docs", async ({ page }) => {
   await open(page);
 
@@ -364,35 +391,92 @@ test.describe("clipboard fallback", () => {
   });
 });
 
+test.describe("stroke rendering", () => {
+  test("strokes are zoom-true (screen width = model × scale, floored at 1px); exports stay zoom-independent", async ({ page }) => {
+    test.setTimeout(60_000);
+    await openSeeded(page, [rect("r", 340, 240, 120, 80, { strokeWidth: 4 })]);
+
+    /** The RENDERED Konva node's stroke width + the live camera scale. */
+    const nodeSw = () =>
+      page.evaluate(() => {
+        const s = (window as unknown as { Konva: { stages: { scaleX(): number; findOne(sel: string): { strokeWidth(): number } }[] } }).Konva.stages.at(-1)!;
+        return { sw: s.findOne("#r").strokeWidth(), scale: s.scaleX() };
+      });
+
+    // Wherever the camera opens, the on-screen width is model width × scale.
+    await expect
+      .poll(async () => {
+        const { sw, scale } = await nodeSw();
+        return Math.abs(sw - Math.max(1, 4 * scale));
+      })
+      .toBeLessThan(1e-6);
+
+    // Zoom out twice: the stroke thins WITH the camera (a screen-constant
+    // stroke — the old behavior — would sit at 4 forever).
+    await page.getByRole("button", { name: "Zoom out" }).click();
+    await page.getByRole("button", { name: "Zoom out" }).click();
+    await expect.poll(async () => (await nodeSw()).sw).toBeLessThan(3.9);
+    let st = await nodeSw();
+    expect(st.sw).toBeCloseTo(Math.max(1, 4 * st.scale), 5);
+
+    // Deep zoom-out: the width floors at 1 screen px instead of thinning away.
+    for (let i = 0; i < 12; i++) await page.getByRole("button", { name: "Zoom out" }).click();
+    await expect.poll(async () => (await nodeSw()).scale).toBeLessThan(0.25);
+    st = await nodeSw();
+    expect(st.sw).toBe(1);
+
+    // Export while zoomed way out: the PNG renders strokes at the EXPORT scale
+    // (model width × s, s=2 for a sketch) — independent of the live zoom and
+    // its legibility floor. Deny the clipboard so Copy as PNG downloads.
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        value: { write: () => Promise.reject(new DOMException("denied", "NotAllowedError")) },
+        configurable: true,
+      });
+    });
+    const downloadP = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Copy as PNG" }).click();
+    const file = await downloadP;
+    const b64 = fs.readFileSync((await file.path())!).toString("base64");
+    // Scan the raster's horizontal centerline for red-ink runs: the rect's two
+    // vertical edges, each strokeWidth(4) × exportScale(2) = 8px wide.
+    const runs = await page.evaluate(async (png: string) => {
+      const img = new Image();
+      img.src = "data:image/png;base64," + png;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+      const row = ctx.getImageData(0, Math.round(img.height / 2), img.width, 1).data;
+      const out: number[] = [];
+      let run = 0;
+      for (let x = 0; x < img.width; x++) {
+        const ink = row[x * 4] > 140 && row[x * 4] - row[x * 4 + 1] > 60; // #e5484d on the dark board
+        if (ink) run++;
+        else if (run) {
+          out.push(run);
+          run = 0;
+        }
+      }
+      if (run) out.push(run);
+      return out;
+    }, b64);
+    expect(runs.length).toBe(2);
+    for (const r of runs) {
+      expect(r).toBeGreaterThan(6);
+      expect(r).toBeLessThan(10);
+    }
+
+    // And the export restored the LIVE widths (still floored at this zoom).
+    st = await nodeSw();
+    expect(st.sw).toBe(1);
+  });
+});
+
 test.describe("shape grouping (⌘G end-to-end)", () => {
   test.use({ permissions: ["clipboard-read", "clipboard-write"] });
-
-  type SeedShape = Record<string, unknown>;
-  const rect = (id: string, x: number, y: number, width = 80, height = 60, over: SeedShape = {}): SeedShape => ({
-    id,
-    type: "rect",
-    stroke: "#e5484d",
-    strokeWidth: 3,
-    x,
-    y,
-    width,
-    height,
-    ...over,
-  });
-
-  /** Boot the app on a seeded single-drawing store (precise geometry beats
-   *  fragile mouse-drawing for glue/scale assertions). */
-  async function openSeeded(page: Page, shapes: SeedShape[]) {
-    await page.addInitScript((list: SeedShape[]) => {
-      window.localStorage.setItem(
-        "sketchbook:drawings",
-        JSON.stringify([{ id: "seeded", name: "Seeded", doc: { shapes: list, width: 800, height: 600 }, createdAt: 1 }])
-      );
-    }, shapes);
-    await open(page);
-    // Select tool (the board opens in pen — a stray drag must not ink).
-    await page.getByRole("button", { name: "Cursor — select / move (Tab)" }).click();
-  }
 
   /** Logical→screen through the live camera (the board may open fitted). */
   async function toScreen(page: Page, pt: { x: number; y: number }) {

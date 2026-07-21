@@ -69,6 +69,11 @@ function viewBox(b: BoxShape) {
 
 const clampN = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
+/** Content strokes never render thinner than this many SCREEN px — a
+ *  legibility floor for deep zoom-out (ink must not thin into invisibility).
+ *  Exports ignore it: it's a screen aid, not part of the artwork. */
+const MIN_STROKE_PX = 1;
+
 /**
  * The Konva stage: fills its container and renders the shapes through the camera
  * (`view` = pan/zoom; screen = logical·scale + offset), turns pointer gestures
@@ -82,6 +87,12 @@ const clampN = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, 
  * SCREEN-consistent at any zoom. Selection chrome (outlines, marquee, glow) is
  * likewise drawn at constant screen width. Konva's Transformer already works in
  * absolute coordinates (its anchors don't scale with the stage).
+ *
+ * Content strokes are the opposite — ZOOM-TRUE: on-screen width = model width ×
+ * camera scale, floored at {@link MIN_STROKE_PX}. They stay in screen space
+ * (strokeScaleEnabled:false) only so the Transformer's live node scale never
+ * thickens outlines mid-resize; the camera factor is applied by hand (see
+ * `strokeVs`).
  */
 export function DrawCanvas({
   state,
@@ -828,8 +839,10 @@ export function DrawCanvas({
     // per-frame draw work. The Transformer still finds nodes by id (findOne
     // ignores listening) and its own handles stay listening.
     listening: false,
-    // Keep the stroke a constant width when the Transformer scales a shape —
-    // otherwise resizing thickens the outline (Konva scales strokes by default).
+    // Strokes render in SCREEN space: the zoom-true width is applied by hand in
+    // buildShapeEl (model width × settled camera scale, floored), while the
+    // TRANSFORMER's live node scale never thickens outlines mid-resize (Konva
+    // would scale strokes with it by default).
     strokeScaleEnabled: false,
     onTransformStart: () => dispatch({ type: "beginGesture" }),
     // Live: reflow attached/bound shapes against the ghost box so they follow
@@ -1057,25 +1070,36 @@ export function DrawCanvas({
       })()
     : null;
 
+  // Zoom-true strokes bake the camera scale into elements — but only the
+  // SETTLED scale: while any gesture is live the value freezes, so mid-gesture
+  // frames keep their element identity (never an O(N) rebuild per wheel frame —
+  // the bitmap cache scales strokes along visually) and the settle redraw picks
+  // up the final scale.
+  const strokeVsRef = useRef(vs);
+  if (!camGesture && !contentGesture) strokeVsRef.current = vs;
+  const strokeVs = strokeVsRef.current;
+
   // Shape + label elements, cached PER SHAPE OBJECT (the reducer preserves the
   // identity of untouched shapes): a pen point or a one-shape drag rebuilds ONE
   // element, not N. The cache epoch resets when anything cross-cutting shifts —
   // the raster backdrop (adaptive ink resamples), image decodes, edit/crop
-  // hides — trading one full rebuild for correctness. Camera pans/zooms don't
-  // touch elements at all (live values read through refs).
+  // hides, a zoom settling (strokes re-derive) — trading one full rebuild for
+  // correctness. Mid-gesture camera pans/zooms don't touch elements at all
+  // (live values read through refs).
   const shapeElCache = useRef(new WeakMap<Shape, React.ReactElement | null>());
   const labelElCache = useRef(new WeakMap<Shape, React.ReactElement | null>());
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useMemo(() => {
     shapeElCache.current = new WeakMap();
     labelElCache.current = new WeakMap();
-  }, [imgEls, imgSig, bgImage, editingId, editingLabelId, croppingId, lumEpoch]);
+  }, [imgEls, imgSig, bgImage, editingId, editingLabelId, croppingId, lumEpoch, strokeVs]);
   const buildShapeEl = (sh: Shape): React.ReactElement | null => {
           if (sh.id === editingId && sh.type === "text") return null; // hidden under the textarea
           // Adaptive ink resolves to a solid color contrasting the background
           // under the shape; other scribbles never affect it.
           const stroke = inkFor(sh);
-          const sw = sh.strokeWidth;
+          // Zoom-true screen width, floored for legibility (class doc).
+          const sw = Math.max(MIN_STROKE_PX, sh.strokeWidth * strokeVs);
           switch (sh.type) {
             case "rect": {
               const b = viewBox(sh);
@@ -1100,8 +1124,12 @@ export function DrawCanvas({
                   stroke={stroke}
                   fill={stroke}
                   strokeWidth={sw}
-                  pointerLength={8 + sw}
-                  pointerWidth={8 + sw}
+                  // Pointer geometry is LOGICAL (it scales with the camera), so
+                  // size it from the floored width in logical units — above the
+                  // floor that's exactly sh.strokeWidth; below it the head
+                  // floors along with the tail.
+                  pointerLength={8 + sw / strokeVs}
+                  pointerWidth={8 + sw / strokeVs}
                   pointerAtBeginning={sh.doubleHead}
                  
                 />
@@ -1139,9 +1167,9 @@ export function DrawCanvas({
     });
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const staticShapeNodes = useMemo(() => nodesFor(staticShapes), [staticShapes, imgEls, editingId, croppingId]);
+  const staticShapeNodes = useMemo(() => nodesFor(staticShapes), [staticShapes, imgEls, editingId, croppingId, strokeVs]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const dynamicShapeNodes = useMemo(() => nodesFor(dynamicShapes), [dynamicShapes, imgEls, editingId, croppingId]);
+  const dynamicShapeNodes = useMemo(() => nodesFor(dynamicShapes), [dynamicShapes, imgEls, editingId, croppingId, strokeVs]);
   const buildLabelEl = (sh: Shape): React.ReactElement | null => {
     return ((sh) => {
         if (!sh.label || sh.id === editingLabelId) return null;

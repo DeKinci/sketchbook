@@ -65,6 +65,21 @@ export async function exportStagePng(stage: Konva.Stage, doc: DrawDoc, name: str
     width: stage.width(),
     height: stage.height(),
   };
+  // Content strokes render in SCREEN space (DrawCanvas: strokeScaleEnabled:false
+  // + width × camera scale, floored for zoomed-out legibility). The export
+  // transform is its own "camera", so drive each stroke to its proportional
+  // width at the export scale — model width × s, WITHOUT the floor (a screen
+  // aid, not part of the artwork) — and restore the live widths after.
+  const strokeOverrides: Array<{ node: Konva.Shape; live: number }> = [];
+  for (const sh of doc.shapes) {
+    if (sh.type === "text" || sh.type === "image") continue; // no stroked outline
+    const found = stage.findOne<Konva.Node>(`#${sh.id}`);
+    // An ellipse's id sits on its positioning Group; the stroked node is inside.
+    const node = found?.getClassName?.() === "Group" ? (found as Konva.Group).findOne<Konva.Shape>("Ellipse") : (found as Konva.Shape | undefined);
+    if (!node) continue;
+    strokeOverrides.push({ node, live: node.strokeWidth() });
+    node.strokeWidth(sh.strokeWidth * s);
+  }
   try {
     stage.scale({ x: s, y: s });
     stage.position({ x: -crop.x * s, y: -crop.y * s });
@@ -76,6 +91,7 @@ export async function exportStagePng(stage: Konva.Stage, doc: DrawDoc, name: str
     if (!blob) throw new Error("the browser could not render the export (canvas too large?)");
     return new File([blob], name, { type: "image/png" });
   } finally {
+    for (const { node, live } of strokeOverrides) node.strokeWidth(live);
     stage.scale({ x: prev.scaleX, y: prev.scaleY });
     stage.position({ x: prev.x, y: prev.y });
     stage.size({ width: prev.width, height: prev.height });
