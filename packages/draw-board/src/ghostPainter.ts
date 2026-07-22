@@ -3,7 +3,7 @@
  * minimap and doc thumbnails (sidebar hover previews). Draws in LOGICAL
  * coordinates; the caller owns the transform and line width.
  */
-import { boundingBox, contentBounds, isContrastInk, isEnclosed, isNoStroke, textBgBox, CANVAS_BG_DARK, type DrawDoc, type Shape } from "./drawModel.ts";
+import { boundingBox, contentBounds, diamondPoints, isContrastInk, isEnclosed, isNoStroke, textBgBox, CANVAS_BG_DARK, type DrawDoc, type Shape } from "./drawModel.ts";
 import { fitView, padBox, type Size } from "./viewport.ts";
 
 /** Ghost color for the adaptive contrast ink (ghosts sit on a dark ground). */
@@ -47,6 +47,14 @@ export function paintShapeGhosts(ctx: CanvasRenderingContext2D, shapes: readonly
       const b = boundingBox(sh);
       ctx.beginPath();
       ctx.ellipse(b.x + b.width / 2, b.y + b.height / 2, b.width / 2, b.height / 2, 0, 0, Math.PI * 2);
+      if (sh.fill) wash(sh.fill, () => ctx.fill());
+      ctx.stroke();
+    } else if (sh.type === "diamond") {
+      const p = diamondPoints(boundingBox(sh));
+      ctx.beginPath();
+      ctx.moveTo(p[0], p[1]);
+      for (let i = 2; i + 1 < p.length; i += 2) ctx.lineTo(p[i], p[i + 1]);
+      ctx.closePath();
       if (sh.fill) wash(sh.fill, () => ctx.fill());
       ctx.stroke();
     } else {

@@ -13,7 +13,7 @@
  * {@link SVG_META_ID}, making the file re-importable as a full board — the SVG
  * sibling of the PNG iTXt chunk.
  */
-import { boundingBox, contrastSolidOver, dashFor, fillAt, isContrastInk, isEnclosed, isNoStroke, paintOrder, textBgBox, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
+import { boundingBox, contrastSolidOver, dashFor, diamondPoints, fillAt, isContrastInk, isEnclosed, isNoStroke, paintOrder, textBgBox, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
 import { wrapLines } from "./textMetrics.ts";
 import { BOARD_FONT_STACK } from "./boardFont.ts";
 import { contentCropLogical } from "./exportPng.ts";
@@ -82,6 +82,11 @@ function shapeSvg(sh: Shape, shapes: Shape[]): string {
     case "ellipse": {
       const b = boundingBox(sh);
       return `<ellipse cx="${num(b.x + b.width / 2)}" cy="${num(b.y + b.height / 2)}" rx="${num(b.width / 2)}" ry="${num(b.height / 2)}" fill="${sh.fill ?? "none"}" stroke="${color}" stroke-width="${sw}"${dash}${boxCap}/>`;
+    }
+    case "diamond": {
+      const p = diamondPoints(boundingBox(sh));
+      const pts = [0, 2, 4, 6].map((i) => `${num(p[i])},${num(p[i + 1])}`).join(" ");
+      return `<polygon points="${pts}" fill="${sh.fill ?? "none"}" stroke="${color}" stroke-width="${sw}" stroke-linejoin="round"${dash}${boxCap}/>`;
     }
     case "line": {
       const [x1, y1, x2, y2] = sh.points;

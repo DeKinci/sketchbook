@@ -100,8 +100,24 @@ describe("exportSvg", () => {
     expect(svg).toMatch(/<rect[^>]*fill="#f19a9d"[^>]*stroke="none"/);
   });
 
+  it("diamond exports a polygon on the box's edge midpoints; fill/dash ride like any box", () => {
+    const svg = exportSvg(
+      doc([
+        { id: "d", type: "diamond", stroke: "#3b82f6", strokeWidth: 3, x: 100, y: 100, width: 60, height: 40, fill: "#f5a623" } as Shape,
+        { id: "dd", type: "diamond", stroke: "#e5484d", strokeWidth: 3, x: 300, y: 100, width: 40, height: 40, strokeStyle: "dashed" } as Shape,
+      ])
+    );
+    expect(svg).toContain('<polygon points="130,100 160,120 130,140 100,120"'); // top→right→bottom→left midpoints
+    expect(svg).toMatch(/<polygon[^>]*fill="#f5a623"[^>]*stroke="#3b82f6"/);
+    expect(svg).toMatch(/<polygon points="320,100[^>]*stroke-dasharray="9 6"/); // styling applies
+  });
+
   it("rich round-trip: readSvgDoc returns the exact doc; slim has no metadata", () => {
-    const d = doc([rect("r"), { id: "t", type: "text", stroke: "contrast", strokeWidth: 3, x: 1, y: 2, text: 'q"uote', fontSize: 18 } as Shape]);
+    const d = doc([
+      rect("r"),
+      { id: "dm", type: "diamond", stroke: "#30a46c", strokeWidth: 3, x: 5, y: 6, width: 30, height: 20 } as Shape,
+      { id: "t", type: "text", stroke: "contrast", strokeWidth: 3, x: 1, y: 2, text: 'q"uote', fontSize: 18 } as Shape,
+    ]);
     expect(readSvgDoc(exportSvg(d))).toEqual(d);
     const slim = exportSvg(d, { rich: false });
     expect(slim).not.toContain("<metadata");

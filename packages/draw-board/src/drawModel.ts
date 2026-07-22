@@ -11,11 +11,18 @@
 
 import { textBlockSize } from "./textMetrics.ts";
 
-export const TOOLS = ["select", "pen", "rect", "ellipse", "line", "arrow", "darrow", "text", "eraser"] as const;
+export const TOOLS = ["select", "pen", "rect", "ellipse", "diamond", "line", "arrow", "darrow", "text", "eraser"] as const;
 export type Tool = (typeof TOOLS)[number];
 
 /** Tools that place a shape by dragging (not select/text/eraser). */
-export const DRAW_TOOLS: readonly Tool[] = ["pen", "rect", "ellipse", "line", "arrow", "darrow"];
+export const DRAW_TOOLS: readonly Tool[] = ["pen", "rect", "ellipse", "diamond", "line", "arrow", "darrow"];
+
+/** Every shape KIND a host can enable/disable ({@link DrawFeatures.shapes}) —
+ *  the drag-drawn tools plus text. Select/eraser are board verbs, not shapes,
+ *  and are never gated. */
+export const SHAPE_TOOLS = ["pen", "rect", "ellipse", "diamond", "line", "arrow", "darrow", "text"] as const satisfies readonly Tool[];
+export type ShapeTool = (typeof SHAPE_TOOLS)[number];
+export const isShapeTool = (t: Tool): t is ShapeTool => (SHAPE_TOOLS as readonly Tool[]).includes(t);
 
 /** A shape attached to ONE parent shape (edge/corner-touching). The edge is STORED
  *  single-parent (child→parent) but is SEMANTICALLY UNDIRECTED for propagation:
@@ -77,12 +84,13 @@ export interface BaseShape {
    *  not the control steps); group/ungroup strip it (natural rebases). */
   sizeStep?: number;
 }
-/** Rect + ellipse share an axis-aligned bounding box {x,y,width,height}. The
- *  view converts an ellipse box to Konva's center+radii; keeping the box form
- *  here makes both uniform and resize trivial. width/height may be negative
+/** Rect + ellipse + diamond share an axis-aligned bounding box {x,y,width,height}.
+ *  The view converts an ellipse box to Konva's center+radii and a diamond to its
+ *  four edge-midpoint vertices ({@link diamondPoints}); keeping the box form here
+ *  makes all three uniform and resize trivial. width/height may be negative
  *  mid-draw (dragged up/left) — `normalizeBox` fixes sign at commit. */
 export interface BoxShape extends BaseShape {
-  type: "rect" | "ellipse";
+  type: "rect" | "ellipse" | "diamond";
   x: number;
   y: number;
   width: number;
@@ -177,10 +185,10 @@ export const isSelectable = (t: Tool) => t === "select" || t === "pen";
 
 /** The one-use CLUSTER tools. Each cluster owns one toolbar button + number key:
  *  arming it selects the cluster's LAST-USED variant; arming again while already
- *  armed cycles to the next variant (rect⇄ellipse, line→arrow→double-arrow). Drawing
- *  snaps the tool back to `baseTool`, but the remembered variant persists (see
- *  {@link DrawState.shapeVariant}/`lineVariant` + the `armCluster` action). */
-export const SHAPE_VARIANTS = ["rect", "ellipse"] as const;
+ *  armed cycles to the next variant (rect→ellipse→diamond, line→arrow→double-arrow).
+ *  Drawing snaps the tool back to `baseTool`, but the remembered variant persists
+ *  (see {@link DrawState.shapeVariant}/`lineVariant` + the `armCluster` action). */
+export const SHAPE_VARIANTS = ["rect", "ellipse", "diamond"] as const;
 export const LINE_VARIANTS = ["line", "arrow", "darrow"] as const;
 export type ShapeVariant = (typeof SHAPE_VARIANTS)[number];
 export type LineVariant = (typeof LINE_VARIANTS)[number];
@@ -339,28 +347,43 @@ export function visibleHueFamilies(size: number): HueFamily[] {
  *    keys). Off: everything draws the default width, solid.
  *  - `grouping`: the group/ungroup control + ⌘G. Existing groups in a loaded
  *    doc still select/move as units (the data stays portable); only
- *    making/dissolving groups is removed. */
+ *    making/dissolving groups is removed.
+ *  - `shapes`: which shape tools the board mounts ({@link SHAPE_TOOLS} —
+ *    drag-drawn kinds + text; select/eraser are never gated). A disabled kind
+ *    loses its toolbar button/key and can't be armed or retyped-to, but shapes
+ *    of that kind in a loaded doc still render/select/move (portability, like
+ *    grouping). An explicit empty list is honored: a board with no creation
+ *    tools at all (view/prune-only). */
 export interface DrawFeatures {
   paletteSize: number;
   fills: boolean;
   strokeStyling: boolean;
   grouping: boolean;
+  shapes: readonly ShapeTool[];
 }
 export const MAX_PALETTE = HUE_FAMILIES.length;
-export const DEFAULT_FEATURES: DrawFeatures = { paletteSize: 4, fills: true, strokeStyling: true, grouping: true };
+export const DEFAULT_FEATURES: DrawFeatures = { paletteSize: 4, fills: true, strokeStyling: true, grouping: true, shapes: SHAPE_TOOLS };
 /** Resolve a host's partial config: clamp the palette to 1..MAX_PALETTE,
  *  default everything else on. Size 1 implies fills off (no lane → nothing
- *  can arm a fill), so downstream checks read one flag each. */
+ *  can arm a fill), so downstream checks read one flag each. `shapes` is
+ *  sanitized to known kinds, deduped, canonical order; garbage-only input
+ *  falls back to all (like an unparsable paletteSize) while a literal empty
+ *  list stays empty (a deliberate no-creation board). */
 export function resolveFeatures(f?: Partial<DrawFeatures> | null): DrawFeatures {
   const size =
     typeof f?.paletteSize === "number" && Number.isFinite(f.paletteSize)
       ? Math.max(1, Math.min(MAX_PALETTE, Math.round(f.paletteSize)))
       : DEFAULT_FEATURES.paletteSize;
+  const rawShapes = Array.isArray(f?.shapes) ? f.shapes : null;
+  const known = new Set((rawShapes ?? []).filter((t): t is ShapeTool => isShapeTool(t as Tool)));
+  const shapes =
+    rawShapes === null || (known.size === 0 && rawShapes.length > 0) ? SHAPE_TOOLS : SHAPE_TOOLS.filter((t) => known.has(t));
   return {
     paletteSize: size,
     fills: size > 1 && (f?.fills ?? DEFAULT_FEATURES.fills),
     strokeStyling: f?.strokeStyling ?? DEFAULT_FEATURES.strokeStyling,
     grouping: f?.grouping ?? DEFAULT_FEATURES.grouping,
+    shapes,
   };
 }
 
@@ -485,6 +508,7 @@ export function paintsFill(sh: Shape): boolean {
   switch (sh.type) {
     case "rect":
     case "ellipse":
+    case "diamond":
     case "text":
       return !!sh.fill;
     case "pen":
@@ -498,7 +522,7 @@ export function paintsFill(sh: Shape): boolean {
  *  {@link paintsFill} is the painted-now check). Single source for setFill,
  *  refill, and the declaration derivation. */
 export function isFillable(sh: Shape): sh is BoxShape | FreehandShape | TextShape {
-  return sh.type === "rect" || sh.type === "ellipse" || sh.type === "pen" || sh.type === "text";
+  return sh.type === "rect" || sh.type === "ellipse" || sh.type === "diamond" || sh.type === "pen" || sh.type === "text";
 }
 
 /** Set / strip one shape's fill (null STRIPS the field — persisted docs stay
@@ -527,14 +551,16 @@ export function fillAt(shapes: Shape[], px: number, py: number): string | null {
         continue;
       case "rect":
       case "ellipse":
+      case "diamond":
       case "text": {
         if (!sh.fill) continue;
         const b = sh.type === "text" ? textBgBox(sh) : boundingBox(sh);
         if (px < b.x || px > b.x + b.width || py < b.y || py > b.y + b.height) continue;
-        if (sh.type === "ellipse") {
-          const nx = (px - (b.x + b.width / 2)) / (b.width / 2 || 1);
-          const ny = (py - (b.y + b.height / 2)) / (b.height / 2 || 1);
-          if (nx * nx + ny * ny > 1) continue;
+        if (sh.type === "ellipse" || sh.type === "diamond") {
+          // Precise interiors — the fill doesn't reach the box corners.
+          const nx = Math.abs(px - (b.x + b.width / 2)) / (b.width / 2 || 1);
+          const ny = Math.abs(py - (b.y + b.height / 2)) / (b.height / 2 || 1);
+          if ((sh.type === "ellipse" ? nx * nx + ny * ny : nx + ny) > 1) continue;
         }
         return sh.fill;
       }
@@ -672,6 +698,15 @@ export function initialDrawState(
     state.color = base.color; // the editor's default ink IS the single color
     state.strokeSpecial = CONTRAST_INK;
   }
+  // Disabled shape tools leave no armed state behind either: the active/base
+  // tool and both cluster memories must all point at kinds THIS board can
+  // draw (a restored session may be wider than the config).
+  if (!features.shapes.includes("pen") && state.baseTool === "pen") state.baseTool = "select";
+  if (isShapeTool(state.tool) && !features.shapes.includes(state.tool)) state.tool = state.baseTool;
+  const shapeVars = SHAPE_VARIANTS.filter((v) => features.shapes.includes(v));
+  if (shapeVars.length > 0 && !shapeVars.includes(state.shapeVariant)) state.shapeVariant = shapeVars[0];
+  const lineVars = LINE_VARIANTS.filter((v) => features.shapes.includes(v));
+  if (lineVars.length > 0 && !lineVars.includes(state.lineVariant)) state.lineVariant = lineVars[0];
   return state;
 }
 
@@ -725,12 +760,22 @@ export function normalizeBox(b: BoxShape): BoxShape {
   return { ...b, x, y, width: Math.abs(b.width), height: Math.abs(b.height) };
 }
 
+/** A box's inscribed diamond — its four edge-midpoint vertices (top, right,
+ *  bottom, left) as a flat closed-polygon point list. The ONE diamond geometry
+ *  every renderer (Konva / SVG / raster samplers) shares. */
+export function diamondPoints(b: { x: number; y: number; width: number; height: number }): number[] {
+  const cx = b.x + b.width / 2;
+  const cy = b.y + b.height / 2;
+  return [cx, b.y, b.x + b.width, cy, cx, b.y + b.height, b.x, cy];
+}
+
 /** Axis-aligned bounding box of any shape (used for marquee + selection outline).
  *  Text width is approximated from character count (we don't measure glyphs). */
 export function boundingBox(sh: Shape): { x: number; y: number; width: number; height: number } {
   switch (sh.type) {
     case "rect":
-    case "ellipse": {
+    case "ellipse":
+    case "diamond": {
       const b = normalizeBox(sh);
       return { x: b.x, y: b.y, width: b.width, height: b.height };
     }
@@ -838,7 +883,7 @@ export function shapesInMarquee(shapes: Shape[], marquee: { x: number; y: number
 }
 
 /** Area shapes an arrow/line can bind to, and that can "contain" other shapes. */
-const CONTAINER_TYPES = new Set(["rect", "ellipse", "image", "text"]);
+const CONTAINER_TYPES = new Set(["rect", "ellipse", "diamond", "image", "text"]);
 export const BIND_DISTANCE = 22;
 
 /** Segment connectors (line/arrow) connect via `bindStart`/`bindEnd` — they NEVER
@@ -856,8 +901,9 @@ const shapeCenter = (sh: Shape) => {
 };
 
 /** Distance from a shape's center to its border along direction `dir` — a
- *  rectangle's edges for rect/image/text, the ellipse curve for ellipse. Lets a
- *  bound endpoint cling to the actual border as it rotates (not a circle). */
+ *  rectangle's edges for rect/image/text, the ellipse curve for ellipse, the
+ *  rhombus edges for diamond. Lets a bound endpoint cling to the actual border
+ *  as it rotates (not a circle). */
 function borderDist(sh: Shape, dir: number): number {
   const b = boundingBox(sh);
   const hx = b.width / 2;
@@ -867,6 +913,11 @@ function borderDist(sh: Shape, dir: number): number {
     const c = Math.cos(dir) / hx;
     const s = Math.sin(dir) / hy;
     const denom = Math.hypot(c, s);
+    return denom > 1e-9 ? 1 / denom : Math.max(hx, hy);
+  }
+  if (sh.type === "diamond") {
+    // Rhombus |x|/hx + |y|/hy = 1 → the ray hits it at 1/(|cos|/hx + |sin|/hy).
+    const denom = Math.abs(Math.cos(dir)) / hx + Math.abs(Math.sin(dir)) / hy;
     return denom > 1e-9 ? 1 / denom : Math.max(hx, hy);
   }
   const c = Math.abs(Math.cos(dir));
@@ -1087,7 +1138,9 @@ export function attachAt(child: Shape, shapes: Shape[], distScale = 1): Attach |
   }
   if (!best) return undefined;
   const b = boundingBox(best);
-  if (best.type === "ellipse") {
+  if (best.type === "ellipse" || best.type === "diamond") {
+    // Angled borders → radial anchors (box side/corner anchors assume
+    // rectangular edges); borderDist casts to the actual curve/rhombus.
     const c = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
     const angle = Math.atan2(cc.y - c.y, cc.x - c.x);
     return { id: best.id, kind: "radial", angle, gap: Math.hypot(cc.x - c.x, cc.y - c.y) - borderDist(best, angle) };
@@ -1211,30 +1264,30 @@ export function clusterWeight(sh: Shape): number {
   return b.width * b.height;
 }
 
-/** Which one-use cluster a shape belongs to (rect/ellipse → "shape";
+/** Which one-use cluster a shape belongs to (rect/ellipse/diamond → "shape";
  *  line/arrow → "line"), or null for pen/text/image. */
 export function clusterOf(sh: Shape): "shape" | "line" | null {
-  if (sh.type === "rect" || sh.type === "ellipse") return "shape";
+  if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "diamond") return "shape";
   if (sh.type === "line" || sh.type === "arrow") return "line";
   return null;
 }
 
-/** A cluster shape's VARIANT identity — rect/ellipse, or line/arrow/darrow (a
- *  double-headed arrow is an `arrow` flagged `doubleHead`). Null if not a cluster
+/** A cluster shape's VARIANT identity — rect/ellipse/diamond, or line/arrow/darrow
+ *  (a double-headed arrow is an `arrow` flagged `doubleHead`). Null if not a cluster
  *  shape. Used to drive selection retyping via the cluster tools. */
 export function variantOf(sh: Shape): ShapeVariant | LineVariant | null {
-  if (sh.type === "rect" || sh.type === "ellipse") return sh.type;
+  if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "diamond") return sh.type;
   if (sh.type === "line") return "line";
   if (sh.type === "arrow") return sh.doubleHead ? "darrow" : "arrow";
   return null;
 }
 
 /** Convert a cluster shape to another variant of the SAME cluster, preserving all
- *  geometry + metadata: rect↔ellipse swap `type` (identical box); line/arrow/darrow
- *  swap `type` + `doubleHead` (points/bindings ride along). The caller guarantees
- *  `target` belongs to `sh`'s cluster. */
+ *  geometry + metadata: rect/ellipse/diamond swap `type` (identical box);
+ *  line/arrow/darrow swap `type` + `doubleHead` (points/bindings ride along). The
+ *  caller guarantees `target` belongs to `sh`'s cluster. */
 export function toClusterVariant(sh: Shape, target: ShapeVariant | LineVariant): Shape {
-  if (target === "rect" || target === "ellipse") return { ...(sh as BoxShape), type: target };
+  if (target === "rect" || target === "ellipse" || target === "diamond") return { ...(sh as BoxShape), type: target };
   if (target === "darrow") return { ...(sh as SegmentShape), type: "arrow", doubleHead: true };
   const { doubleHead: _drop, ...rest } = sh as SegmentShape;
   return { ...rest, type: target }; // "line" | "arrow" (no head-at-start)
@@ -1495,7 +1548,7 @@ function resizeGhost(
   if (!S) return { ghost: shapes, synthesized };
   let ghost = shapes.map((sh) => {
     if (sh.id !== id) return sh;
-    if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "image") {
+    if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "diamond" || sh.type === "image") {
       return { ...sh, x: box.x, y: box.y, width: box.width, height: box.height } as Shape;
     }
     return sh; // text: no box field — its bbox already reflects the patch
@@ -1598,6 +1651,7 @@ function scaleMemberFrom(base: Shape, memberIds: Set<string>, factor: number, or
   switch (base.type) {
     case "rect":
     case "ellipse":
+    case "diamond":
     case "image":
       out = { ...base, x: px(base.x), y: py(base.y), width: base.width * factor, height: base.height * factor };
       break;
@@ -1645,6 +1699,7 @@ function stretchMemberFrom(base: Shape, fx: number, fy: number, origin: { x: num
   switch (base.type) {
     case "rect":
     case "ellipse":
+    case "diamond":
     case "image": {
       return { ...base, x: px(base.x), y: py(base.y), width: base.width * fx, height: base.height * fy };
     }
@@ -1721,7 +1776,7 @@ function scaleDormant(d: DormantEdge, factor: number): DormantEdge {
 
 export type DrawAction =
   | { type: "setTool"; tool: Tool }
-  // Arm a one-use cluster (shape = rect/ellipse, line = line/arrow/double-arrow):
+  // Arm a one-use cluster (shape = rect/ellipse/diamond, line = line/arrow/double-arrow):
   // select its last-used variant, or — if this cluster is already the active tool —
   // cycle to the next variant. One key/button both selects and switches.
   | { type: "armCluster"; cluster: "shape" | "line" }
@@ -2057,16 +2112,25 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       // Leaving select drops the selection (its handles shouldn't linger while
       // drawing). Picking a selectable tool remembers it as the snap-back base;
       // picking a cluster variant directly updates that cluster's memory.
+      // A shape kind the host opted out of can't be armed (feature re-guard —
+      // the UI already hides its button/key).
+      if (isShapeTool(a.tool) && !s.features.shapes.includes(a.tool)) return s;
       return {
         ...s,
         tool: a.tool,
         baseTool: isSelectable(a.tool) ? a.tool : s.baseTool,
         selectedIds: a.tool === "select" ? s.selectedIds : [],
-        shapeVariant: a.tool === "rect" || a.tool === "ellipse" ? a.tool : s.shapeVariant,
+        shapeVariant: a.tool === "rect" || a.tool === "ellipse" || a.tool === "diamond" ? a.tool : s.shapeVariant,
         lineVariant: a.tool === "line" || a.tool === "arrow" || a.tool === "darrow" ? a.tool : s.lineVariant,
       };
     case "armCluster": {
-      const members: readonly Tool[] = a.cluster === "shape" ? SHAPE_VARIANTS : LINE_VARIANTS;
+      // Cluster membership honors the host's shape list — disabled variants
+      // are skipped by the cycle and can't be retyped INTO (retyping AWAY from
+      // a disabled variant in a loaded doc stays possible: only creation-like
+      // moves are gated). An all-disabled cluster is inert.
+      const all: readonly ShapeTool[] = a.cluster === "shape" ? SHAPE_VARIANTS : LINE_VARIANTS;
+      const members: readonly Tool[] = all.filter((t) => s.features.shapes.includes(t));
+      if (members.length === 0) return s;
       const remembered = a.cluster === "shape" ? s.shapeVariant : s.lineVariant;
 
       // Selection retype: when the selection is non-empty and lies ENTIRELY within
@@ -2417,7 +2481,7 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       return {
         ...s,
         shapes: mapShapes(s.shapes, id, (sh) => {
-          if (sh.type === "rect" || sh.type === "ellipse") {
+          if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "diamond") {
             return { ...sh, width: a.point.x - sh.x, height: a.point.y - sh.y };
           }
           if (sh.type === "line" || sh.type === "arrow") {
@@ -2455,7 +2519,7 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         shapes = mapShapes(s.shapes, new Set([dot.id]), () => dot);
       }
       let normalized = shapes;
-      if (draft && (draft.type === "rect" || draft.type === "ellipse")) {
+      if (draft && (draft.type === "rect" || draft.type === "ellipse" || draft.type === "diamond")) {
         normalized = mapShapes(shapes, new Set([draft.id]), (sh) => normalizeBox(sh as BoxShape));
         // A shape drawn edge-to-edge with another attaches to it (like an arrow
         // binds) — so drawing a box on/against a shape links them.
@@ -2811,6 +2875,7 @@ function isDegenerate(sh: Shape, minSize = 2): boolean {
   switch (sh.type) {
     case "rect":
     case "ellipse":
+    case "diamond":
       return Math.abs(sh.width) < minSize && Math.abs(sh.height) < minSize;
     case "line":
     case "arrow": {

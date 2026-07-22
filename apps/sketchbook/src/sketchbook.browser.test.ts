@@ -1984,7 +1984,21 @@ test.describe("session persistence — the toolbar + selection survive a reload"
   });
 });
 
-test.describe("configurable board features (the ?palette / &fills / &styling / &grouping URL harness)", () => {
+test("the shape cluster cycles rect → ellipse → diamond; a drawn diamond persists as its own kind", async ({ page }) => {
+  await open(page);
+  // One morph button: first press arms the remembered rect, further presses cycle.
+  const cluster = page.locator('button[aria-label^="Rectangle"], button[aria-label^="Ellipse"], button[aria-label^="Diamond"]');
+  await cluster.click(); // arm rect
+  await cluster.click(); // → ellipse
+  await cluster.click(); // → diamond
+  await expect(page.locator('button[aria-label^="Diamond (1)"]')).toHaveAttribute("aria-pressed", "true");
+  await drawStroke(page, { x: 150, y: 150 }, { x: 300, y: 250 });
+  await expect.poll(async () => (await stored(page))[0]?.doc.shapes.map((s) => (s as { type: string }).type)).toEqual(["diamond"]);
+  // One-use snap-back, and the cluster remembers the variant.
+  await expect(page.locator('button[aria-label^="Diamond (1)"]')).toHaveAttribute("aria-pressed", "false");
+});
+
+test.describe("configurable board features (the ?palette / &fills / &styling / &grouping / &shapes URL harness)", () => {
   /** Logical→screen through the live camera (the board may open fitted). */
   async function toScreen(page: Page, pt: { x: number; y: number }) {
     const cam = await page.evaluate(() => {
@@ -2056,5 +2070,24 @@ test.describe("configurable board features (the ?palette / &fills / &styling / &
     // Liveness proof: the selection + keyboard path were real — Backspace deletes both.
     await page.keyboard.press("Backspace");
     await expect.poll(async () => (await stored(page))[0].doc.shapes.length).toBe(0);
+  });
+
+  test("?shapes= mounts only the listed shape tools — pill, clusters, and text all honor the list", async ({ page }) => {
+    await openSeeded(page, [rect("a", 100, 100)], "?shapes=rect,text");
+    // Pen opted out → the well is cursor-only; the shape cluster narrows to a
+    // single-variant button (its label drops the cycle suffix); the connector
+    // cluster is gone entirely; text keeps its own switch.
+    await expect(page.getByRole("button", { name: "Cursor — select / move (Tab)" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Pen — draw freehand (Tab)" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Rectangle (1)" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^(Line|Arrow|Double arrow) \(2\)/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Text (3)" })).toBeVisible();
+    // The narrowed cluster still draws its one kind; the disarmed keys are inert.
+    await page.keyboard.press("2"); // connector key — gated
+    await page.getByRole("button", { name: "Rectangle (1)" }).click();
+    await drawStroke(page, { x: 250, y: 200 }, { x: 340, y: 260 });
+    await expect
+      .poll(async () => (await stored(page))[0].doc.shapes.map((s) => (s as { type: string }).type))
+      .toEqual(["rect", "rect"]);
   });
 });

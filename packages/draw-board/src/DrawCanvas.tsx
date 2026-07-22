@@ -24,6 +24,7 @@ import {
   EDGE_TOUCH,
   CANVAS_BG_DARK,
   dashFor,
+  diamondPoints,
   isEnclosed,
   paintsFill,
   pointInPolygon,
@@ -48,7 +49,7 @@ import {
 
 /** Shapes whose scale can be baked into geometry (the Transformer attaches to a
  *  lone one of these). Lines/pen strokes are move-only in v1. */
-const RESIZABLE = new Set(["rect", "ellipse", "text", "image"]);
+const RESIZABLE = new Set(["rect", "ellipse", "diamond", "text", "image"]);
 /** Node id of the synthetic proxy rect the Transformer scales a whole GROUP
  *  through (members' own nodes never get handles). Reserved — never a shape id. */
 const UNIT_PROXY_ID = "__unit_proxy__";
@@ -80,7 +81,7 @@ function distToSegment(px: number, py: number, x1: number, y1: number, x2: numbe
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 
-/** Normalized render box for a rect/ellipse (may be negative mid-draw). */
+/** Normalized render box for a rect/ellipse/diamond (may be negative mid-draw). */
 function viewBox(b: BoxShape) {
   return {
     x: b.width < 0 ? b.x + b.width : b.x,
@@ -513,6 +514,16 @@ export function DrawCanvas({
           ctx.fill();
           break;
         }
+        case "diamond": {
+          const p = diamondPoints(boundingBox(sh));
+          ctx.fillStyle = sh.fill!;
+          ctx.beginPath();
+          ctx.moveTo(mx(p[0]), my(p[1]));
+          for (let i = 2; i + 1 < p.length; i += 2) ctx.lineTo(mx(p[i]), my(p[i + 1]));
+          ctx.closePath();
+          ctx.fill();
+          break;
+        }
         case "rect": {
           const b = boundingBox(sh);
           ctx.fillStyle = sh.fill!;
@@ -816,7 +827,7 @@ export function DrawCanvas({
     const inkFill = fill ? { fill } : null;
     if (tool === "pen") {
       dispatch({ type: "beginDraw", shape: { id, type: "pen", stroke: color, strokeWidth, ...style, ...inkFill, points: [x, y] } });
-    } else if (tool === "rect" || tool === "ellipse") {
+    } else if (tool === "rect" || tool === "ellipse" || tool === "diamond") {
       dispatch({ type: "beginDraw", shape: { id, type: tool, stroke: color, strokeWidth, ...style, ...inkFill, x, y, width: 0, height: 0 } });
     } else if (tool === "line" || tool === "arrow" || tool === "darrow") {
       // A double-arrow is a normal arrow shape flagged `doubleHead` (identical
@@ -879,7 +890,7 @@ export function DrawCanvas({
     // Hover feedback while holding a bindable tool (before drawing): track the
     // pointer so we can highlight the shape a drawn endpoint/box would attach to.
     if (!state.draftId) {
-      if (tool === "line" || tool === "arrow" || tool === "darrow" || tool === "rect" || tool === "ellipse") setHover(logicalPointer(e));
+      if (tool === "line" || tool === "arrow" || tool === "darrow" || tool === "rect" || tool === "ellipse" || tool === "diamond") setHover(logicalPointer(e));
       return;
     }
     // Extend by the DRAFT's type, not the current tool — a hotkey mid-stroke
@@ -951,7 +962,7 @@ export function DrawCanvas({
     // relocate, restyle, and rebind like anything else.
     if (hit.type === "text") onEditText(hit.id);
     else if (hit.type === "image" && !hit.groupPath) onCropImage(hit.id);
-    else if (hit.type === "rect" || hit.type === "ellipse") {
+    else if (hit.type === "rect" || hit.type === "ellipse" || hit.type === "diamond") {
       const b = boundingBox(hit);
       const inside = (tb: Box) => tb.x >= b.x && tb.y >= b.y && tb.x + tb.width <= b.x + b.width && tb.y + tb.height <= b.y + b.height;
       const captions = shapes.filter((s) => s.type === "text" && (s.attach ? s.attach.id === hit.id : inside(boundingBox(s))));
@@ -965,7 +976,9 @@ export function DrawCanvas({
         const caption = captions.reduce((best, s) => (d2(s) < d2(best) ? s : best));
         dispatch({ type: "select", ids: [caption.id] });
         onEditText(caption.id);
-      } else {
+      } else if (state.features.shapes.includes("text")) {
+        // Spawning a fresh caption IS text creation — gated with the text tool.
+        // (Editing an existing caption above stays: loaded docs are portable.)
         // The pair's first click selected the container — clear it so no
         // Transformer frames a shape under the typing overlay.
         dispatch({ type: "select", ids: [] });
@@ -975,10 +988,10 @@ export function DrawCanvas({
   };
 
   // The parent's LIVE box mid-transform, WITHOUT disturbing its node (the
-  // Transformer owns scale/position during the drag). rect/ellipse/image only —
-  // reading the group/shape's stored size × the live scale.
+  // Transformer owns scale/position during the drag). rect/ellipse/diamond/image
+  // only — reading the group/shape's stored size × the live scale.
   const liveBox = (e: KonvaEventObject<Event>, sh: Shape) => {
-    if (sh.type !== "rect" && sh.type !== "ellipse" && sh.type !== "image") return null;
+    if (sh.type !== "rect" && sh.type !== "ellipse" && sh.type !== "diamond" && sh.type !== "image") return null;
     const node = e.target;
     return { x: node.x(), y: node.y(), width: Math.max(4, sh.width * node.scaleX()), height: Math.max(4, sh.height * node.scaleY()) };
   };
@@ -1007,7 +1020,7 @@ export function DrawCanvas({
         patch: { x: node.x(), y: node.y(), width: live?.id === sh.id ? live.width : Math.max(24, boundingBox(sh).width * sx) },
         distScale: 1 / vsRef.current,
       });
-    } else if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "image") {
+    } else if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "diamond" || sh.type === "image") {
       dispatch({
         type: "commitResize",
         id: sh.id,
@@ -1017,9 +1030,12 @@ export function DrawCanvas({
     }
   };
 
-  // The node carrying a shape's stroke (an ellipse's sits inside its Group).
+  // The node carrying a shape's stroke (an ellipse's / diamond's sits inside
+  // its Group — the diamond's is a closed Line).
   const strokedNodeOf = (node: Konva.Node): Konva.Shape | null =>
-    node.getClassName?.() === "Group" ? ((node as Konva.Group).findOne<Konva.Shape>("Ellipse") ?? null) : (node as Konva.Shape);
+    node.getClassName?.() === "Group"
+      ? ((node as Konva.Group).findOne<Konva.Shape>("Ellipse") ?? (node as Konva.Group).findOne<Konva.Shape>("Line") ?? null)
+      : (node as Konva.Shape);
 
   // Per-shape props: identity (for the Transformer + resize baking). Selection,
   // move, and double-click are all handled at the stage level (size-based), so
@@ -1115,7 +1131,7 @@ export function DrawCanvas({
       const id = nearestBindableId(end, near, draft.id, BIND_DISTANCE * sPx(1));
       if (id) bindHighlights.set(id, { kind: "body" });
     }
-  } else if (draft && (draft.type === "rect" || draft.type === "ellipse")) {
+  } else if (draft && (draft.type === "rect" || draft.type === "ellipse" || draft.type === "diamond")) {
     const at = attachAt(draft, glueNear(boundingBox(draft)), sPx(1));
     const g = at && glowOf(at);
     if (g) bindHighlights.set(at!.id, g);
@@ -1133,12 +1149,14 @@ export function DrawCanvas({
     if (tool === "line" || tool === "arrow" || tool === "darrow") {
       const id = nearestBindableId(hover, hoverNear, "", BIND_DISTANCE * sPx(1));
       if (id) bindHighlights.set(id, { kind: "body" });
-    } else if (tool === "rect" || tool === "ellipse") {
+    } else if (tool === "rect" || tool === "ellipse" || tool === "diamond") {
       const id = nearestEdgeBindableId(hover, hoverNear, "", EDGE_TOUCH * sPx(1));
       const target = id ? shapes.find((s) => s.id === id) : undefined;
       if (target) {
         const b = boundingBox(target);
-        if (target.type === "ellipse") {
+        if (target.type === "ellipse" || target.type === "diamond") {
+          // Radial-anchor targets glow an arc at the bond angle (attachAt gives
+          // both angled-border kinds radial anchors).
           const angle = Math.atan2(hover.y - (b.y + b.height / 2), hover.x - (b.x + b.width / 2));
           bindHighlights.set(target.id, { kind: "arc", angle, box: b });
         } else {
@@ -1405,6 +1423,16 @@ export function DrawCanvas({
               return (
                 <Group key={sh.id} {...common(sh)} x={b.x} y={b.y}>
                   <Ellipse x={b.width / 2} y={b.height / 2} radiusX={b.width / 2} radiusY={b.height / 2} fill={sh.fill} stroke={stroke} strokeWidth={sw} dash={dash} lineCap={dotCap} />
+                </Group>
+              );
+            }
+            case "diamond": {
+              // Same Group-wrapper pattern as the ellipse (the Transformer reads
+              // the group's box; strokedNodeOf finds the Line inside).
+              const b = viewBox(sh);
+              return (
+                <Group key={sh.id} {...common(sh)} x={b.x} y={b.y}>
+                  <Line points={diamondPoints({ x: 0, y: 0, width: b.width, height: b.height })} closed fill={sh.fill} stroke={stroke} strokeWidth={sw} dash={dash} lineCap={dotCap} lineJoin="round" />
                 </Group>
               );
             }

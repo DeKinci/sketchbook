@@ -43,6 +43,11 @@ import {
   visibleHueFamilies,
   resolveFeatures,
   MAX_PALETTE,
+  SHAPE_TOOLS,
+  SHAPE_VARIANTS,
+  diamondPoints,
+  clusterOf as shapeClusterOf,
+  variantOf,
   baseShades,
   pastelShades,
   SHADES,
@@ -1469,7 +1474,10 @@ describe("drawReducer — one-use tool clusters (arm + cycle + variant memory)",
     s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // rect → ellipse
     expect(s.tool).toBe("ellipse");
     expect(s.shapeVariant).toBe("ellipse");
-    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // ellipse → rect (wraps)
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // ellipse → diamond
+    expect(s.tool).toBe("diamond");
+    expect(s.shapeVariant).toBe("diamond");
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // diamond → rect (wraps)
     expect(s.tool).toBe("rect");
   });
 
@@ -2384,7 +2392,7 @@ describe("configurable features — palette width + the opt-outs", () => {
     initialDrawState({ shapes, width: 400, height: 300 }, { features });
 
   it("resolveFeatures: defaults, clamping, and the single-color collapse", () => {
-    expect(resolveFeatures()).toEqual({ paletteSize: 4, fills: true, strokeStyling: true, grouping: true });
+    expect(resolveFeatures()).toEqual({ paletteSize: 4, fills: true, strokeStyling: true, grouping: true, shapes: SHAPE_TOOLS });
     expect(resolveFeatures(null)).toEqual(resolveFeatures());
     expect(resolveFeatures({ paletteSize: 0 }).paletteSize).toBe(1);
     expect(resolveFeatures({ paletteSize: 99 }).paletteSize).toBe(MAX_PALETTE);
@@ -2397,7 +2405,17 @@ describe("configurable features — palette width + the opt-outs", () => {
       fills: false,
       strokeStyling: false,
       grouping: false,
+      shapes: SHAPE_TOOLS,
     });
+  });
+
+  it("resolveFeatures.shapes: sanitized to known kinds in canonical order; garbage → all; explicit [] honored", () => {
+    expect(resolveFeatures({ shapes: ["text", "pen", "rect"] }).shapes).toEqual(["pen", "rect", "text"]); // canonical order
+    expect(resolveFeatures({ shapes: ["pen", "pen", "pen"] }).shapes).toEqual(["pen"]); // deduped
+    expect(resolveFeatures({ shapes: ["pen", "wobble"] as never }).shapes).toEqual(["pen"]); // unknowns dropped
+    expect(resolveFeatures({ shapes: ["wobble", "blob"] as never }).shapes).toEqual(SHAPE_TOOLS); // garbage-only → default all
+    expect(resolveFeatures({ shapes: [] }).shapes).toEqual([]); // a deliberate no-creation board
+    expect(resolveFeatures({}).shapes).toEqual(SHAPE_TOOLS); // absent → all
   });
 
   it("visibleHueFamilies: wheel-ordered prefixes of the priority list; 4 = exactly the classic lane", () => {
@@ -2570,5 +2588,154 @@ describe("no-stroke — the transparent stroke special (NO_STROKE)", () => {
     const one = initialDrawState(undefined, { features: { paletteSize: 1 }, session: sess });
     expect(one.color).toBe(CONTRAST_INK);
     expect(one.strokeSpecial).toBe(CONTRAST_INK);
+  });
+});
+
+describe("diamond — the third shape-cluster variant", () => {
+  const dia = (id: string, over: Partial<BoxShape> = {}): BoxShape => ({
+    id,
+    type: "diamond",
+    stroke: "#e5484d",
+    strokeWidth: 3,
+    x: 100,
+    y: 100,
+    width: 80,
+    height: 60,
+    ...over,
+  });
+
+  it("is a full cluster citizen: identity, retype round-trip, geometry preserved", () => {
+    const d = dia("d");
+    expect(SHAPE_VARIANTS).toEqual(["rect", "ellipse", "diamond"]);
+    expect(shapeClusterOf(d)).toBe("shape"); // the model's clusterOf (aliased — a local drag-cluster helper shadows the name)
+    expect(variantOf(d)).toBe("diamond");
+    const asRect = toClusterVariant(d, "rect") as BoxShape;
+    expect(asRect.type).toBe("rect");
+    expect([asRect.x, asRect.y, asRect.width, asRect.height]).toEqual([100, 100, 80, 60]);
+    expect((toClusterVariant(asRect, "diamond") as BoxShape).type).toBe("diamond");
+  });
+
+  it("draw lifecycle: drag defines the box, endDraw normalizes a negative drag, a click-tap is dropped", () => {
+    let s = initialDrawState({ shapes: [], width: 400, height: 300 });
+    s = drawReducer(s, { type: "beginDraw", shape: dia("d1", { x: 200, y: 150, width: 0, height: 0 }) });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 140, y: 90 } }); // dragged up-left → negative box
+    s = drawReducer(s, { type: "endDraw" });
+    const drawn = s.shapes.find((sh) => sh.id === "d1") as BoxShape;
+    expect(drawn.type).toBe("diamond");
+    expect([drawn.x, drawn.y, drawn.width, drawn.height]).toEqual([140, 90, 60, 60]);
+    expect(s.tool).toBe(s.baseTool); // one-use snap-back, like rect/ellipse
+    // Degenerate: a no-drag tap commits nothing.
+    let t = initialDrawState({ shapes: [], width: 400, height: 300 });
+    t = drawReducer(t, { type: "beginDraw", shape: dia("d2", { x: 10, y: 10, width: 0, height: 0 }) });
+    t = drawReducer(t, { type: "endDraw" });
+    expect(t.shapes).toHaveLength(0);
+  });
+
+  it("diamondPoints: the four edge midpoints of the box, top→right→bottom→left", () => {
+    expect(diamondPoints({ x: 100, y: 100, width: 80, height: 60 })).toEqual([140, 100, 180, 130, 140, 160, 100, 130]);
+  });
+
+  it("fillAt sees the precise rhombus interior — corners of the box are NOT inside", () => {
+    const shapes: Shape[] = [dia("d", { fill: "#f5a623" })];
+    expect(fillAt(shapes, 140, 130)).toBe("#f5a623"); // center
+    expect(fillAt(shapes, 122, 116)).toBe("#f5a623"); // inside the top-left edge (nx+ny≈0.9)
+    expect(fillAt(shapes, 106, 104)).toBeNull(); // box corner — outside the rhombus
+    expect(fillAt(shapes, 178, 158)).toBeNull(); // bottom-right corner too
+  });
+
+  it("attaches radially like an ellipse: a box drawn edge-to-edge gets a radial anchor with the rhombus border distance", () => {
+    // Diamond centered (140,130), hx=40, hy=30. A small rect just beyond its
+    // RIGHT vertex (180,130): along dir 0 the border is at exactly hx=40.
+    const target = dia("d");
+    const child = box("r", { x: 184, y: 122, width: 16, height: 16 }); // center (192,130), 12 beyond the vertex
+    const at = attachAt(child, [target, child], 1) as Attach & { kind: "radial" };
+    expect(at).toBeTruthy();
+    expect(at.kind).toBe("radial");
+    expect(at.id).toBe("d");
+    expect(at.angle).toBeCloseTo(0, 5);
+    expect(at.gap).toBeCloseTo(12, 5);
+  });
+
+  it("resize + uniform scale treat it as a box member (width/height scale, position remaps)", () => {
+    let s = initialDrawState({ shapes: [dia("d")], width: 400, height: 300 });
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "commitResize", id: "d", patch: { x: 50, y: 60, width: 160, height: 120 } });
+    const r = s.shapes[0] as BoxShape;
+    expect([r.x, r.y, r.width, r.height]).toEqual([50, 60, 160, 120]);
+  });
+});
+
+describe("features.shapes — hosts list the shape tools a board mounts", () => {
+  const withShapes = (shapes: DrawFeatures["shapes"], session?: Partial<DrawSession>) =>
+    initialDrawState({ shapes: [], width: 400, height: 300 }, {
+      features: { shapes },
+      ...(session ? { session: { ...toSession(initialDrawState()), ...session } as DrawSession } : {}),
+    });
+
+  it("setTool re-guards: a disabled kind can't arm; select/eraser are never gated", () => {
+    const s = withShapes(["pen", "rect"]);
+    expect(drawReducer(s, { type: "setTool", tool: "diamond" }).tool).toBe(s.tool); // rejected
+    expect(drawReducer(s, { type: "setTool", tool: "text" }).tool).toBe(s.tool); // rejected
+    expect(drawReducer(s, { type: "setTool", tool: "rect" }).tool).toBe("rect"); // enabled kind arms
+    expect(drawReducer(s, { type: "setTool", tool: "eraser" }).tool).toBe("eraser"); // board verb, ungated
+    expect(drawReducer(s, { type: "setTool", tool: "select" }).tool).toBe("select");
+  });
+
+  it("armCluster cycles ONLY the enabled variants; an all-disabled cluster is inert", () => {
+    // Diamond disabled → the shape cycle is rect⇄ellipse again.
+    let s = withShapes(["pen", "rect", "ellipse", "line"]);
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // rect
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // → ellipse
+    expect(s.tool).toBe("ellipse");
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // → rect (diamond skipped)
+    expect(s.tool).toBe("rect");
+    // Only diamond enabled → the cluster IS the diamond button.
+    let d = withShapes(["diamond"]);
+    d = drawReducer(d, { type: "armCluster", cluster: "shape" });
+    expect(d.tool).toBe("diamond");
+    d = drawReducer(d, { type: "armCluster", cluster: "shape" }); // one-member wrap: stays
+    expect(d.tool).toBe("diamond");
+    // No line variants at all → the connector key does nothing.
+    const noLines = withShapes(["pen", "rect"]);
+    expect(drawReducer(noLines, { type: "armCluster", cluster: "line" })).toBe(noLines);
+  });
+
+  it("selection retype walks enabled variants only — converting AWAY from a disabled kind stays possible", () => {
+    // A loaded doc carries a diamond on a diamond-less board: it renders and
+    // selects; the cluster tool retypes it to the remembered ENABLED variant,
+    // and further taps never cycle INTO diamond.
+    const diamond: Shape = { id: "d", type: "diamond", stroke: "#000", strokeWidth: 3, x: 0, y: 0, width: 40, height: 40 };
+    let s = initialDrawState({ shapes: [diamond], width: 400, height: 300 }, { features: { shapes: ["pen", "rect", "ellipse"] } });
+    s = drawReducer(s, { type: "select", ids: ["d"] });
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // unify → rect (remembered)
+    expect(s.shapes[0].type).toBe("rect");
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // rect → ellipse
+    expect(s.shapes[0].type).toBe("ellipse");
+    s = drawReducer(s, { type: "armCluster", cluster: "shape" }); // ellipse → rect, NOT diamond
+    expect(s.shapes[0].type).toBe("rect");
+  });
+
+  it("init forcing: restored tools/variants/baseTool all land on enabled kinds", () => {
+    // Session armed diamond + pen on a board without either.
+    const forced = withShapes(["rect", "text"], { tool: "diamond", baseTool: "pen", shapeVariant: "diamond", lineVariant: "darrow" });
+    expect(forced.baseTool).toBe("select"); // pen gone → the well is cursor-only
+    expect(forced.tool).toBe("select"); // disabled tool falls to baseTool
+    expect(forced.shapeVariant).toBe("rect"); // first enabled member
+    expect(forced.lineVariant).toBe("darrow"); // whole cluster disabled → memory untouched (harmless — nothing can arm it)
+    // The default fresh board (no session) on a pen-less config also opens on select.
+    expect(withShapes(["rect"]).tool).toBe("select");
+    // With pen enabled nothing is disturbed.
+    const easy = withShapes(["pen", "diamond"], { tool: "diamond", shapeVariant: "diamond" });
+    expect(easy.tool).toBe("diamond");
+    expect(easy.shapeVariant).toBe("diamond");
+  });
+
+  it("an explicit empty list is a no-creation board: every shape tool rejected, select/erase alive", () => {
+    const s = withShapes([]);
+    expect(s.tool).toBe("select");
+    for (const t of SHAPE_TOOLS) expect(drawReducer(s, { type: "setTool", tool: t }).tool).toBe("select");
+    expect(drawReducer(s, { type: "armCluster", cluster: "shape" })).toBe(s);
+    expect(drawReducer(s, { type: "armCluster", cluster: "line" })).toBe(s);
+    expect(drawReducer(s, { type: "setTool", tool: "eraser" }).tool).toBe("eraser");
   });
 });

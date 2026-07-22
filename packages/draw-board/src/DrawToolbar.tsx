@@ -3,6 +3,7 @@ import {
   Pencil,
   Square,
   Circle,
+  Diamond,
   Minus,
   Plus,
   ArrowUpRight,
@@ -31,9 +32,9 @@ const PILL: { tool: "select" | "pen"; icon: LucideIcon; label: string }[] = [
 ];
 
 /** Icon per cluster variant (drives the morph button's stacked crossfade). */
-const SHAPE_ICON: Record<ShapeVariant, LucideIcon> = { rect: Square, ellipse: Circle };
+const SHAPE_ICON: Record<ShapeVariant, LucideIcon> = { rect: Square, ellipse: Circle, diamond: Diamond };
 const LINE_ICON: Record<LineVariant, LucideIcon> = { line: Minus, arrow: ArrowUpRight, darrow: MoveDiagonal };
-const SHAPE_LABEL: Record<ShapeVariant, string> = { rect: "rectangle", ellipse: "ellipse" };
+const SHAPE_LABEL: Record<ShapeVariant, string> = { rect: "rectangle", ellipse: "ellipse", diamond: "diamond" };
 const LINE_LABEL: Record<LineVariant, string> = { line: "line", arrow: "arrow", darrow: "double arrow" };
 
 const SPRING = "cubic-bezier(0.34,1.4,0.64,1)";
@@ -72,7 +73,9 @@ function ClusterButton<V extends string>({
   const idx = variants.indexOf(current);
   const next = variants[(idx + 1) % variants.length];
   const others = variants.filter((v) => v !== current).map((v) => labels[v]);
-  const label = `${labels[current][0].toUpperCase()}${labels[current].slice(1)} (${hotkey}) — tap to switch to ${others.join(" / ")}`;
+  // A cluster narrowed to ONE variant (features.shapes) is a plain tool button —
+  // no cycle to advertise, no hint icon (next === current renders "main" only).
+  const label = `${labels[current][0].toUpperCase()}${labels[current].slice(1)} (${hotkey})${others.length ? ` — tap to switch to ${others.join(" / ")}` : ""}`;
   return (
     <IconButton label={label} aria-pressed={active} onClick={onArm} className={active ? "bg-accent-600/25 !text-accent-200" : "!text-ink-200"}>
       <span className="relative block h-5 w-5">
@@ -702,6 +705,10 @@ export function DrawToolbar({
   extra?: React.ReactNode;
 }) {
   const persistentActive = tool === "select" || tool === "pen";
+  // The cluster buttons mount only the variants this board enables — the
+  // reducer's armCluster filters identically, so button and key agree.
+  const shapeVars = SHAPE_VARIANTS.filter((v) => features.shapes.includes(v));
+  const lineVars = LINE_VARIANTS.filter((v) => features.shapes.includes(v));
   // The well sits on the nearest visible slot even for SECRET sizes (past the
   // three shown); the active slot's dot then renders at the REAL size so the
   // secret level stays legible. Repeated presses of an extreme keep stepping.
@@ -773,7 +780,9 @@ export function DrawToolbar({
           }`}
           style={{ transform: `translateX(${baseTool === "pen" ? "100%" : "0%"})` }}
         />
-        {PILL.map(({ tool: t, icon: Icon, label }) => (
+        {/* Pen opted out (features.shapes) → the well is cursor-only; baseTool
+            is forced to "select" at init so the slider stays at 0%. */}
+        {PILL.filter(({ tool: t }) => t === "select" || features.shapes.includes("pen")).map(({ tool: t, icon: Icon, label }) => (
           <button
             key={t}
             type="button"
@@ -790,36 +799,44 @@ export function DrawToolbar({
         ))}
       </div>
 
-      {/* One-use tools: shape cluster (rect⇄ellipse) · connector cluster
+      {/* One-use tools: shape cluster (rect→ellipse→diamond) · connector cluster
           (line→arrow→double-arrow) · text. Each cluster is a single morph button —
-          press to arm its last variant, press again to cycle. */}
+          press to arm its last variant, press again to cycle. Every kind honors
+          features.shapes: a cluster mounts only its enabled variants (none →
+          the whole button is gone), text has its own switch. */}
       <div className="flex items-center gap-0.5">
-        <ClusterButton
-          variants={SHAPE_VARIANTS}
-          icons={SHAPE_ICON}
-          labels={SHAPE_LABEL}
-          current={shapeVariant}
-          active={tool === "rect" || tool === "ellipse"}
-          hotkey="1"
-          onArm={() => onArmCluster("shape")}
-        />
-        <ClusterButton
-          variants={LINE_VARIANTS}
-          icons={LINE_ICON}
-          labels={LINE_LABEL}
-          current={lineVariant}
-          active={tool === "line" || tool === "arrow" || tool === "darrow"}
-          hotkey="2"
-          onArm={() => onArmCluster("line")}
-        />
-        <IconButton
-          label="Text (3)"
-          aria-pressed={tool === "text"}
-          onClick={() => onTool("text")}
-          className={tool === "text" ? "bg-accent-600/25 !text-accent-200" : "!text-ink-200"}
-        >
-          <Type size={20} strokeWidth={2.25} />
-        </IconButton>
+        {shapeVars.length > 0 && (
+          <ClusterButton
+            variants={shapeVars}
+            icons={SHAPE_ICON}
+            labels={SHAPE_LABEL}
+            current={shapeVariant}
+            active={tool === "rect" || tool === "ellipse" || tool === "diamond"}
+            hotkey="1"
+            onArm={() => onArmCluster("shape")}
+          />
+        )}
+        {lineVars.length > 0 && (
+          <ClusterButton
+            variants={lineVars}
+            icons={LINE_ICON}
+            labels={LINE_LABEL}
+            current={lineVariant}
+            active={tool === "line" || tool === "arrow" || tool === "darrow"}
+            hotkey="2"
+            onArm={() => onArmCluster("line")}
+          />
+        )}
+        {features.shapes.includes("text") && (
+          <IconButton
+            label="Text (3)"
+            aria-pressed={tool === "text"}
+            onClick={() => onTool("text")}
+            className={tool === "text" ? "bg-accent-600/25 !text-accent-200" : "!text-ink-200"}
+          >
+            <Type size={20} strokeWidth={2.25} />
+          </IconButton>
+        )}
       </div>
 
       {/* Group/ungroup toggle — mirrors ⌘G (groupAction decides which). An
