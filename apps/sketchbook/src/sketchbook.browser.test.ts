@@ -1669,6 +1669,84 @@ test("fill flow: swatch → filled rect + filled loop, and the adaptive ink dark
   expect(isAmber(inLoop), `enclosed doodle interior should be amber, got ${JSON.stringify(inLoop)}`).toBe(true);
 });
 
+test.describe("color declaration — the picker mirrors the selection and drag-merges classes", () => {
+  const RED = "#e5484d";
+  const GREEN = "#30a46c";
+  const BLUE = "#3b82f6";
+  const AMBER = "#f5a623";
+
+  /** Drag one toolbar swatch onto another (the class-merge gesture). */
+  async function dragSwatch(page: Page, from: ReturnType<Page["locator"]>, to: ReturnType<Page["locator"]>) {
+    const a = (await from.boundingBox())!;
+    const b = (await to.boundingBox())!;
+    await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 6 });
+    await page.mouse.up();
+  }
+
+  test("selection multi-highlights its colors; drag red→green repaints ONLY the red class; deselect restores the pen ink; click still repaints all", async ({ page }) => {
+    await openSeeded(page, [
+      rect("A", 60, 60), // factory stroke = red
+      rect("B", 200, 60, 80, 60, { stroke: RED }),
+      rect("C", 340, 60, 80, 60, { stroke: BLUE }),
+    ]);
+    const swatch = (c: string) => page.locator(`button[aria-label="Color ${c}"]`);
+    const adaptive = page.locator('button[aria-label^="Adaptive ink"]');
+    const strokes = async () => (await stored(page))[0].doc.shapes.map((s) => (s as { stroke: string }).stroke);
+
+    // No selection: the pill shows the ambient pen ink (adaptive), nothing else.
+    await expect(adaptive).toHaveAttribute("aria-pressed", "true");
+    await expect(swatch(RED)).toHaveAttribute("aria-pressed", "false");
+
+    // Select all → the pill becomes the selection's declaration: red AND blue
+    // light up, the ambient ink drops out (it isn't in the drawing).
+    await page.keyboard.press("ControlOrMeta+a");
+    await expect(swatch(RED)).toHaveAttribute("aria-pressed", "true");
+    await expect(swatch(BLUE)).toHaveAttribute("aria-pressed", "true");
+    await expect(adaptive).toHaveAttribute("aria-pressed", "false");
+
+    // Drag the red entry onto green: the red CLASS repaints, blue untouched.
+    await dragSwatch(page, swatch(RED), swatch(GREEN));
+    await expect.poll(strokes).toEqual([GREEN, GREEN, BLUE]);
+    await expect(swatch(GREEN)).toHaveAttribute("aria-pressed", "true");
+    await expect(swatch(RED)).toHaveAttribute("aria-pressed", "false");
+    await expect(swatch(BLUE)).toHaveAttribute("aria-pressed", "true");
+
+    // Deselect: the declaration yields back to the pen ink — untouched by the
+    // merge (a drag edits the drawing, not the pen).
+    await page.keyboard.press("Escape");
+    await expect(adaptive).toHaveAttribute("aria-pressed", "true");
+    await expect(swatch(GREEN)).toHaveAttribute("aria-pressed", "false");
+
+    // CLICK semantics survive the drag machinery: with a selection, a plain
+    // swatch click still repaints the WHOLE selection (and picks the pen ink).
+    await page.keyboard.press("ControlOrMeta+a");
+    await swatch(RED).click();
+    await expect.poll(strokes).toEqual([RED, RED, RED]);
+    await page.keyboard.press("Escape");
+    await expect(swatch(RED)).toHaveAttribute("aria-pressed", "true"); // clicked = picked
+  });
+
+  test("the fill pill declares too — none is a mergeable class: drag none→amber fills only the unfilled", async ({ page }) => {
+    await openSeeded(page, [rect("A", 60, 60, 80, 60, { fill: RED }), rect("B", 200, 60)]);
+    const none = page.locator('button[aria-label="No fill"]');
+    const fillSwatch = (c: string) => page.locator(`button[aria-label="Fill ${c}"]`);
+    const fills = async () => (await stored(page))[0].doc.shapes.map((s) => (s as { fill?: string }).fill ?? null);
+
+    await page.keyboard.press("ControlOrMeta+a");
+    // Mixed fill declaration: the red class AND the none class.
+    await expect(fillSwatch(RED)).toHaveAttribute("aria-pressed", "true");
+    await expect(none).toHaveAttribute("aria-pressed", "true");
+
+    await dragSwatch(page, none, fillSwatch(AMBER));
+    await expect.poll(fills).toEqual([RED, AMBER]);
+    await expect(none).toHaveAttribute("aria-pressed", "false");
+    await expect(fillSwatch(AMBER)).toHaveAttribute("aria-pressed", "true");
+    await expect(fillSwatch(RED)).toHaveAttribute("aria-pressed", "true");
+  });
+});
+
 test("text background highlight: amber chip behind DARK adaptive glyphs, live in the editor too", async ({ page }) => {
   await openSeeded(page, [
     { id: "t", type: "text", stroke: "contrast", strokeWidth: 3, x: 100, y: 100, fontSize: 24, text: "hello", fill: "#f5a623" },

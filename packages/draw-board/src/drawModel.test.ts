@@ -38,6 +38,8 @@ import {
   isEnclosed,
   paintsFill,
   fillAt,
+  selectionStrokes,
+  selectionFills,
   contrastSolidOver,
   textBgBox,
   CONTRAST_DARK,
@@ -462,6 +464,94 @@ describe("fills — setFill / enclosure / fillAt / contrast resolve", () => {
     expect(contrastSolidOver(null)).toBe(CONTRAST_BRIGHT); // bare dark paper
     expect(contrastSolidOver("#ffffff")).toBe(CONTRAST_DARK);
     expect(FILL_COLORS.includes(CONTRAST_INK)).toBe(false);
+  });
+});
+
+describe("color declaration — selectionStrokes / selectionFills / recolor / refill", () => {
+  const red = "#e5484d";
+  const blue = "#3b82f6";
+  const green = "#30a46c";
+  const image = (id: string, stroke = "#000"): Shape => ({
+    id,
+    type: "image",
+    stroke,
+    strokeWidth: 1,
+    x: 0,
+    y: 0,
+    width: 10,
+    height: 10,
+    dataBase64: "",
+    mediaType: "image/png",
+  });
+
+  it("selectionStrokes lists the distinct strokes of the selection — images excluded (their stroke never paints)", () => {
+    const shapes = [box("r1", { stroke: red }), box("r2", { stroke: blue }), box("r3", { stroke: red }), image("i1", red)];
+    expect(selectionStrokes(shapes, [])).toEqual([]);
+    expect(selectionStrokes(shapes, ["r1", "r2", "r3", "i1"])).toEqual([red, blue]);
+    expect(selectionStrokes(shapes, ["i1"])).toEqual([]); // image-only → nothing painted
+  });
+
+  it("selectionFills lists distinct fills of the fillable selection, none as null", () => {
+    const shapes = [
+      box("r1", { fill: red }),
+      box("r2"),
+      text("t1", { fill: red }),
+      { id: "l1", type: "line", stroke: "#000", strokeWidth: 3, points: [0, 0, 9, 9] } as Shape,
+    ];
+    expect(selectionFills(shapes, ["r1", "r2", "t1", "l1"])).toEqual([red, null]);
+    expect(selectionFills(shapes, ["l1"])).toEqual([]); // nothing fillable → empty declaration
+  });
+
+  it("recolor restrokes ONLY the matching color class within the selection — one undoable edit, pen pref untouched", () => {
+    let s = seeded([
+      box("r1", { stroke: red }),
+      box("r2", { stroke: blue }),
+      box("out", { stroke: red }), // same class, NOT selected — stays
+    ]);
+    s = drawReducer(s, { type: "select", ids: ["r1", "r2"] });
+    const ink = s.color;
+    s = drawReducer(s, { type: "recolor", from: red, to: green });
+    expect(s.shapes.map((sh) => sh.stroke)).toEqual([green, blue, red]);
+    expect(s.color).toBe(ink); // a declaration edit, not a pen pick
+    expect(s.selectedIds).toEqual(["r1", "r2"]); // selection survives for further edits
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes.map((sh) => sh.stroke)).toEqual([red, blue, red]);
+  });
+
+  it("recolor reaches grouped members (color edits are allowed on groups) but never images", () => {
+    let s = seeded([box("g1", { stroke: red, groupPath: ["G"] }), box("g2", { stroke: blue, groupPath: ["G"] }), image("i1", red)]);
+    s = drawReducer(s, { type: "select", ids: ["g1", "g2", "i1"] });
+    s = drawReducer(s, { type: "recolor", from: red, to: green });
+    expect(s.shapes.map((sh) => sh.stroke)).toEqual([green, blue, red]);
+  });
+
+  it("recolor no-ops without history churn: no selection, no match, or from === to", () => {
+    let s = seeded([box("r1", { stroke: red })]);
+    expect(drawReducer(s, { type: "recolor", from: red, to: green })).toBe(s); // no selection
+    s = drawReducer(s, { type: "select", ids: ["r1"] });
+    expect(drawReducer(s, { type: "recolor", from: blue, to: green })).toBe(s); // no match
+    expect(drawReducer(s, { type: "recolor", from: red, to: red })).toBe(s); // self-drop
+  });
+
+  it("refill merges a fill class: none→c fills exactly the unfilled, c→none strips exactly that class", () => {
+    let s = seeded([
+      box("r1", { fill: red }),
+      box("r2"),
+      { id: "l1", type: "line", stroke: "#000", strokeWidth: 3, points: [0, 0, 9, 9] } as Shape,
+    ]);
+    const pref = s.fill;
+    s = drawReducer(s, { type: "select", ids: ["r1", "r2", "l1"] });
+    s = drawReducer(s, { type: "refill", from: null, to: green });
+    expect(s.shapes.find((sh) => sh.id === "r2")).toMatchObject({ fill: green });
+    expect(s.shapes.find((sh) => sh.id === "r1")).toMatchObject({ fill: red }); // other class untouched
+    expect("fill" in s.shapes.find((sh) => sh.id === "l1")!).toBe(false); // segments can't fill
+    s = drawReducer(s, { type: "refill", from: red, to: null });
+    expect("fill" in s.shapes.find((sh) => sh.id === "r1")!).toBe(false); // stripped (docs stay slim)
+    expect(s.shapes.find((sh) => sh.id === "r2")).toMatchObject({ fill: green }); // survives
+    expect(s.past).toHaveLength(2); // two discrete refill commits (select doesn't push)
+    expect(s.fill).toBe(pref); // ambient pref untouched
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes.find((sh) => sh.id === "r1")).toMatchObject({ fill: red });
   });
 });
 

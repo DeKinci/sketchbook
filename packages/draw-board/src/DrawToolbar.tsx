@@ -18,6 +18,8 @@ import {
   ImagePlus,
   type LucideIcon,
 } from "lucide-react";
+import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { IconButton } from "./IconButton.tsx";
 import { CONTRAST_INK, FILL_COLORS, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
 
@@ -93,6 +95,142 @@ function ClusterButton<V extends string>({
   );
 }
 
+/** The fill pill's value row — none first, then the regular inks. */
+const FILL_VALUES: readonly (string | null)[] = [null, ...FILL_COLORS];
+
+/** Shared chrome of the color/fill pills, DECLARATION-aware. With a selection
+ *  the pill highlights EVERY value present on it (`active`) — the selection's
+ *  editable color declaration: clicking a swatch still repaints the whole
+ *  selection (onPick), while DRAGGING one highlighted swatch onto another
+ *  merges only that color class into the target (onMerge) — recolor the reds
+ *  blue without touching the rest. Null is the fill pill's "none", a mergeable
+ *  class like any other (none→c fills the unfilled, c→none strips that class).
+ *  With exactly one highlight the accent well keeps its signature slide. */
+function SwatchPill<V extends string | null>({
+  values,
+  active,
+  mergeable,
+  onPick,
+  onMerge,
+  swatch,
+  labelFor,
+  titleFor,
+}: {
+  values: readonly V[];
+  /** The highlighted declaration (the ambient pref when nothing is selected). */
+  active: readonly V[];
+  /** Whether drag-merge is armed — i.e. a selection exists to retarget. */
+  mergeable: boolean;
+  onPick: (v: V) => void;
+  onMerge: (from: V, to: V) => void;
+  swatch: (v: V) => React.ReactNode;
+  labelFor: (v: V) => string;
+  titleFor: (v: V) => string;
+}) {
+  const pillRef = useRef<HTMLDivElement>(null);
+  // The press being watched for a drag — set on pointerdown on a draggable
+  // (highlighted) swatch, promoted to the `drag` render state past 5px.
+  const pressRef = useRef<{ v: V; x: number; y: number; started: boolean } | null>(null);
+  // A finished drag still fires a click on the (capturing) source button —
+  // swallow exactly that one so the drop doesn't ALSO repaint the selection.
+  const suppressClickRef = useRef(false);
+  const [drag, setDrag] = useState<{ v: V; x: number; y: number; overIdx: number | null } | null>(null);
+
+  const key = (v: V) => (v === null ? "\0none" : v.toLowerCase());
+  const eq = (a: V, b: V) => key(a) === key(b);
+  const isActive = (v: V) => active.some((a) => eq(a, v));
+  const activeIdxs = values.map((v, i) => (isActive(v) ? i : -1)).filter((i) => i >= 0);
+  const srcIdx = drag ? values.findIndex((v) => eq(v, drag.v)) : -1;
+
+  /** The swatch index under a viewport point — the drop target hit-test
+   *  (coordinate-based, so pointer capture doesn't blind it). */
+  const targetAt = (x: number, y: number): number | null => {
+    const el = document.elementFromPoint(x, y)?.closest("[data-swatch-idx]");
+    if (!(el instanceof HTMLElement) || !pillRef.current?.contains(el)) return null;
+    return Number(el.dataset.swatchIdx);
+  };
+
+  const wellClass =
+    "pointer-events-none absolute inset-y-0.5 left-0.5 w-7 rounded-full bg-accent-600/25 ring-1 ring-inset ring-accent-500/40 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]";
+  return (
+    <div ref={pillRef} className="relative flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5">
+      {activeIdxs.length === 1 ? (
+        // Lone highlight: the classic single well — persists across renders, so
+        // an ambient color change still SLIDES it (the signature motion).
+        <span aria-hidden className={wellClass} style={{ transform: `translateX(${activeIdxs[0] * 100}%)` }} />
+      ) : (
+        // Multi-color declaration: one static well per member (membership
+        // changes discretely with the selection — nothing to slide).
+        activeIdxs.map((i) => <span key={i} aria-hidden className={wellClass} style={{ transform: `translateX(${i * 100}%)` }} />)
+      )}
+      {values.map((v, i) => {
+        const draggable = mergeable && isActive(v);
+        return (
+          <button
+            key={v ?? "none"}
+            type="button"
+            data-swatch-idx={i}
+            aria-label={labelFor(v)}
+            aria-pressed={isActive(v)}
+            title={titleFor(v) + (draggable ? " — drag onto another swatch to repaint just this color" : "")}
+            onPointerDown={(e) => {
+              suppressClickRef.current = false; // every press starts clean
+              if (!draggable || e.button !== 0) return;
+              pressRef.current = { v, x: e.clientX, y: e.clientY, started: false };
+              e.currentTarget.setPointerCapture(e.pointerId);
+            }}
+            onPointerMove={(e) => {
+              const p = pressRef.current;
+              if (!p || (!p.started && Math.hypot(e.clientX - p.x, e.clientY - p.y) < 5)) return;
+              p.started = true;
+              setDrag({ v: p.v, x: e.clientX, y: e.clientY, overIdx: targetAt(e.clientX, e.clientY) });
+            }}
+            onPointerUp={(e) => {
+              const p = pressRef.current;
+              pressRef.current = null;
+              if (!p?.started) return; // sub-threshold press → the click event repaints
+              suppressClickRef.current = true;
+              setDrag(null);
+              const over = targetAt(e.clientX, e.clientY);
+              if (over != null && !eq(values[over], p.v)) onMerge(p.v, values[over]);
+            }}
+            onPointerCancel={() => {
+              pressRef.current = null;
+              setDrag(null);
+            }}
+            onClick={() => {
+              if (suppressClickRef.current) {
+                suppressClickRef.current = false;
+                return;
+              }
+              onPick(v);
+            }}
+            className={`relative z-10 flex h-7 w-7 touch-none items-center justify-center rounded-full ${draggable ? "cursor-grab" : ""} ${
+              drag && drag.overIdx === i && i !== srcIdx ? "ring-2 ring-accent-400" : ""
+            } ${drag && i === srcIdx ? "opacity-40" : ""}`}
+          >
+            {swatch(v)}
+          </button>
+        );
+      })}
+      {/* The carried color rides the pointer — portaled to body so the
+          toolbar's container-type (layout containment = it would become this
+          fixed element's containing block) can't trap it. */}
+      {drag &&
+        createPortal(
+          <span
+            aria-hidden
+            className="pointer-events-none fixed z-[100] -translate-x-1/2 -translate-y-1/2 scale-125 drop-shadow-[0_2px_6px_rgba(0,0,0,0.6)]"
+            style={{ left: drag.x, top: drag.y }}
+          >
+            {swatch(drag.v)}
+          </span>,
+          document.body
+        )}
+    </div>
+  );
+}
+
 /**
  * The drawing toolbar: tool picker · color swatches · stroke width · history ·
  * delete/clear. Deliberately spare — chrome uses design tokens/`ui` primitives;
@@ -104,8 +242,8 @@ export function DrawToolbar({
   baseTool,
   shapeVariant,
   lineVariant,
-  color,
-  fill,
+  colors,
+  fills,
   strokeWidth,
   strokeStyle,
   sizeStep = null,
@@ -119,6 +257,8 @@ export function DrawToolbar({
   onArmCluster,
   onColor,
   onFill,
+  onRecolor,
+  onRefill,
   onStrokeStyle,
   onSizeSlot,
   onUndo,
@@ -135,9 +275,11 @@ export function DrawToolbar({
   /** Last-used variant of each one-use cluster — the morph button shows its icon. */
   shapeVariant: ShapeVariant;
   lineVariant: LineVariant;
-  color: string;
-  /** Interior/background fill (the selection's own when uniform), null = none. */
-  fill: string | null;
+  /** The stroke pill's highlighted DECLARATION: every stroke color present on
+   *  the selection (multi while mixed), or just the ambient pen ink. */
+  colors: readonly string[];
+  /** The fill pill's declaration (null = none), same contract as `colors`. */
+  fills: readonly (string | null)[];
   /** The width the size dots display (the selection's own when it has one). */
   strokeWidth: number;
   /** The armed stroke style (solid/dashed/dotted) — the 4 key cycles it. */
@@ -162,6 +304,11 @@ export function DrawToolbar({
   onColor: (c: string) => void;
   /** A fill swatch was pressed (null = none; also refills the selection). */
   onFill: (c: string | null) => void;
+  /** A highlighted stroke swatch was DRAGGED onto another: repaint just that
+   *  color class within the selection (from → to). */
+  onRecolor: (from: string, to: string) => void;
+  /** Fill counterpart of onRecolor (null = the none class). */
+  onRefill: (from: string | null, to: string | null) => void;
   /** A stroke-style swatch was pressed (also restyles the selection). */
   onStrokeStyle: (s: StrokeStyle) => void;
   /** A size dot was pressed (0 small · 1 mid · 2 large). The EDITOR owns the
@@ -184,7 +331,6 @@ export function DrawToolbar({
   extra?: React.ReactNode;
 }) {
   const persistentActive = tool === "select" || tool === "pen";
-  const colorIdx = palette.findIndex((c) => c.toLowerCase() === color.toLowerCase());
   // The well sits on the nearest visible slot even for SECRET sizes (past the
   // three shown); the active slot's dot then renders at the REAL size so the
   // secret level stays legible. Repeated presses of an extreme keep stepping.
@@ -320,66 +466,47 @@ export function DrawToolbar({
 
       {/* Style cluster (color + size) — on mobile this is the top row. */}
       <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 max-md:order-1 max-md:basis-full">
-      {/* Color swatches — sliding accent well marks the active color (same motion
-          + accent as the tool well). */}
-      <div className="relative flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5">
-        {colorIdx >= 0 && (
+      {/* Color swatches — the selection's editable stroke declaration (see
+          SwatchPill): every color present highlights; drag one onto another to
+          repaint just that class, click to repaint the whole selection. */}
+      <SwatchPill
+        values={palette}
+        active={colors}
+        mergeable={hasSelection}
+        onPick={onColor}
+        onMerge={onRecolor}
+        labelFor={(c) => (c === CONTRAST_INK ? "Adaptive ink — always contrasts the background (`)" : `Color ${c}`)}
+        titleFor={(c) => (c === CONTRAST_INK ? "Adaptive — always contrasts what's behind it" : c)}
+        swatch={(c) => (
           <span
-            aria-hidden
-            className="pointer-events-none absolute inset-y-0.5 left-0.5 w-7 rounded-full bg-accent-600/25 ring-1 ring-inset ring-accent-500/40 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]"
-            style={{ transform: `translateX(${colorIdx * 100}%)` }}
+            className="h-[18px] w-[18px] rounded-full border border-ink-500"
+            style={{ backgroundColor: c === CONTRAST_INK ? "#f5f5f5" : c }}
           />
         )}
-        {palette.map((c) => {
-          const adaptive = c === CONTRAST_INK;
-          return (
-            <button
-              key={c}
-              type="button"
-              aria-label={adaptive ? "Adaptive ink — always contrasts the background (`)" : `Color ${c}`}
-              aria-pressed={color.toLowerCase() === c.toLowerCase()}
-              title={adaptive ? "Adaptive — always contrasts what's behind it" : c}
-              onClick={() => onColor(c)}
-              className="relative z-10 flex h-7 w-7 items-center justify-center rounded-full"
-            >
-              <span
-                className="h-[18px] w-[18px] rounded-full border border-ink-500"
-                style={{ backgroundColor: adaptive ? "#f5f5f5" : c }}
-              />
-            </button>
-          );
-        })}
-      </div>
+      />
 
       {/* Fill swatches — interior / text-background color, none first. SQUARE
           swatches (area) vs the stroke circles; regular inks only — the
-          adaptive ink is stroke-only (fills are what it contrasts against). */}
-      <div className="relative flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5">
-        <span
-          aria-hidden
-          className="pointer-events-none absolute inset-y-0.5 left-0.5 w-7 rounded-full bg-accent-600/25 ring-1 ring-inset ring-accent-500/40 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]"
-          style={{ transform: `translateX(${(fill ? FILL_COLORS.findIndex((c) => c.toLowerCase() === fill.toLowerCase()) + 1 : 0) * 100}%)` }}
-        />
-        {[null, ...FILL_COLORS].map((c) => (
-          <button
-            key={c ?? "none"}
-            type="button"
-            aria-label={c ? `Fill ${c}` : "No fill"}
-            aria-pressed={(fill ?? null) === c}
-            title={c ? `Fill ${c}` : "No fill"}
-            onClick={() => onFill(c)}
-            className="relative z-10 flex h-7 w-7 items-center justify-center rounded-full"
-          >
-            {c ? (
-              <span className="h-4 w-4 rounded border border-ink-500" style={{ backgroundColor: c }} />
-            ) : (
-              <span className="relative h-4 w-4 overflow-hidden rounded border border-ink-400">
-                <span className="absolute left-1/2 top-1/2 h-[1.5px] w-6 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
+          adaptive ink is stroke-only (fills are what it contrasts against).
+          None is a declaration class too: drag none→c to fill the unfilled. */}
+      <SwatchPill
+        values={FILL_VALUES}
+        active={fills}
+        mergeable={hasSelection}
+        onPick={onFill}
+        onMerge={onRefill}
+        labelFor={(c) => (c ? `Fill ${c}` : "No fill")}
+        titleFor={(c) => (c ? `Fill ${c}` : "No fill")}
+        swatch={(c) =>
+          c ? (
+            <span className="h-4 w-4 rounded border border-ink-500" style={{ backgroundColor: c }} />
+          ) : (
+            <span className="relative h-4 w-4 overflow-hidden rounded border border-ink-400">
+              <span className="absolute left-1/2 top-1/2 h-[1.5px] w-6 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
+            </span>
+          )
+        }
+      />
 
 {/* Stroke / text size — same sliding accent well. Three dots, more sizes: the
     extremes keep stepping when re-pressed (secret levels past the visible

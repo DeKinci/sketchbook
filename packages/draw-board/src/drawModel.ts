@@ -344,6 +344,26 @@ export function paintsFill(sh: Shape): boolean {
   }
 }
 
+/** The types that CARRY a fill slot (a pen's may lie dormant while open —
+ *  {@link paintsFill} is the painted-now check). Single source for setFill,
+ *  refill, and the declaration derivation. */
+export function isFillable(sh: Shape): sh is BoxShape | FreehandShape | TextShape {
+  return sh.type === "rect" || sh.type === "ellipse" || sh.type === "pen" || sh.type === "text";
+}
+
+/** Set / strip one shape's fill (null STRIPS the field — persisted docs stay
+ *  slim). Non-fillable shapes pass through untouched. */
+export function applyFill(sh: Shape, fill: string | null): Shape {
+  if (!isFillable(sh)) return sh;
+  if (fill === null) {
+    if (sh.fill === undefined) return sh;
+    const next = { ...sh };
+    delete next.fill;
+    return next;
+  }
+  return { ...sh, fill };
+}
+
 /** The topmost fill color under a point — the backdrop the adaptive ink
  *  contrasts against there (images excluded: pure-land callers — SVG export,
  *  the edit overlay — have no pixels; the canvas's raster sampler adds them).
@@ -1036,6 +1056,32 @@ export function unitSizeStep(shapes: Shape[], ids: string[]): number {
   return shapes.find((sh) => set.has(sh.id))?.sizeStep ?? 0;
 }
 
+/** The color DECLARATION the stroke pill shows for a selection: the distinct
+ *  stroke values present on the selected shapes, in encounter order. Images are
+ *  excluded — their stroke field never paints. Empty selection (or image-only)
+ *  → empty; the editor then falls back to the ambient pen ink. */
+export function selectionStrokes(shapes: Shape[], selectedIds: string[]): string[] {
+  const sel = new Set(selectedIds);
+  const out: string[] = [];
+  for (const sh of shapes) if (sel.has(sh.id) && sh.type !== "image" && !out.includes(sh.stroke)) out.push(sh.stroke);
+  return out;
+}
+
+/** Fill counterpart of {@link selectionStrokes}: the distinct fills across the
+ *  selection's FILLABLE members (null = none — the unfilled are a class too,
+ *  mergeable like any other). Segments/images carry no interior and contribute
+ *  nothing; a selection with no fillable member yields []. */
+export function selectionFills(shapes: Shape[], selectedIds: string[]): (string | null)[] {
+  const sel = new Set(selectedIds);
+  const out: (string | null)[] = [];
+  for (const sh of shapes) {
+    if (!sel.has(sh.id) || !isFillable(sh)) continue;
+    const f = sh.fill ?? null;
+    if (!out.includes(f)) out.push(f);
+  }
+  return out;
+}
+
 /** What step a size-dot click means at `step` — the two-mode model. NORMAL zone
  *  (|step| ≤ 1): the dots are ABSOLUTE selectors — small −1 · mid 0 · large +1
  *  (so "large → click small" jumps straight to small). EXTENDED zone (entered by
@@ -1411,6 +1457,14 @@ export type DrawAction =
   // Fill (interior / text background): null = none. Mirrors setColor's scope
   // rules; only fillable shapes (rect/ellipse/pen/text) are touched.
   | { type: "setFill"; fill: string | null }
+  // Targeted DECLARATION edit (drag one swatch onto another): among the
+  // SELECTED shapes, restroke exactly those whose stroke is `from` — the other
+  // color classes stay. Ambient prefs untouched (it edits the drawing, not the
+  // pen). Images never match (their stroke field doesn't paint).
+  | { type: "recolor"; from: string; to: string }
+  // Fill counterpart: null = none is a mergeable class too — none→c fills the
+  // unfilled, c→none strips exactly that class.
+  | { type: "refill"; from: string | null; to: string | null }
   | { type: "setStrokeWidth"; width: number }
   | { type: "setStrokeStyle"; style: StrokeStyle }
   // Select shapes. Non-deep selects NORMALIZE: every id expands to its full root
@@ -1726,36 +1780,34 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
     case "setFill": {
       // Mirrors setColor: live-refill a draft, else the selection (undoable),
       // else just the pref. Segments/images carry no interior to fill; "none"
-      // drops the field (persisted docs stay slim).
-      const fillOne = (sh: BoxShape | FreehandShape | TextShape): Shape => {
-        if (a.fill === null) {
-          if (sh.fill === undefined) return sh;
-          const next = { ...sh };
-          delete next.fill;
-          return next;
-        }
-        return { ...sh, fill: a.fill };
-      };
-      const refill = (sh: Shape): Shape => {
-        switch (sh.type) {
-          case "rect":
-          case "ellipse":
-            return fillOne(sh);
-          case "pen":
-            return fillOne(sh);
-          case "text":
-            return fillOne(sh);
-          default:
-            return sh;
-        }
-      };
+      // drops the field (persisted docs stay slim) — see applyFill.
       if (s.draftId) {
-        return { ...s, fill: a.fill, shapes: mapShapes(s.shapes, new Set([s.draftId]), refill) };
+        return { ...s, fill: a.fill, shapes: mapShapes(s.shapes, new Set([s.draftId]), (sh) => applyFill(sh, a.fill)) };
       }
       if (s.selectedIds.length) {
-        return { ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), refill)), fill: a.fill };
+        return { ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), (sh) => applyFill(sh, a.fill))), fill: a.fill };
       }
       return { ...s, fill: a.fill };
+    }
+    case "recolor": {
+      // Drag-a-swatch-onto-another: restroke exactly the `from` class within
+      // the selection. Grouped members recolor like any member (color is an
+      // allowed group edit); images never match. No-ops return s untouched —
+      // no empty history entries.
+      if (!s.selectedIds.length || a.from === a.to) return s;
+      const sel = new Set(s.selectedIds);
+      const hit = (sh: Shape) => sel.has(sh.id) && sh.type !== "image" && sh.stroke.toLowerCase() === a.from.toLowerCase();
+      if (!s.shapes.some(hit)) return s;
+      return commit(s, s.shapes.map((sh) => (hit(sh) ? { ...sh, stroke: a.to } : sh)));
+    }
+    case "refill": {
+      // Fill-class merge (null = the unfilled class). Same no-op guards.
+      const from = a.from?.toLowerCase() ?? null;
+      if (!s.selectedIds.length || from === (a.to?.toLowerCase() ?? null)) return s;
+      const sel = new Set(s.selectedIds);
+      const hit = (sh: Shape) => sel.has(sh.id) && isFillable(sh) && (sh.fill?.toLowerCase() ?? null) === from;
+      if (!s.shapes.some(hit)) return s;
+      return commit(s, s.shapes.map((sh) => (hit(sh) ? applyFill(sh, a.to) : sh)));
     }
     case "setStrokeWidth": {
       if (s.draftId) {

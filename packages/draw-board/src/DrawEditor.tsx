@@ -21,6 +21,8 @@ import {
   migrateLabels,
   normalizeGroups,
   scaleStepTarget,
+  selectionFills,
+  selectionStrokes,
   slotTargetStep,
   stepStroke,
   strokeForFont,
@@ -84,17 +86,19 @@ function strokeBase(s: { shapes: Shape[]; selectedIds: string[]; strokeWidth: nu
   return widths.size === 1 ? [...widths][0] : s.strokeWidth;
 }
 
-/** The fill the swatches display: the selection's own when uniform across its
- *  fillable members (segments/images have no interior), else the ambient pref. */
-function fillBase(s: { shapes: Shape[]; selectedIds: string[]; fill: string | null }): string | null {
-  if (!s.selectedIds.length) return s.fill;
-  const sel = new Set(s.selectedIds);
-  const fills = new Set<string | null>();
-  for (const sh of s.shapes) {
-    if (!sel.has(sh.id)) continue;
-    if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "pen" || sh.type === "text") fills.add(sh.fill ?? null);
-  }
-  return fills.size === 1 ? [...fills][0] : s.fill;
+/** The stroke pill's declaration: the selection's own colors when it has any
+ *  (multi while mixed — the editable color declaration), else the ambient pen
+ *  ink. Image-only selections have no painted stroke → ambient too. */
+function colorsBase(s: { shapes: Shape[]; selectedIds: string[]; color: string }): readonly string[] {
+  const strokes = selectionStrokes(s.shapes, s.selectedIds);
+  return strokes.length ? strokes : [s.color];
+}
+
+/** Fill counterpart of {@link colorsBase} (null = none); selections with no
+ *  fillable member fall back to the ambient pref. */
+function fillsBase(s: { shapes: Shape[]; selectedIds: string[]; fill: string | null }): readonly (string | null)[] {
+  const fills = selectionFills(s.shapes, s.selectedIds);
+  return fills.length ? fills : [s.fill];
 }
 
 function defaultImageToData(file: File): Promise<BoardImageData> {
@@ -1210,8 +1214,8 @@ export function DrawEditor({
       baseTool={state.baseTool}
       shapeVariant={state.shapeVariant}
       lineVariant={state.lineVariant}
-      color={state.color}
-      fill={fillBase(state)}
+      colors={colorsBase(state)}
+      fills={fillsBase(state)}
       strokeWidth={strokeBase(state)}
       strokeStyle={state.strokeStyle}
       sizeStep={sizeTarget ? unitSizeStep(state.shapes, sizeTarget) : null}
@@ -1230,6 +1234,8 @@ export function DrawEditor({
       onArmCluster={(cluster) => dispatch({ type: "armCluster", cluster })}
       onColor={(color) => dispatch({ type: "setColor", color })}
       onFill={(fill) => dispatch({ type: "setFill", fill })}
+      onRecolor={(from, to) => dispatch({ type: "recolor", from, to })}
+      onRefill={(from, to) => dispatch({ type: "refill", from, to })}
       onStrokeStyle={(style) => dispatch({ type: "setStrokeStyle", style })}
       onSizeSlot={onSizeSlot}
       onUndo={() => dispatch({ type: "undo" })}
