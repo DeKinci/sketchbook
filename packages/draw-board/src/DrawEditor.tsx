@@ -34,7 +34,6 @@ import {
   STROKE_STYLES,
   CANVAS_BG_DARK,
   CONTRAST_INK,
-  PALETTE,
   contrastSolidOver,
   fillAt,
   type DrawDoc,
@@ -241,9 +240,6 @@ export function DrawEditor({
   // Operator is dark-only. The primary ink is adaptive (CONTRAST_INK) — the
   // canvas resolves it to a bright/dark solid contrasting the BACKGROUND
   // sampled under each shape (paper, images, and fills — never strokes).
-  const palette = PALETTE;
-  const paletteRef = useRef(palette);
-  paletteRef.current = palette;
   const bgColor = bgImage ? "transparent" : CANVAS_BG_DARK;
 
   const { state, dispatch } = useDrawing(doc, CONTRAST_INK);
@@ -958,16 +954,6 @@ export function DrawEditor({
     },
     [applySizeStep, dispatch]
   );
-  const cycleColor = useCallback(
-    (dir: number) => {
-      const pal = paletteRef.current;
-      const cur = stateRef.current.color.toLowerCase();
-      let idx = pal.findIndex((c) => c.toLowerCase() === cur);
-      if (idx < 0) idx = 0;
-      dispatch({ type: "setColor", color: pal[(idx + dir + pal.length) % pal.length] });
-    },
-    [dispatch]
-  );
 
   // ── Export ──────────────────────────────────────────────────────────────────
   const exporting = useRef(false);
@@ -1100,6 +1086,18 @@ export function DrawEditor({
         }
         return; // ⌘V handled by the paste listener
       }
+      // The lane keys (see cyclePaint/cycleShade): ` cycles the stroke color,
+      // ⇧` the fill, ⌥` the stroke SHADE, ⌥⇧` the fill shade. Keyed off
+      // e.code — on mac ⌥` is a dead key (composition), so e.key is useless
+      // there, and ⇧` types "~"; the physical code stays "Backquote" for all
+      // four. Must run BEFORE the alt bail-out below.
+      if (e.code === "Backquote" || e.key === "`" || e.key === "~") {
+        e.preventDefault();
+        if (e.repeat) return;
+        const level = e.shiftKey ? ("fill" as const) : ("stroke" as const);
+        dispatch(e.altKey ? { type: "cycleShade", level } : { type: "cyclePaint", level });
+        return;
+      }
       if (e.altKey) return;
       // One action per PRESS: auto-repeat on the cycling/committing keys would
       // spin tool variants and flood the history with per-repeat commits. (Space
@@ -1164,12 +1162,6 @@ export function DrawEditor({
         stepSize(1);
         return;
       }
-      // ` (tilde/tick) / ⇧` → cycle the color forward/back.
-      if (e.key === "`" || e.code === "Backquote") {
-        e.preventDefault();
-        cycleColor(e.shiftKey ? -1 : 1);
-        return;
-      }
       // 4 → cycle the stroke style (solid → dashed → dotted). Falls through the
       // draft guard like -/=/`: mid-draw it live-restyles the draft.
       if (e.key === "4") {
@@ -1191,7 +1183,7 @@ export function DrawEditor({
         dispatch({ type: "setTool", tool: "text" });
       }
     },
-    [session, croppingId, dispatch, copy, onEraser, onTilde, stepSize, cycleColor, policy, zoomStep, fitContent, onSpaceKey]
+    [session, croppingId, dispatch, copy, onEraser, onTilde, stepSize, policy, zoomStep, fitContent, onSpaceKey]
   );
 
   // Space release ends pan-mode; losing focus does too (a keyup can land elsewhere).
@@ -1219,7 +1211,8 @@ export function DrawEditor({
       strokeWidth={strokeBase(state)}
       strokeStyle={state.strokeStyle}
       sizeStep={sizeTarget ? unitSizeStep(state.shapes, sizeTarget) : null}
-      palette={palette}
+      strokeShades={state.strokeShades}
+      fillShades={state.fillShades}
       hasSelection={state.selectedIds.length > 0}
       groupAction={groupActionFor(state.shapes, state.selectedIds)}
       onGroup={() => {
@@ -1234,6 +1227,7 @@ export function DrawEditor({
       onArmCluster={(cluster) => dispatch({ type: "armCluster", cluster })}
       onColor={(color) => dispatch({ type: "setColor", color })}
       onFill={(fill) => dispatch({ type: "setFill", fill })}
+      onShade={(level, family, shade) => dispatch({ type: "setShade", level, family, shade })}
       onRecolor={(from, to) => dispatch({ type: "recolor", from, to })}
       onRefill={(from, to) => dispatch({ type: "refill", from, to })}
       onStrokeStyle={(style) => dispatch({ type: "setStrokeStyle", style })}

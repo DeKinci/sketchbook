@@ -18,10 +18,10 @@ import {
   ImagePlus,
   type LucideIcon,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconButton } from "./IconButton.tsx";
-import { CONTRAST_INK, FILL_COLORS, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
+import { CONTRAST_INK, HUE_FAMILIES, SHADES, familyOf, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type HueFamily, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
 
 /** The two persistent tools live in a segmented "well" that slides to whichever
  *  is armed; the one-use tools (shape / connector clusters + text) follow it. */
@@ -95,125 +95,304 @@ function ClusterButton<V extends string>({
   );
 }
 
-/** The fill pill's value row — none first, then the regular inks. */
-const FILL_VALUES: readonly (string | null)[] = [null, ...FILL_COLORS];
+type PaintLevel = "stroke" | "fill";
 
-/** Shared chrome of the color/fill pills, DECLARATION-aware. With a selection
- *  the pill highlights EVERY value present on it (`active`) — the selection's
- *  editable color declaration: clicking a swatch still repaints the whole
- *  selection (onPick), while DRAGGING one highlighted swatch onto another
- *  merges only that color class into the target (onMerge) — recolor the reds
- *  blue without touching the rest. Null is the fill pill's "none", a mergeable
- *  class like any other (none→c fills the unfilled, c→none strips that class).
- *  With exactly one highlight the accent well keeps its signature slide. */
-function SwatchPill<V extends string | null>({
-  values,
-  active,
+/** The lane's drop hit-test: the half (or open shade-strip rung) under a
+ *  viewport point as its {level, value} payload — value is a shade hex, the
+ *  contrast sentinel, or "none". Coordinate-based, so pointer capture doesn't
+ *  blind it. */
+function laneTargetAt(x: number, y: number, within: (el: HTMLElement) => boolean): { level: PaintLevel; value: string } | null {
+  const el = document.elementFromPoint(x, y)?.closest("[data-lane-level]");
+  if (!(el instanceof HTMLElement) || !within(el)) return null;
+  return { level: el.dataset.laneLevel as PaintLevel, value: el.dataset.laneValue! };
+}
+
+const DRAG_HINT = " — drag onto another column to repaint just this color";
+
+/** THE paint lane — one shared palette for both paint properties. Each column
+ *  is a hue family with two LEVELS: the top half paints the family's armed
+ *  STROKE shade, the bottom half its armed FILL shade (independent rungs; the
+ *  disc face shows both). Column 0 holds the level specials — adaptive ink
+ *  (stroke-only) over "no fill". The halves are the selection's editable
+ *  declaration (round-28 grammar, per level): every class present highlights,
+ *  clicking a half repaints the whole selection, dragging a highlighted half
+ *  onto another column of the SAME level merges just that class. Right-click /
+ *  long-press a family half opens its 5-rung shade strip — a changer-picker
+ *  that retunes the column durably; mid-drag, hovering a family half pops the
+ *  strip so merges can land on exact rungs. */
+function PaintLane({
+  strokeShades,
+  fillShades,
+  strokeActive,
+  fillActive,
   mergeable,
-  onPick,
-  onMerge,
-  swatch,
-  labelFor,
-  titleFor,
+  onStroke,
+  onFillPick,
+  onShade,
+  onRecolor,
+  onRefill,
 }: {
-  values: readonly V[];
-  /** The highlighted declaration (the ambient pref when nothing is selected). */
-  active: readonly V[];
+  strokeShades: Record<HueFamily, string>;
+  fillShades: Record<HueFamily, string>;
+  /** Stroke declaration: exact values present on the selection (the contrast
+   *  sentinel included), or the ambient ink when nothing is selected. */
+  strokeActive: readonly string[];
+  /** Fill declaration (null = none), same contract. */
+  fillActive: readonly (string | null)[];
   /** Whether drag-merge is armed — i.e. a selection exists to retarget. */
   mergeable: boolean;
-  onPick: (v: V) => void;
-  onMerge: (from: V, to: V) => void;
-  swatch: (v: V) => React.ReactNode;
-  labelFor: (v: V) => string;
-  titleFor: (v: V) => string;
+  onStroke: (c: string) => void;
+  onFillPick: (c: string | null) => void;
+  onShade: (level: PaintLevel, family: HueFamily, shade: string) => void;
+  onRecolor: (from: string, to: string) => void;
+  onRefill: (from: string | null, to: string | null) => void;
 }) {
   const pillRef = useRef<HTMLDivElement>(null);
-  // The press being watched for a drag — set on pointerdown on a draggable
-  // (highlighted) swatch, promoted to the `drag` render state past 5px.
-  const pressRef = useRef<{ v: V; x: number; y: number; started: boolean } | null>(null);
-  // A finished drag still fires a click on the (capturing) source button —
-  // swallow exactly that one so the drop doesn't ALSO repaint the selection.
+  const stripRef = useRef<HTMLDivElement>(null);
+  // The press being watched: promoted to a drag past 5px (when draggable),
+  // promoted to the shade strip when HELD still for 500ms (family halves).
+  const pressRef = useRef<{ level: PaintLevel; from: string; x: number; y: number; started: boolean; draggable: boolean } | null>(null);
+  // A finished drag/long-press still fires a click on the source button —
+  // swallow exactly that one so it doesn't ALSO repaint the selection.
   const suppressClickRef = useRef(false);
-  const [drag, setDrag] = useState<{ v: V; x: number; y: number; overIdx: number | null } | null>(null);
+  const holdRef = useRef<number | null>(null);
+  const hoverRef = useRef<{ key: string; timer: number } | null>(null);
+  const [drag, setDrag] = useState<{ level: PaintLevel; from: string; x: number; y: number; over: string | null } | null>(null);
+  const [strip, setStrip] = useState<{ level: PaintLevel; family: HueFamily; x: number; y: number } | null>(null);
 
-  const key = (v: V) => (v === null ? "\0none" : v.toLowerCase());
-  const eq = (a: V, b: V) => key(a) === key(b);
-  const isActive = (v: V) => active.some((a) => eq(a, v));
-  const activeIdxs = values.map((v, i) => (isActive(v) ? i : -1)).filter((i) => i >= 0);
-  const srcIdx = drag ? values.findIndex((v) => eq(v, drag.v)) : -1;
+  // Column 0 = the specials; then the families.
+  const cols: (HueFamily | null)[] = [null, ...HUE_FAMILIES];
+  const isTopActive = (f: HueFamily | null) => (f === null ? strokeActive.includes(CONTRAST_INK) : strokeActive.some((c) => familyOf(c) === f));
+  const isBotActive = (f: HueFamily | null) => (f === null ? fillActive.includes(null) : fillActive.some((c) => c !== null && familyOf(c) === f));
+  /** The exact CLASS a drag from this half carries (the declaration's own
+   *  value — it can sit on a different rung than the armed lane shade). */
+  const topFrom = (f: HueFamily | null) => (f === null ? CONTRAST_INK : (strokeActive.find((c) => familyOf(c) === f) ?? strokeShades[f]));
+  const botFrom = (f: HueFamily | null) => (f === null ? "none" : (fillActive.find((c): c is string => c !== null && familyOf(c) === f) ?? fillShades[f]));
+  const topIdxs = cols.map((f, i) => (isTopActive(f) ? i : -1)).filter((i) => i >= 0);
+  const botIdxs = cols.map((f, i) => (isBotActive(f) ? i : -1)).filter((i) => i >= 0);
 
-  /** The swatch index under a viewport point — the drop target hit-test
-   *  (coordinate-based, so pointer capture doesn't blind it). */
-  const targetAt = (x: number, y: number): number | null => {
-    const el = document.elementFromPoint(x, y)?.closest("[data-swatch-idx]");
-    if (!(el instanceof HTMLElement) || !pillRef.current?.contains(el)) return null;
-    return Number(el.dataset.swatchIdx);
+  const clearHold = () => {
+    if (holdRef.current !== null) {
+      clearTimeout(holdRef.current);
+      holdRef.current = null;
+    }
+  };
+  const clearHover = () => {
+    if (hoverRef.current) {
+      clearTimeout(hoverRef.current.timer);
+      hoverRef.current = null;
+    }
+  };
+  const within = (el: HTMLElement) => (pillRef.current?.contains(el) ?? false) || (stripRef.current?.contains(el) ?? false);
+  const openStrip = (level: PaintLevel, family: HueFamily, cell: HTMLElement) => {
+    const pill = pillRef.current?.getBoundingClientRect();
+    const r = cell.getBoundingClientRect();
+    setStrip({ level, family, x: r.left + r.width / 2, y: pill?.top ?? r.top });
   };
 
-  const wellClass =
-    "pointer-events-none absolute inset-y-0.5 left-0.5 w-7 rounded-full bg-accent-600/25 ring-1 ring-inset ring-accent-500/40 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]";
+  // The strip dismisses like a menu: outside press or Escape (captured before
+  // the editor's own Esc ladder).
+  useEffect(() => {
+    if (!strip) return;
+    const down = (e: PointerEvent) => {
+      if (stripRef.current?.contains(e.target as Node)) return;
+      setStrip(null);
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setStrip(null);
+    };
+    document.addEventListener("pointerdown", down, true);
+    document.addEventListener("keydown", key, true);
+    return () => {
+      document.removeEventListener("pointerdown", down, true);
+      document.removeEventListener("keydown", key, true);
+    };
+  }, [strip]);
+
+  const onHalfDown = (e: React.PointerEvent<HTMLButtonElement>, level: PaintLevel, f: HueFamily | null, from: string, draggable: boolean) => {
+    suppressClickRef.current = false; // every press starts clean
+    if (e.button !== 0) return; // right button → the contextmenu path
+    clearHold();
+    if (f) {
+      // Long-press = the touch path to the shade strip (mouse has right-click).
+      const cell = e.currentTarget;
+      holdRef.current = window.setTimeout(() => {
+        holdRef.current = null;
+        pressRef.current = null;
+        suppressClickRef.current = true; // the release click must not paint
+        openStrip(level, f, cell);
+      }, 500);
+    }
+    pressRef.current = { level, from, x: e.clientX, y: e.clientY, started: false, draggable };
+    if (draggable) e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onHalfMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const p = pressRef.current;
+    if (!p || (!p.started && Math.hypot(e.clientX - p.x, e.clientY - p.y) < 5)) return;
+    clearHold(); // real movement — not a long-press
+    if (!p.draggable) {
+      pressRef.current = null;
+      return;
+    }
+    p.started = true;
+    const t = laneTargetAt(e.clientX, e.clientY, within);
+    const over = t && t.level === p.level && t.value.toLowerCase() !== p.from.toLowerCase() ? `${t.level}:${t.value}` : null;
+    setDrag({ level: p.level, from: p.from, x: e.clientX, y: e.clientY, over });
+    // Hovering a FAMILY half of the same level pops its strip, so the merge
+    // can land on an exact rung.
+    const el = document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-lane-family]");
+    const fam = el instanceof HTMLElement && pillRef.current?.contains(el) && el.dataset.laneLevel === p.level ? (el.dataset.laneFamily as HueFamily) : null;
+    const key = fam ? `${p.level}:${fam}` : null;
+    if (hoverRef.current?.key !== key) {
+      clearHover();
+      if (key && fam && el instanceof HTMLElement) {
+        hoverRef.current = {
+          key,
+          timer: window.setTimeout(() => {
+            hoverRef.current = null;
+            openStrip(p.level, fam, el);
+          }, 400),
+        };
+      }
+    }
+  };
+  const onHalfUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    clearHold();
+    clearHover();
+    const p = pressRef.current;
+    pressRef.current = null;
+    if (!p?.started) return; // sub-threshold press → the click event paints
+    suppressClickRef.current = true;
+    setDrag(null);
+    setStrip(null); // a completed drag always puts the strip away
+    const t = laneTargetAt(e.clientX, e.clientY, within);
+    if (t && t.level === p.level && t.value.toLowerCase() !== p.from.toLowerCase()) {
+      if (p.level === "stroke") onRecolor(p.from, t.value);
+      else onRefill(p.from === "none" ? null : p.from, t.value === "none" ? null : t.value);
+    }
+  };
+  const onHalfCancel = () => {
+    clearHold();
+    clearHover();
+    pressRef.current = null;
+    setDrag(null);
+  };
+
+  const halfClass = (level: PaintLevel, value: string, draggable: boolean, isSource: boolean) =>
+    `relative z-20 h-[19px] w-[30px] touch-none ${level === "stroke" ? "rounded-t-[14px] rounded-b-[4px]" : "rounded-b-[14px] rounded-t-[4px]"} ${
+      draggable ? "cursor-grab" : ""
+    } ${drag && drag.over === `${level}:${value}` ? "ring-2 ring-accent-400" : ""} ${drag && isSource ? "opacity-40" : ""}`;
+  const wellBase =
+    "pointer-events-none absolute left-0.5 h-[19px] w-[30px] bg-accent-600/25 ring-1 ring-inset ring-accent-500/40 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]";
+  const cap = (f: HueFamily) => f[0].toUpperCase() + f.slice(1);
+
   return (
-    <div ref={pillRef} className="relative flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5">
-      {activeIdxs.length === 1 ? (
-        // Lone highlight: the classic single well — persists across renders, so
-        // an ambient color change still SLIDES it (the signature motion).
-        <span aria-hidden className={wellClass} style={{ transform: `translateX(${activeIdxs[0] * 100}%)` }} />
-      ) : (
-        // Multi-color declaration: one static well per member (membership
-        // changes discretely with the selection — nothing to slide).
-        activeIdxs.map((i) => <span key={i} aria-hidden className={wellClass} style={{ transform: `translateX(${i * 100}%)` }} />)
+    <div ref={pillRef} className="relative flex items-stretch rounded-[16px] border border-ink-600 bg-ink-800 p-0.5">
+      {/* Declaration wells, per level: exactly one highlight keeps the
+          signature slide; a multi-class declaration renders static wells. */}
+      {(
+        [
+          { idxs: topIdxs, pos: "top-0.5", round: "rounded-t-[14px] rounded-b-[4px]" },
+          { idxs: botIdxs, pos: "bottom-0.5", round: "rounded-b-[14px] rounded-t-[4px]" },
+        ] as const
+      ).map(({ idxs, pos, round }, lvl) =>
+        idxs.length === 1 ? (
+          <span key={lvl} aria-hidden className={`${wellBase} ${pos} ${round}`} style={{ transform: `translateX(${idxs[0] * 100}%)` }} />
+        ) : (
+          idxs.map((i) => <span key={`${lvl}:${i}`} aria-hidden className={`${wellBase} ${pos} ${round}`} style={{ transform: `translateX(${i * 100}%)` }} />)
+        )
       )}
-      {values.map((v, i) => {
-        const draggable = mergeable && isActive(v);
+      {cols.map((f) => {
+        const topValue = f === null ? CONTRAST_INK : strokeShades[f];
+        const botValue = f === null ? "none" : fillShades[f];
+        const topDraggable = mergeable && isTopActive(f);
+        const botDraggable = mergeable && isBotActive(f);
+        const topSource = !!drag && drag.level === "stroke" && drag.from.toLowerCase() === topFrom(f).toLowerCase();
+        const botSource = !!drag && drag.level === "fill" && drag.from.toLowerCase() === botFrom(f).toLowerCase();
         return (
-          <button
-            key={v ?? "none"}
-            type="button"
-            data-swatch-idx={i}
-            aria-label={labelFor(v)}
-            aria-pressed={isActive(v)}
-            title={titleFor(v) + (draggable ? " — drag onto another swatch to repaint just this color" : "")}
-            onPointerDown={(e) => {
-              suppressClickRef.current = false; // every press starts clean
-              if (!draggable || e.button !== 0) return;
-              pressRef.current = { v, x: e.clientX, y: e.clientY, started: false };
-              e.currentTarget.setPointerCapture(e.pointerId);
-            }}
-            onPointerMove={(e) => {
-              const p = pressRef.current;
-              if (!p || (!p.started && Math.hypot(e.clientX - p.x, e.clientY - p.y) < 5)) return;
-              p.started = true;
-              setDrag({ v: p.v, x: e.clientX, y: e.clientY, overIdx: targetAt(e.clientX, e.clientY) });
-            }}
-            onPointerUp={(e) => {
-              const p = pressRef.current;
-              pressRef.current = null;
-              if (!p?.started) return; // sub-threshold press → the click event repaints
-              suppressClickRef.current = true;
-              setDrag(null);
-              const over = targetAt(e.clientX, e.clientY);
-              if (over != null && !eq(values[over], p.v)) onMerge(p.v, values[over]);
-            }}
-            onPointerCancel={() => {
-              pressRef.current = null;
-              setDrag(null);
-            }}
-            onClick={() => {
-              if (suppressClickRef.current) {
-                suppressClickRef.current = false;
-                return;
+          <div key={f ?? "specials"} className="relative flex w-[30px] flex-col">
+            {/* The two-level face: top hemisphere = armed stroke shade, bottom
+                = armed fill shade (specials: adaptive ink over no-fill). */}
+            <span
+              aria-hidden
+              className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-ink-500"
+              style={{
+                background: `linear-gradient(to bottom, ${f === null ? "#f5f5f5" : strokeShades[f]} 0%, ${f === null ? "#f5f5f5" : strokeShades[f]} 50%, ${
+                  f === null ? "transparent" : fillShades[f]
+                } 50%, ${f === null ? "transparent" : fillShades[f]} 100%)`,
+              }}
+            />
+            {f === null && (
+              // The no-fill glyph: a slash across the bottom hemisphere only.
+              <span aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-[10px] w-5 -translate-x-1/2 overflow-hidden">
+                <span className="absolute left-1/2 top-[3px] h-[1.5px] w-6 -translate-x-1/2 rotate-[20deg] bg-red-400/80" />
+              </span>
+            )}
+            <button
+              type="button"
+              data-lane-level="stroke"
+              data-lane-value={topValue}
+              {...(f ? { "data-lane-family": f } : {})}
+              aria-label={f === null ? "Adaptive ink — always contrasts the background (`)" : `Stroke ${f} ${strokeShades[f]}`}
+              aria-pressed={isTopActive(f)}
+              title={
+                (f === null
+                  ? "Adaptive — always contrasts what's behind it (` cycles color)"
+                  : `${cap(f)} stroke ${strokeShades[f]} — right-click for shades (\` cycles color, ⌥\` shade)`) +
+                (topDraggable ? DRAG_HINT : "")
               }
-              onPick(v);
-            }}
-            className={`relative z-10 flex h-7 w-7 touch-none items-center justify-center rounded-full ${draggable ? "cursor-grab" : ""} ${
-              drag && drag.overIdx === i && i !== srcIdx ? "ring-2 ring-accent-400" : ""
-            } ${drag && i === srcIdx ? "opacity-40" : ""}`}
-          >
-            {swatch(v)}
-          </button>
+              onPointerDown={(e) => onHalfDown(e, "stroke", f, topFrom(f), topDraggable)}
+              onPointerMove={onHalfMove}
+              onPointerUp={onHalfUp}
+              onPointerCancel={onHalfCancel}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                if (f) openStrip("stroke", f, e.currentTarget);
+              }}
+              onClick={() => {
+                if (suppressClickRef.current) {
+                  suppressClickRef.current = false;
+                  return;
+                }
+                onStroke(topValue);
+              }}
+              className={halfClass("stroke", topValue, topDraggable, topSource)}
+            />
+            <button
+              type="button"
+              data-lane-level="fill"
+              data-lane-value={botValue}
+              {...(f ? { "data-lane-family": f } : {})}
+              aria-label={f === null ? "No fill" : `Fill ${f} ${fillShades[f]}`}
+              aria-pressed={isBotActive(f)}
+              title={
+                (f === null ? "No fill (⇧` cycles fill)" : `${cap(f)} fill ${fillShades[f]} — right-click for shades (⇧\` cycles fill, ⌥⇧\` shade)`) +
+                (botDraggable ? DRAG_HINT : "")
+              }
+              onPointerDown={(e) => onHalfDown(e, "fill", f, botFrom(f), botDraggable)}
+              onPointerMove={onHalfMove}
+              onPointerUp={onHalfUp}
+              onPointerCancel={onHalfCancel}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                if (f) openStrip("fill", f, e.currentTarget);
+              }}
+              onClick={() => {
+                if (suppressClickRef.current) {
+                  suppressClickRef.current = false;
+                  return;
+                }
+                onFillPick(botValue === "none" ? null : botValue);
+              }}
+              className={halfClass("fill", botValue, botDraggable, botSource)}
+            />
+          </div>
         );
       })}
-      {/* The carried color rides the pointer — portaled to body so the
+      {/* The carried class rides the pointer — portaled to body so the
           toolbar's container-type (layout containment = it would become this
           fixed element's containing block) can't trap it. */}
       {drag &&
@@ -223,8 +402,64 @@ function SwatchPill<V extends string | null>({
             className="pointer-events-none fixed z-[100] -translate-x-1/2 -translate-y-1/2 scale-125 drop-shadow-[0_2px_6px_rgba(0,0,0,0.6)]"
             style={{ left: drag.x, top: drag.y }}
           >
-            {swatch(drag.v)}
+            {drag.level === "stroke" ? (
+              <span
+                className="block h-[14px] w-[14px] rounded-full border border-ink-500"
+                style={{ backgroundColor: drag.from === CONTRAST_INK ? "#f5f5f5" : drag.from }}
+              />
+            ) : drag.from === "none" ? (
+              <span className="relative block h-3 w-3 overflow-hidden rounded border border-ink-400">
+                <span className="absolute left-1/2 top-1/2 h-[1.5px] w-5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
+              </span>
+            ) : (
+              <span className="block h-3 w-3 rounded border border-ink-500" style={{ backgroundColor: drag.from }} />
+            )}
           </span>,
+          document.body
+        )}
+      {/* The shade strip — a changer-picker for one family × one level. Fixed +
+          portaled (the toolbar's containment again), anchored above the lane.
+          Its rungs are drop targets too (data-lane-*). */}
+      {strip &&
+        createPortal(
+          <div
+            ref={stripRef}
+            className="fixed z-[100] flex -translate-x-1/2 flex-col gap-1 rounded-xl border border-ink-500 bg-ink-800 p-1 shadow-[0_4px_16px_rgba(0,0,0,0.5)]"
+            style={{ left: strip.x, bottom: window.innerHeight - strip.y + 6 }}
+          >
+            {SHADES[strip.family].map((shade) => {
+              const current = (strip.level === "stroke" ? strokeShades : fillShades)[strip.family] === shade;
+              return (
+                <button
+                  key={shade}
+                  type="button"
+                  data-lane-level={strip.level}
+                  data-lane-value={shade}
+                  aria-label={`${strip.level === "stroke" ? "Stroke" : "Fill"} ${strip.family} shade ${shade}`}
+                  aria-pressed={current}
+                  title={shade}
+                  // The strip lives in a body portal — OUTSIDE the board root.
+                  // A default pointerdown would move focus there and the
+                  // board would go keyboard-dead (Esc, ⌘A, the ` keys). Menus
+                  // don't take focus:
+                  onPointerDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    onShade(strip.level, strip.family, shade);
+                    setStrip(null);
+                  }}
+                  className={`flex h-7 w-7 items-center justify-center rounded-lg ${current ? "bg-accent-600/25 ring-1 ring-inset ring-accent-500/40" : ""} ${
+                    drag && drag.over === `${strip.level}:${shade}` ? "ring-2 ring-accent-400" : ""
+                  }`}
+                >
+                  {strip.level === "stroke" ? (
+                    <span className="h-[18px] w-[18px] rounded-full border border-ink-500" style={{ backgroundColor: shade }} />
+                  ) : (
+                    <span className="h-4 w-4 rounded border border-ink-500" style={{ backgroundColor: shade }} />
+                  )}
+                </button>
+              );
+            })}
+          </div>,
           document.body
         )}
     </div>
@@ -244,10 +479,11 @@ export function DrawToolbar({
   lineVariant,
   colors,
   fills,
+  strokeShades,
+  fillShades,
   strokeWidth,
   strokeStyle,
   sizeStep = null,
-  palette,
   hasSelection,
   groupAction,
   onGroup,
@@ -257,6 +493,7 @@ export function DrawToolbar({
   onArmCluster,
   onColor,
   onFill,
+  onShade,
   onRecolor,
   onRefill,
   onStrokeStyle,
@@ -275,11 +512,15 @@ export function DrawToolbar({
   /** Last-used variant of each one-use cluster — the morph button shows its icon. */
   shapeVariant: ShapeVariant;
   lineVariant: LineVariant;
-  /** The stroke pill's highlighted DECLARATION: every stroke color present on
+  /** The lane's highlighted stroke DECLARATION: every stroke color present on
    *  the selection (multi while mixed), or just the ambient pen ink. */
   colors: readonly string[];
-  /** The fill pill's declaration (null = none), same contract as `colors`. */
+  /** The lane's fill declaration (null = none), same contract as `colors`. */
   fills: readonly (string | null)[];
+  /** The lane's ARMED shade per hue family, per level (what each column's
+   *  halves paint — see PaintLane / DrawState.strokeShades). */
+  strokeShades: Record<HueFamily, string>;
+  fillShades: Record<HueFamily, string>;
   /** The width the size dots display (the selection's own when it has one). */
   strokeWidth: number;
   /** The armed stroke style (solid/dashed/dotted) — the 4 key cycles it. */
@@ -288,8 +529,6 @@ export function DrawToolbar({
    *  natural "medium"), or null for stroke mode. The dots then read the unit's
    *  position — mid resets, extremes step — instead of stroke widths. */
   sizeStep?: number | null;
-  /** Swatch colors: primary theme ink first, then the content colors. */
-  palette: readonly string[];
   hasSelection: boolean;
   /** What ⌘G would do to the current selection (drives the group button's icon
    *  + disabled state): 'group', 'ungroup', or null (nothing groupable). */
@@ -302,8 +541,11 @@ export function DrawToolbar({
   /** Arm a one-use cluster (select its variant, or cycle if already armed). */
   onArmCluster: (cluster: "shape" | "line") => void;
   onColor: (c: string) => void;
-  /** A fill swatch was pressed (null = none; also refills the selection). */
+  /** A fill half was pressed (null = none; also refills the selection). */
   onFill: (c: string | null) => void;
+  /** A shade-strip rung was picked: retune `family`'s armed shade at `level`
+   *  (the changer-picker — see the setShade action). */
+  onShade: (level: "stroke" | "fill", family: HueFamily, shade: string) => void;
   /** A highlighted stroke swatch was DRAGGED onto another: repaint just that
    *  color class within the selection (from → to). */
   onRecolor: (from: string, to: string) => void;
@@ -466,46 +708,20 @@ export function DrawToolbar({
 
       {/* Style cluster (color + size) — on mobile this is the top row. */}
       <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 max-md:order-1 max-md:basis-full">
-      {/* Color swatches — the selection's editable stroke declaration (see
-          SwatchPill): every color present highlights; drag one onto another to
-          repaint just that class, click to repaint the whole selection. */}
-      <SwatchPill
-        values={palette}
-        active={colors}
+      {/* The paint lane — ONE shared palette for stroke + fill: hue-family
+          columns with the stroke level on top and the fill level below, the
+          specials (adaptive ink / no fill) sharing column 0. See PaintLane. */}
+      <PaintLane
+        strokeShades={strokeShades}
+        fillShades={fillShades}
+        strokeActive={colors}
+        fillActive={fills}
         mergeable={hasSelection}
-        onPick={onColor}
-        onMerge={onRecolor}
-        labelFor={(c) => (c === CONTRAST_INK ? "Adaptive ink — always contrasts the background (`)" : `Color ${c}`)}
-        titleFor={(c) => (c === CONTRAST_INK ? "Adaptive — always contrasts what's behind it" : c)}
-        swatch={(c) => (
-          <span
-            className="h-[18px] w-[18px] rounded-full border border-ink-500"
-            style={{ backgroundColor: c === CONTRAST_INK ? "#f5f5f5" : c }}
-          />
-        )}
-      />
-
-      {/* Fill swatches — interior / text-background color, none first. SQUARE
-          swatches (area) vs the stroke circles; regular inks only — the
-          adaptive ink is stroke-only (fills are what it contrasts against).
-          None is a declaration class too: drag none→c to fill the unfilled. */}
-      <SwatchPill
-        values={FILL_VALUES}
-        active={fills}
-        mergeable={hasSelection}
-        onPick={onFill}
-        onMerge={onRefill}
-        labelFor={(c) => (c ? `Fill ${c}` : "No fill")}
-        titleFor={(c) => (c ? `Fill ${c}` : "No fill")}
-        swatch={(c) =>
-          c ? (
-            <span className="h-4 w-4 rounded border border-ink-500" style={{ backgroundColor: c }} />
-          ) : (
-            <span className="relative h-4 w-4 overflow-hidden rounded border border-ink-400">
-              <span className="absolute left-1/2 top-1/2 h-[1.5px] w-6 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
-            </span>
-          )
-        }
+        onStroke={onColor}
+        onFillPick={onFill}
+        onShade={onShade}
+        onRecolor={onRecolor}
+        onRefill={onRefill}
       />
 
 {/* Stroke / text size — same sliding accent well. Three dots, more sizes: the

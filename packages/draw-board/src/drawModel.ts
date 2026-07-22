@@ -196,6 +196,14 @@ export interface DrawState extends DrawDoc {
   color: string;
   /** Ambient fill for new shapes (rect/ellipse/pen/text bg), or none. */
   fill: string | null;
+  /** The lane's ARMED shade per hue family, stroke level — what a click on
+   *  that column paints. Durable session state: the shade strip retunes it
+   *  ("a changer-picker"), and SELECTING shapes pulls their shades into it —
+   *  the lane becomes the palette the selection operates in. */
+  strokeShades: Record<HueFamily, string>;
+  /** Fill-level counterpart — each family's fill shade is independent of its
+   *  stroke shade. */
+  fillShades: Record<HueFamily, string>;
   strokeWidth: number;
   strokeStyle: StrokeStyle;
   /** Currently selected shapes (move/resize/delete/copy), in no particular order. */
@@ -277,6 +285,43 @@ export const isContrastInk = (stroke: string) => stroke === CONTRAST_INK;
 /** Fill options — the regular inks. No contrast sentinel here: fills ARE the
  *  background contrast reacts to; an "adaptive fill" would chase itself. */
 export const FILL_COLORS: readonly string[] = INK_COLORS;
+
+/** The lane's hue families — the toolbar columns past the specials column.
+ *  A family is a COLUMN identity; which of its shades the column currently
+ *  paints (per level) lives in {@link DrawState.strokeShades}/`fillShades`. */
+export const HUE_FAMILIES = ["red", "amber", "green", "blue"] as const;
+export type HueFamily = (typeof HUE_FAMILIES)[number];
+/** Each family's ramp: two tints, the classic base ink (index
+ *  {@link BASE_SHADE} — the INK_COLORS hex), two darks. Hand-tuned for
+ *  perceptual evenness; all lowercase (familyOf compares lowercased). */
+export const SHADES: Record<HueFamily, readonly string[]> = {
+  red: ["#f8b3b5", "#ef7d80", "#e5484d", "#b02f35", "#7a1e22"],
+  amber: ["#fbd48e", "#f8bd55", "#f5a623", "#c07c14", "#8a570c"],
+  green: ["#93dcb8", "#5cc392", "#30a46c", "#1f7a4e", "#125033"],
+  blue: ["#a3c6fb", "#6ba1f9", "#3b82f6", "#2563c4", "#174a94"],
+};
+export const BASE_SHADE = 2;
+/** The hue family a color belongs to (any rung of its ramp), or null — the
+ *  adaptive sentinel and legacy/foreign hexes live outside every family. */
+export function familyOf(color: string): HueFamily | null {
+  const h = color.toLowerCase();
+  for (const f of HUE_FAMILIES) if (SHADES[f].includes(h)) return f;
+  return null;
+}
+/** Index of `color` within its family's ramp, or -1. */
+export function shadeIndexOf(color: string): number {
+  const f = familyOf(color);
+  return f ? SHADES[f].indexOf(color.toLowerCase()) : -1;
+}
+/** A fresh per-family shade map — every column on its classic base ink. */
+export function baseShades(): Record<HueFamily, string> {
+  return {
+    red: SHADES.red[BASE_SHADE],
+    amber: SHADES.amber[BASE_SHADE],
+    green: SHADES.green[BASE_SHADE],
+    blue: SHADES.blue[BASE_SHADE],
+  };
+}
 
 /** The two solid resolutions of the adaptive ink. */
 export const CONTRAST_DARK = "#111111";
@@ -413,6 +458,8 @@ export function initialDrawState(doc?: DrawDoc, opts?: { color?: string }): Draw
     lineVariant: "arrow",
     color: opts?.color ?? CONTRAST_INK,
     fill: null,
+    strokeShades: baseShades(),
+    fillShades: baseShades(),
     strokeWidth: DEFAULT_STROKE_WIDTH,
     strokeStyle: "solid",
     selectedIds: [],
@@ -1465,6 +1512,21 @@ export type DrawAction =
   // Fill counterpart: null = none is a mergeable class too — none→c fills the
   // unfilled, c→none strips exactly that class.
   | { type: "refill"; from: string | null; to: string | null }
+  // The shade strip's pick — a CHANGER-PICKER: retune `family`'s armed shade at
+  // `level`, durably in the lane. With a selection, every selected shape of
+  // that family at that level repaints to the new shade (one undo step); the
+  // ambient pref follows when it points at that family. Nothing selected → the
+  // lane just changes and stays.
+  | { type: "setShade"; level: "stroke" | "fill"; family: HueFamily; shade: string }
+  // ` / ⇧` — walk the lane: stroke cycles adaptive → families, fill cycles
+  // none → families, each column contributing its ARMED shade. Applies exactly
+  // like a toolbar click (selection repaint, else ambient).
+  | { type: "cyclePaint"; level: "stroke" | "fill"; dir?: 1 | -1 }
+  // ⌥` / ⌥⇧` — dig into the current family (the selection's single family at
+  // that level when unambiguous, else the ambient's): step its armed shade one
+  // rung (wraps) and apply like a strip pick. No family (adaptive / none /
+  // mixed selection) → no-op.
+  | { type: "cycleShade"; level: "stroke" | "fill"; dir?: 1 | -1 }
   | { type: "setStrokeWidth"; width: number }
   | { type: "setStrokeStyle"; style: StrokeStyle }
   // Select shapes. Non-deep selects NORMALIZE: every id expands to its full root
@@ -1712,6 +1774,39 @@ export function normalizeGroups(shapes: Shape[]): Shape[] {
 
 const keepExisting = (ids: string[], shapes: Shape[]) => ids.filter((id) => shapes.some((sh) => sh.id === id));
 
+/** The lane sync on selection: pull each selected class's shade into its
+ *  family's armed slot (per level) — the lane becomes the palette the
+ *  selection operates in. Durable (survives deselect); within a family the
+ *  last class in paint order wins. */
+function syncShadesFrom(s: DrawState, selectedIds: string[]): Pick<DrawState, "strokeShades" | "fillShades"> {
+  let strokeShades = s.strokeShades;
+  for (const c of selectionStrokes(s.shapes, selectedIds)) {
+    const f = familyOf(c);
+    if (f && strokeShades[f] !== c.toLowerCase()) strokeShades = { ...strokeShades, [f]: c.toLowerCase() };
+  }
+  let fillShades = s.fillShades;
+  for (const c of selectionFills(s.shapes, selectedIds)) {
+    const f = c === null ? null : familyOf(c);
+    if (f && c && fillShades[f] !== c.toLowerCase()) fillShades = { ...fillShades, [f]: c.toLowerCase() };
+  }
+  return { strokeShades, fillShades };
+}
+
+/** The family ⌥` digs into: the selection's SINGLE family at `level` when
+ *  unambiguous, else the ambient color's. Mixed families → null (no guessing);
+ *  a selection with no family classes (all adaptive / unfilled) falls through
+ *  to the ambient. */
+function effectiveFamily(s: DrawState, level: "stroke" | "fill"): HueFamily | null {
+  if (s.selectedIds.length) {
+    const classes = level === "stroke" ? selectionStrokes(s.shapes, s.selectedIds) : selectionFills(s.shapes, s.selectedIds);
+    const fams = [...new Set(classes.map((c) => (c === null ? null : familyOf(c))).filter((f): f is HueFamily => f !== null))];
+    if (fams.length === 1) return fams[0];
+    if (fams.length > 1) return null;
+  }
+  const cur = level === "stroke" ? s.color : s.fill;
+  return cur === null ? null : familyOf(cur);
+}
+
 export function drawReducer(s: DrawState, a: DrawAction): DrawState {
   switch (a.type) {
     case "setTool":
@@ -1809,6 +1904,62 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       if (!s.shapes.some(hit)) return s;
       return commit(s, s.shapes.map((sh) => (hit(sh) ? applyFill(sh, a.to) : sh)));
     }
+    case "setShade": {
+      // Guard: the shade must belong to the family (the view only sends valid
+      // picks; a stray value must not corrupt the lane).
+      if (familyOf(a.shade) !== a.family) return s;
+      const shade = a.shade.toLowerCase();
+      const isStroke = a.level === "stroke";
+      const lane = isStroke ? s.strokeShades : s.fillShades;
+      const laneChanged = lane[a.family] !== shade;
+      // Ambient follows when it operates in this family — the pen keeps
+      // painting the family you just retuned (adaptive/none/others stay put).
+      const ambient = isStroke ? s.color : s.fill;
+      const follows = ambient !== null && familyOf(ambient) === a.family && ambient.toLowerCase() !== shade;
+      const base: DrawState = {
+        ...s,
+        ...(isStroke ? { strokeShades: { ...s.strokeShades, [a.family]: shade } } : { fillShades: { ...s.fillShades, [a.family]: shade } }),
+        ...(follows ? (isStroke ? { color: shade } : { fill: shade }) : {}),
+      };
+      // With a selection the retune reaches the drawing: every selected shape
+      // of this family at this level unifies onto the new shade (any rung —
+      // "replace the color in the line", not a single-class merge).
+      if (s.selectedIds.length) {
+        const sel = new Set(s.selectedIds);
+        const hit = (sh: Shape) =>
+          sel.has(sh.id) &&
+          (isStroke
+            ? sh.type !== "image" && familyOf(sh.stroke) === a.family && sh.stroke.toLowerCase() !== shade
+            : isFillable(sh) && sh.fill !== undefined && familyOf(sh.fill) === a.family && sh.fill.toLowerCase() !== shade);
+        if (s.shapes.some(hit)) {
+          return commit(base, s.shapes.map((sh) => (hit(sh) ? (isStroke ? { ...sh, stroke: shade } : applyFill(sh, shade)) : sh)));
+        }
+      }
+      return laneChanged || follows ? base : s;
+    }
+    case "cyclePaint": {
+      const dir = a.dir ?? 1;
+      const n = HUE_FAMILIES.length + 1; // the specials column + the families
+      if (a.level === "stroke") {
+        const f = isContrastInk(s.color) ? null : familyOf(s.color);
+        const idx = isContrastInk(s.color) ? 0 : f ? 1 + HUE_FAMILIES.indexOf(f) : 0;
+        const next = (idx + dir + n) % n;
+        return drawReducer(s, { type: "setColor", color: next === 0 ? CONTRAST_INK : s.strokeShades[HUE_FAMILIES[next - 1]] });
+      }
+      const f = s.fill === null ? null : familyOf(s.fill);
+      const idx = s.fill === null ? 0 : f ? 1 + HUE_FAMILIES.indexOf(f) : 0;
+      const next = (idx + dir + n) % n;
+      return drawReducer(s, { type: "setFill", fill: next === 0 ? null : s.fillShades[HUE_FAMILIES[next - 1]] });
+    }
+    case "cycleShade": {
+      const dir = a.dir ?? 1;
+      const f = effectiveFamily(s, a.level);
+      if (!f) return s;
+      const lane = a.level === "stroke" ? s.strokeShades : s.fillShades;
+      const cur = SHADES[f].indexOf(lane[f]);
+      const next = SHADES[f][((cur < 0 ? BASE_SHADE : cur) + dir + SHADES[f].length) % SHADES[f].length];
+      return drawReducer(s, { type: "setShade", level: a.level, family: f, shade: next });
+    }
     case "setStrokeWidth": {
       if (s.draftId) {
         return { ...s, strokeWidth: a.width, shapes: mapShapes(s.shapes, new Set([s.draftId]), (sh) => ({ ...sh, strokeWidth: a.width })) };
@@ -1861,8 +2012,12 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         gestureBase: s.gestureBase ? shift(s.gestureBase) : null,
       };
     }
-    case "select":
-      return { ...s, selectedIds: a.deep ? a.ids : expandIdsToUnits(s.shapes, a.ids) };
+    case "select": {
+      // Selecting also SYNCS the lane: the columns retune to the shades the
+      // selection operates in (see syncShadesFrom).
+      const ids = a.deep ? a.ids : expandIdsToUnits(s.shapes, a.ids);
+      return { ...s, selectedIds: ids, ...syncShadesFrom(s, ids) };
+    }
     case "toggleSelect": {
       // Unit-grained: if ANY member of the clicked unit is selected, remove ALL
       // its member ids, else add all (an id-then-expand toggle could never
@@ -1872,12 +2027,10 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       const memberIds = expandIdsToUnits(s.shapes, [a.id]);
       const members = new Set(memberIds);
       const anySelected = s.selectedIds.some((id) => members.has(id));
-      return {
-        ...s,
-        selectedIds: anySelected
-          ? s.selectedIds.filter((id) => !members.has(id))
-          : [...s.selectedIds.filter((id) => !members.has(id)), ...memberIds],
-      };
+      const selectedIds = anySelected
+        ? s.selectedIds.filter((id) => !members.has(id))
+        : [...s.selectedIds.filter((id) => !members.has(id)), ...memberIds];
+      return { ...s, selectedIds, ...syncShadesFrom(s, selectedIds) };
     }
     case "groupSelection": {
       // Guarded like history ops: a mid-drag ⌘G would corrupt the open gesture's
