@@ -31,16 +31,16 @@ import {
   fontForStroke,
   strokeForFont,
   dashFor,
-  PALETTE,
   CONTRAST_INK,
   isContrastInk,
-  FILL_COLORS,
   INK_COLORS,
   HUE_FAMILIES,
   SHADES,
   BASE_SHADE,
+  GRAYS,
   familyOf,
   shadeIndexOf,
+  hexLum,
   isEnclosed,
   paintsFill,
   fillAt,
@@ -464,12 +464,11 @@ describe("fills — setFill / enclosure / fillAt / contrast resolve", () => {
     expect(fillAt([pen], -10, 50)).toBeNull();
   });
 
-  it("contrastSolidOver: dark ink on light fills, bright on dark fills / bare paper; fill palette has no contrast sentinel", () => {
+  it("contrastSolidOver: dark ink on light fills, bright on dark fills / bare paper", () => {
     expect(contrastSolidOver("#f5a623")).toBe(CONTRAST_DARK); // amber is light
     expect(contrastSolidOver("#e5484d")).toBe(CONTRAST_BRIGHT); // red is dark enough
     expect(contrastSolidOver(null)).toBe(CONTRAST_BRIGHT); // bare dark paper
     expect(contrastSolidOver("#ffffff")).toBe(CONTRAST_DARK);
-    expect(FILL_COLORS.includes(CONTRAST_INK)).toBe(false);
   });
 });
 
@@ -1001,16 +1000,11 @@ describe("helpers", () => {
     expect((s.shapes[0] as BoxShape).x).toBe(10);
   });
 
-  it("palette = adaptive ink first, then the content colors", () => {
-    expect(PALETTE[0]).toBe(CONTRAST_INK);
-    expect(PALETTE).toHaveLength(5);
-    expect(isContrastInk(CONTRAST_INK)).toBe(true);
-    expect(isContrastInk("#e5484d")).toBe(false);
-  });
-
   it("initialDrawState defaults to the adaptive ink and always opens in pen", () => {
     expect(initialDrawState(undefined, { color: "#abcdef" }).color).toBe("#abcdef");
     expect(initialDrawState().color).toBe(CONTRAST_INK);
+    expect(isContrastInk(initialDrawState().color)).toBe(true);
+    expect(isContrastInk("#e5484d")).toBe(false);
     expect(initialDrawState({ shapes: [box("r1")], width: 1, height: 1 }).tool).toBe("pen");
     expect(initialDrawState().tool).toBe("pen");
     expect(initialDrawState().baseTool).toBe("pen");
@@ -2022,6 +2016,11 @@ describe("the lane — hue families, shades, cycling (setShade / cyclePaint / cy
       // on the darkest rung, dark ink on the lightest tint.
       expect(contrastSolidOver(ramp[4])).toBe(CONTRAST_BRIGHT);
       expect(contrastSolidOver(ramp[0])).toBe(CONTRAST_DARK);
+      // The ramp darkens strictly rung by rung, and its bright pole stays a
+      // clearly-colored pastel — never washed toward white (lum ceiling).
+      for (let i = 1; i < ramp.length; i++) expect(hexLum(ramp[i])).toBeLessThan(hexLum(ramp[i - 1]));
+      expect(hexLum(ramp[0])).toBeLessThan(0.8);
+      expect(hexLum(ramp[0])).toBeGreaterThan(0.55);
     }
     // The classic toolbar inks ARE the base rung of each family.
     expect(HUE_FAMILIES.map((f) => SHADES[f][BASE_SHADE])).toEqual([...INK_COLORS]);
@@ -2032,15 +2031,15 @@ describe("the lane — hue families, shades, cycling (setShade / cyclePaint / cy
 
   it("selecting pulls the selection's shades into the lane (durable sync, no history)", () => {
     const s0 = seeded([
-      box("A", { stroke: "#7a1e22", fill: "#a3c6fb" }), // darkest red stroke, lightest blue fill
+      box("A", { stroke: "#7a1e22", fill: "#86b2f9" }), // darkest red stroke, lightest blue fill
       box("B", { stroke: CONTRAST_INK }),
     ]);
     expect(s0.strokeShades.red).toBe("#e5484d");
     const s1 = sel(s0, ["A", "B"]);
     expect(s1.strokeShades.red).toBe("#7a1e22"); // pulled by the selection
-    expect(s1.fillShades.blue).toBe("#a3c6fb"); // pulled at the OTHER level
+    expect(s1.fillShades.blue).toBe("#86b2f9"); // pulled at the OTHER level
     expect(s1.strokeShades.blue).toBe("#3b82f6"); // stroke blue untouched
-    expect(s1.fillShades.red).toBe("#e5484d"); // fill red untouched
+    expect(s1.fillShades.red).toBe(SHADES.red[0]); // fill red untouched (the default pastel)
     expect(s1.past).toHaveLength(0); // sync is pref-like — no history entry
     const s2 = sel(s1, []);
     expect(s2.strokeShades.red).toBe("#7a1e22"); // durable past deselect
@@ -2050,7 +2049,7 @@ describe("the lane — hue families, shades, cycling (setShade / cyclePaint / cy
     const s0 = seeded([]);
     const s1 = drawReducer(s0, { type: "setShade", level: "stroke", family: "red", shade: "#b02f35" });
     expect(s1.strokeShades.red).toBe("#b02f35");
-    expect(s1.fillShades.red).toBe("#e5484d"); // levels are independent
+    expect(s1.fillShades.red).toBe(SHADES.red[0]); // levels are independent
     expect(s1.color).toBe(CONTRAST_INK); // adaptive ambient does NOT follow
     expect(s1.past).toHaveLength(0);
     // Ambient inside the family follows the retune (the pen keeps painting red).
@@ -2079,10 +2078,10 @@ describe("the lane — hue families, shades, cycling (setShade / cyclePaint / cy
     expect(s1.selectedIds).toEqual(["A", "B", "C"]);
     expect(strokes(drawReducer(s1, { type: "undo" }))).toEqual(["#e5484d", "#b02f35", "#3b82f6"]);
     // Fill level: retune red's FILL rung — only B's fill moves, strokes stay.
-    const s2 = drawReducer(s0, { type: "setShade", level: "fill", family: "red", shade: "#f8b3b5" });
-    expect((s2.shapes[1] as BoxShape).fill).toBe("#f8b3b5");
+    const s2 = drawReducer(s0, { type: "setShade", level: "fill", family: "red", shade: "#eb7074" });
+    expect((s2.shapes[1] as BoxShape).fill).toBe("#eb7074");
     expect(strokes(s2)).toEqual(["#e5484d", "#b02f35", "#3b82f6"]);
-    expect(s2.fillShades.red).toBe("#f8b3b5");
+    expect(s2.fillShades.red).toBe("#eb7074");
   });
 
   it("cyclePaint walks the lane with the ARMED shades; wraps through the specials; selection repaints like a click", () => {
@@ -2097,11 +2096,12 @@ describe("the lane — hue families, shades, cycling (setShade / cyclePaint / cy
     expect(st.color).toBe("#3b82f6");
     st = drawReducer(st, { type: "cyclePaint", level: "stroke" });
     expect(st.color).toBe(CONTRAST_INK); // wraps to adaptive
-    // Fill lane: none → red → … → blue → none.
+    // Fill lane: none → red → … → blue → none, each column contributing its
+    // ARMED fill shade — out of the box that's the pastels, not the bases.
     st = drawReducer(st, { type: "cyclePaint", level: "fill" });
-    expect(st.fill).toBe("#e5484d");
+    expect(st.fill).toBe(SHADES.red[0]);
     for (let i = 0; i < 3; i++) st = drawReducer(st, { type: "cyclePaint", level: "fill" });
-    expect(st.fill).toBe("#3b82f6");
+    expect(st.fill).toBe(SHADES.blue[0]);
     st = drawReducer(st, { type: "cyclePaint", level: "fill" });
     expect(st.fill).toBeNull();
     // With a selection it applies exactly like a toolbar click.
@@ -2111,18 +2111,16 @@ describe("the lane — hue families, shades, cycling (setShade / cyclePaint / cy
     expect(s1.past).toHaveLength(1);
   });
 
-  it("cycleShade digs into the current family (ambient, or the selection's single family); adaptive/none/mixed → no-op", () => {
+  it("cycleShade digs into the current column (ambient, or the selection's single column); mixed → no-op", () => {
     let st = seeded([]);
-    expect(drawReducer(st, { type: "cycleShade", level: "stroke" })).toBe(st); // adaptive: nothing to shade
-    expect(drawReducer(st, { type: "cycleShade", level: "fill" })).toBe(st); // none: nothing to shade
     st = drawReducer(st, { type: "setColor", color: "#30a46c" });
     st = drawReducer(st, { type: "cycleShade", level: "stroke" });
     expect(st.strokeShades.green).toBe("#1f7a4e"); // base → one rung darker
     expect(st.color).toBe("#1f7a4e"); // ambient followed
     st = drawReducer(st, { type: "cycleShade", level: "stroke" });
     st = drawReducer(st, { type: "cycleShade", level: "stroke" });
-    expect(st.color).toBe("#93dcb8"); // wrapped past darkest to the lightest tint
-    expect(st.fillShades.green).toBe("#30a46c"); // fill level independent
+    expect(st.color).toBe(SHADES.green[0]); // wrapped past darkest to the lightest tint
+    expect(st.fillShades.green).toBe(SHADES.green[0]); // fill level independent (still its default pastel)
     // A single-family selection digs THAT family even under adaptive ambient.
     const s0 = sel(seeded([box("A", { stroke: "#e5484d" })]), ["A"]);
     const s1 = drawReducer(s0, { type: "cycleShade", level: "stroke" });
@@ -2131,5 +2129,144 @@ describe("the lane — hue families, shades, cycling (setShade / cyclePaint / cy
     // Mixed families → no guessing, identity no-op.
     const m0 = sel(seeded([box("A", { stroke: "#e5484d" }), box("B", { stroke: "#3b82f6" })]), ["A", "B"]);
     expect(drawReducer(m0, { type: "cycleShade", level: "stroke" })).toBe(m0);
+  });
+});
+
+describe("the specials column — smart / none + the gray ramp", () => {
+  const sel = (s: DrawState, ids: string[]) => drawReducer(s, { type: "select", ids });
+
+  it("GRAYS integrity: 5 distinct lowercase rungs, poles ARE the adaptive resolutions, strictly darkening; no hue family claims them", () => {
+    expect(GRAYS).toHaveLength(5);
+    expect(new Set(GRAYS).size).toBe(5);
+    expect(GRAYS[0]).toBe(CONTRAST_BRIGHT); // "basically white" — the bright adaptive ink
+    expect(GRAYS[4]).toBe(CONTRAST_DARK); // "basically black" — the dark adaptive ink
+    for (const g of GRAYS) {
+      expect(g).toBe(g.toLowerCase());
+      expect(familyOf(g)).toBeNull();
+      expect(shadeIndexOf(g)).toBe(-1);
+    }
+    for (let i = 1; i < GRAYS.length; i++) expect(hexLum(GRAYS[i])).toBeLessThan(hexLum(GRAYS[i - 1]));
+    // Adaptive ink stays honest over grays used as fills.
+    expect(contrastSolidOver(GRAYS[0])).toBe(CONTRAST_DARK);
+    expect(contrastSolidOver(GRAYS[4])).toBe(CONTRAST_BRIGHT);
+  });
+
+  it("defaults: strokes arm the bases, fills arm the PASTEL pole; specials arm smart / none", () => {
+    const s = initialDrawState();
+    for (const f of HUE_FAMILIES) {
+      expect(s.strokeShades[f]).toBe(SHADES[f][BASE_SHADE]); // classic inks up top
+      expect(s.fillShades[f]).toBe(SHADES[f][0]); // softer fills out of the box
+      expect(hexLum(s.fillShades[f])).toBeGreaterThan(hexLum(s.strokeShades[f]));
+    }
+    expect(s.strokeSpecial).toBe(CONTRAST_INK);
+    expect(s.fillSpecial).toBeNull();
+  });
+
+  it("setShade on the gray column retunes the specials slot; ambient follows only when it operates in the column", () => {
+    const s0 = seeded([]);
+    const s1 = drawReducer(s0, { type: "setShade", level: "stroke", family: "gray", shade: "#7d7d7d" });
+    expect(s1.strokeSpecial).toBe("#7d7d7d");
+    expect(s1.color).toBe("#7d7d7d"); // adaptive ambient IS a specials class — it follows
+    expect(s1.past).toHaveLength(0);
+    // Arm smart back: the ambient (now a gray — still in-column) follows home.
+    const s2 = drawReducer(s1, { type: "setShade", level: "stroke", family: "gray", shade: CONTRAST_INK });
+    expect(s2.strokeSpecial).toBe(CONTRAST_INK);
+    expect(s2.color).toBe(CONTRAST_INK);
+    // A hue ambient is NOT in the column: the lane retunes, the pen stays red.
+    const r0 = drawReducer(seeded([]), { type: "setColor", color: "#e5484d" });
+    const r1 = drawReducer(r0, { type: "setShade", level: "stroke", family: "gray", shade: "#111111" });
+    expect(r1.strokeSpecial).toBe("#111111");
+    expect(r1.color).toBe("#e5484d");
+    // Fill level: none ambient follows into the gray, and back to none.
+    const f1 = drawReducer(s0, { type: "setShade", level: "fill", family: "gray", shade: "#454545" });
+    expect(f1.fillSpecial).toBe("#454545");
+    expect(f1.fill).toBe("#454545");
+    const f2 = drawReducer(f1, { type: "setShade", level: "fill", family: "gray", shade: null });
+    expect(f2.fillSpecial).toBeNull();
+    expect(f2.fill).toBeNull();
+    // No-ops / invalid picks return the state untouched.
+    expect(drawReducer(s2, { type: "setShade", level: "stroke", family: "gray", shade: CONTRAST_INK })).toBe(s2);
+    expect(drawReducer(s0, { type: "setShade", level: "stroke", family: "gray", shade: "#e5484d" })).toBe(s0); // a hue is not a gray
+    expect(drawReducer(s0, { type: "setShade", level: "stroke", family: "gray", shade: null })).toBe(s0); // strokes can't be none
+    expect(drawReducer(s0, { type: "setShade", level: "fill", family: "gray", shade: CONTRAST_INK })).toBe(s0); // fills can't be smart
+    expect(drawReducer(s0, { type: "setShade", level: "stroke", family: "red", shade: null })).toBe(s0); // hue rungs are never none
+  });
+
+  it("setShade gray with a selection unifies the column's classes at that level — smart + grays (+ none for fills), hues untouched", () => {
+    const s0 = sel(
+      seeded([
+        box("A", { stroke: CONTRAST_INK }), // smart stroke, unfilled
+        box("B", { stroke: "#111111", fill: "#b8b8b8" }), // gray stroke + gray fill
+        box("C", { stroke: "#e5484d", fill: "#f19a9d" }), // red operates elsewhere
+      ]),
+      ["A", "B", "C"]
+    );
+    const strokes = (st: DrawState) => st.shapes.map((sh) => sh.stroke);
+    const s1 = drawReducer(s0, { type: "setShade", level: "stroke", family: "gray", shade: "#7d7d7d" });
+    expect(strokes(s1)).toEqual(["#7d7d7d", "#7d7d7d", "#e5484d"]); // smart + gray unify, red stays
+    expect(s1.strokeSpecial).toBe("#7d7d7d");
+    expect(s1.past).toHaveLength(1); // one undo step
+    expect(strokes(drawReducer(s1, { type: "undo" }))).toEqual([CONTRAST_INK, "#111111", "#e5484d"]);
+    // Fill level: none IS a class of this column — unfilled shapes gain the gray.
+    const f1 = drawReducer(s0, { type: "setShade", level: "fill", family: "gray", shade: "#454545" });
+    expect((f1.shapes[0] as BoxShape).fill).toBe("#454545"); // none → gray
+    expect((f1.shapes[1] as BoxShape).fill).toBe("#454545"); // gray → gray
+    expect((f1.shapes[2] as BoxShape).fill).toBe("#f19a9d"); // red fill stays
+    // …and picking none strips exactly the column's fills.
+    const f2 = drawReducer(f1, { type: "setShade", level: "fill", family: "gray", shade: null });
+    expect((f2.shapes[0] as BoxShape).fill).toBeUndefined();
+    expect((f2.shapes[1] as BoxShape).fill).toBeUndefined();
+    expect((f2.shapes[2] as BoxShape).fill).toBe("#f19a9d");
+    expect(f2.fillSpecial).toBeNull();
+  });
+
+  it("selecting pulls specials classes into the lane (smart / a gray / none), durably", () => {
+    const s0 = seeded([box("A", { stroke: "#454545", fill: "#b8b8b8" }), box("B", { stroke: CONTRAST_INK })]);
+    const s1 = sel(s0, ["A"]);
+    expect(s1.strokeSpecial).toBe("#454545");
+    expect(s1.fillSpecial).toBe("#b8b8b8");
+    expect(s1.past).toHaveLength(0);
+    const s2 = sel(s1, []);
+    expect(s2.strokeSpecial).toBe("#454545"); // durable past deselect
+    const s3 = sel(s2, ["B"]);
+    expect(s3.strokeSpecial).toBe(CONTRAST_INK); // smart is a class too
+    expect(s3.fillSpecial).toBeNull(); // B is unfilled — none pulls in
+  });
+
+  it("cycleShade digs the specials strip: smart → grays → wrap (fill: none → grays), ambient riding along", () => {
+    let st = seeded([]);
+    st = drawReducer(st, { type: "cycleShade", level: "stroke" });
+    expect(st.strokeSpecial).toBe(GRAYS[0]); // smart digs into the brightest gray
+    expect(st.color).toBe(GRAYS[0]);
+    st = drawReducer(st, { type: "cycleShade", level: "stroke", dir: -1 });
+    expect(st.color).toBe(CONTRAST_INK); // back up to smart
+    st = drawReducer(st, { type: "cycleShade", level: "stroke", dir: -1 });
+    expect(st.color).toBe(GRAYS[4]); // wraps to near-black
+    st = drawReducer(st, { type: "cycleShade", level: "fill" });
+    expect(st.fillSpecial).toBe(GRAYS[0]); // none digs the same ramp
+    expect(st.fill).toBe(GRAYS[0]);
+    st = drawReducer(st, { type: "cycleShade", level: "fill", dir: -1 });
+    expect(st.fill).toBeNull();
+    // An all-specials selection digs the strip even under a hue ambient…
+    const s0 = sel(drawReducer(seeded([box("A", { stroke: CONTRAST_INK })]), { type: "setColor", color: "#e5484d" }), ["A"]);
+    const s1 = drawReducer(s0, { type: "cycleShade", level: "stroke" });
+    expect(s1.shapes[0].stroke).toBe(GRAYS[0]);
+    expect(s1.color).toBe("#e5484d"); // the red pen is not in the column — stays
+    // …and smart + hue is a MIXED selection now: no guessing, no-op.
+    const m0 = sel(seeded([box("A", { stroke: CONTRAST_INK }), box("B", { stroke: "#e5484d" })]), ["A", "B"]);
+    expect(drawReducer(m0, { type: "cycleShade", level: "stroke" })).toBe(m0);
+  });
+
+  it("cyclePaint's specials stop paints the ARMED special, both levels", () => {
+    let st = drawReducer(seeded([]), { type: "setShade", level: "stroke", family: "gray", shade: "#111111" });
+    st = drawReducer(st, { type: "setColor", color: "#e5484d" });
+    st = drawReducer(st, { type: "cyclePaint", level: "stroke", dir: -1 }); // red → the specials stop
+    expect(st.color).toBe("#111111"); // not smart — the armed gray
+    st = drawReducer(st, { type: "cyclePaint", level: "stroke" });
+    expect(st.color).toBe("#e5484d"); // a gray sits AT the specials stop — steps into red
+    let sf = drawReducer(seeded([]), { type: "setShade", level: "fill", family: "gray", shade: "#b8b8b8" });
+    sf = drawReducer(sf, { type: "setFill", fill: SHADES.red[0] });
+    sf = drawReducer(sf, { type: "cyclePaint", level: "fill", dir: -1 });
+    expect(sf.fill).toBe("#b8b8b8");
   });
 });

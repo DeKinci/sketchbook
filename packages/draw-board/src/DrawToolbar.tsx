@@ -21,7 +21,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconButton } from "./IconButton.tsx";
-import { CONTRAST_INK, HUE_FAMILIES, SHADES, familyOf, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type HueFamily, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
+import { CONTRAST_INK, HUE_FAMILIES, SHADES, GRAYS, familyOf, strokeColumnOf, fillColumnOf, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type HueFamily, type LaneColumn, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
 
 /** The two persistent tools live in a segmented "well" that slides to whichever
  *  is armed; the one-use tools (shape / connector clusters + text) follow it. */
@@ -112,17 +112,20 @@ const DRAG_HINT = " — drag onto another column to repaint just this color";
 /** THE paint lane — one shared palette for both paint properties. Each column
  *  is a hue family with two LEVELS: the top half paints the family's armed
  *  STROKE shade, the bottom half its armed FILL shade (independent rungs; the
- *  disc face shows both). Column 0 holds the level specials — adaptive ink
- *  (stroke-only) over "no fill". The halves are the selection's editable
- *  declaration (round-28 grammar, per level): every class present highlights,
- *  clicking a half repaints the whole selection, dragging a highlighted half
- *  onto another column of the SAME level merges just that class. Right-click /
- *  long-press a family half opens its 5-rung shade strip — a changer-picker
- *  that retunes the column durably; mid-drag, hovering a family half pops the
- *  strip so merges can land on exact rungs. */
+ *  disc face shows both). Column 0 is the SPECIALS column, armed the same way:
+ *  smart (adaptive ink) or a gray up top, none or a gray below. The halves are
+ *  the selection's editable declaration (round-28 grammar, per level): every
+ *  class present highlights, clicking a half repaints the whole selection,
+ *  dragging a highlighted half onto another column of the SAME level merges
+ *  just that class. Right-click / long-press ANY column opens its shade strip
+ *  — a changer-picker that retunes the column durably (the specials strip is
+ *  [smart|none, ...grays]); mid-drag, hovering a column half pops the strip so
+ *  merges can land on exact rungs. */
 function PaintLane({
   strokeShades,
   fillShades,
+  strokeSpecial,
+  fillSpecial,
   strokeActive,
   fillActive,
   mergeable,
@@ -134,6 +137,9 @@ function PaintLane({
 }: {
   strokeShades: Record<HueFamily, string>;
   fillShades: Record<HueFamily, string>;
+  /** The specials column's armed values (see DrawState.strokeSpecial). */
+  strokeSpecial: string;
+  fillSpecial: string | null;
   /** Stroke declaration: exact values present on the selection (the contrast
    *  sentinel included), or the ambient ink when nothing is selected. */
   strokeActive: readonly string[];
@@ -143,7 +149,7 @@ function PaintLane({
   mergeable: boolean;
   onStroke: (c: string) => void;
   onFillPick: (c: string | null) => void;
-  onShade: (level: PaintLevel, family: HueFamily, shade: string) => void;
+  onShade: (level: PaintLevel, family: LaneColumn, shade: string | null) => void;
   onRecolor: (from: string, to: string) => void;
   onRefill: (from: string | null, to: string | null) => void;
 }) {
@@ -158,16 +164,27 @@ function PaintLane({
   const holdRef = useRef<number | null>(null);
   const hoverRef = useRef<{ key: string; timer: number } | null>(null);
   const [drag, setDrag] = useState<{ level: PaintLevel; from: string; x: number; y: number; over: string | null } | null>(null);
-  const [strip, setStrip] = useState<{ level: PaintLevel; family: HueFamily; x: number; y: number } | null>(null);
+  const [strip, setStrip] = useState<{ level: PaintLevel; family: LaneColumn; x: number; y: number } | null>(null);
 
-  // Column 0 = the specials; then the families.
+  // Column 0 = the specials (smart/none + the gray ramp); then the families.
   const cols: (HueFamily | null)[] = [null, ...HUE_FAMILIES];
-  const isTopActive = (f: HueFamily | null) => (f === null ? strokeActive.includes(CONTRAST_INK) : strokeActive.some((c) => familyOf(c) === f));
-  const isBotActive = (f: HueFamily | null) => (f === null ? fillActive.includes(null) : fillActive.some((c) => c !== null && familyOf(c) === f));
+  const isTopActive = (f: HueFamily | null) =>
+    f === null ? strokeActive.some((c) => strokeColumnOf(c) === "gray") : strokeActive.some((c) => familyOf(c) === f);
+  const isBotActive = (f: HueFamily | null) =>
+    f === null ? fillActive.some((c) => fillColumnOf(c) === "gray") : fillActive.some((c) => c !== null && familyOf(c) === f);
   /** The exact CLASS a drag from this half carries (the declaration's own
    *  value — it can sit on a different rung than the armed lane shade). */
-  const topFrom = (f: HueFamily | null) => (f === null ? CONTRAST_INK : (strokeActive.find((c) => familyOf(c) === f) ?? strokeShades[f]));
-  const botFrom = (f: HueFamily | null) => (f === null ? "none" : (fillActive.find((c): c is string => c !== null && familyOf(c) === f) ?? fillShades[f]));
+  const topFrom = (f: HueFamily | null) =>
+    f === null
+      ? (strokeActive.find((c) => strokeColumnOf(c) === "gray") ?? strokeSpecial)
+      : (strokeActive.find((c) => familyOf(c) === f) ?? strokeShades[f]);
+  const botFrom = (f: HueFamily | null) => {
+    if (f !== null) return fillActive.find((c): c is string => c !== null && familyOf(c) === f) ?? fillShades[f];
+    // Careful: the none class is a REAL find result (null) — distinguish it
+    // from "no specials class present" (undefined → fall to the armed slot).
+    const present = fillActive.find((c) => fillColumnOf(c) === "gray");
+    return (present === undefined ? fillSpecial : present) ?? "none";
+  };
   const topIdxs = cols.map((f, i) => (isTopActive(f) ? i : -1)).filter((i) => i >= 0);
   const botIdxs = cols.map((f, i) => (isBotActive(f) ? i : -1)).filter((i) => i >= 0);
 
@@ -184,7 +201,7 @@ function PaintLane({
     }
   };
   const within = (el: HTMLElement) => (pillRef.current?.contains(el) ?? false) || (stripRef.current?.contains(el) ?? false);
-  const openStrip = (level: PaintLevel, family: HueFamily, cell: HTMLElement) => {
+  const openStrip = (level: PaintLevel, family: LaneColumn, cell: HTMLElement) => {
     const pill = pillRef.current?.getBoundingClientRect();
     const r = cell.getBoundingClientRect();
     setStrip({ level, family, x: r.left + r.width / 2, y: pill?.top ?? r.top });
@@ -216,14 +233,16 @@ function PaintLane({
     suppressClickRef.current = false; // every press starts clean
     if (e.button !== 0) return; // right button → the contextmenu path
     clearHold();
-    if (f) {
+    {
       // Long-press = the touch path to the shade strip (mouse has right-click).
+      // Every column has one — the specials strip carries smart|none + grays.
+      const col: LaneColumn = f ?? "gray";
       const cell = e.currentTarget;
       holdRef.current = window.setTimeout(() => {
         holdRef.current = null;
         pressRef.current = null;
         suppressClickRef.current = true; // the release click must not paint
-        openStrip(level, f, cell);
+        openStrip(level, col, cell);
       }, 500);
     }
     pressRef.current = { level, from, x: e.clientX, y: e.clientY, started: false, draggable };
@@ -241,10 +260,10 @@ function PaintLane({
     const t = laneTargetAt(e.clientX, e.clientY, within);
     const over = t && t.level === p.level && t.value.toLowerCase() !== p.from.toLowerCase() ? `${t.level}:${t.value}` : null;
     setDrag({ level: p.level, from: p.from, x: e.clientX, y: e.clientY, over });
-    // Hovering a FAMILY half of the same level pops its strip, so the merge
-    // can land on an exact rung.
+    // Hovering a COLUMN half of the same level pops its strip, so the merge
+    // can land on an exact rung (grays included).
     const el = document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-lane-family]");
-    const fam = el instanceof HTMLElement && pillRef.current?.contains(el) && el.dataset.laneLevel === p.level ? (el.dataset.laneFamily as HueFamily) : null;
+    const fam = el instanceof HTMLElement && pillRef.current?.contains(el) && el.dataset.laneLevel === p.level ? (el.dataset.laneFamily as LaneColumn) : null;
     const key = fam ? `${p.level}:${fam}` : null;
     if (hoverRef.current?.key !== key) {
       clearHover();
@@ -285,8 +304,11 @@ function PaintLane({
     `relative z-20 h-[19px] w-[30px] touch-none ${level === "stroke" ? "rounded-t-[14px] rounded-b-[4px]" : "rounded-b-[14px] rounded-t-[4px]"} ${
       draggable ? "cursor-grab" : ""
     } ${drag && drag.over === `${level}:${value}` ? "ring-2 ring-accent-400" : ""} ${drag && isSource ? "opacity-40" : ""}`;
+  // The declaration LENS — deliberately louder than the tool wells (it carries
+  // meaning: which classes the selection uses), so a solid ring + a stronger
+  // wash.
   const wellBase =
-    "pointer-events-none absolute left-0.5 h-[19px] w-[30px] bg-accent-600/25 ring-1 ring-inset ring-accent-500/40 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]";
+    "pointer-events-none absolute left-0.5 h-[19px] w-[30px] bg-accent-500/40 ring-[1.5px] ring-inset ring-accent-400 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]";
   const cap = (f: HueFamily) => f[0].toUpperCase() + f.slice(1);
 
   return (
@@ -306,29 +328,30 @@ function PaintLane({
         )
       )}
       {cols.map((f) => {
-        const topValue = f === null ? CONTRAST_INK : strokeShades[f];
-        const botValue = f === null ? "none" : fillShades[f];
+        const topValue = f === null ? strokeSpecial : strokeShades[f];
+        const botValue = f === null ? (fillSpecial ?? "none") : fillShades[f];
+        const topFace = f === null ? (strokeSpecial === CONTRAST_INK ? "#f5f5f5" : strokeSpecial) : strokeShades[f];
+        const botFace = f === null ? (fillSpecial ?? "transparent") : fillShades[f];
         const topDraggable = mergeable && isTopActive(f);
         const botDraggable = mergeable && isBotActive(f);
         const topSource = !!drag && drag.level === "stroke" && drag.from.toLowerCase() === topFrom(f).toLowerCase();
-        const botSource = !!drag && drag.level === "fill" && drag.from.toLowerCase() === botFrom(f).toLowerCase();
+        const botSource = !!drag && drag.level === "fill" && drag.from.toLowerCase() === (botFrom(f) ?? "none").toLowerCase();
         return (
           <div key={f ?? "specials"} className="relative flex w-[30px] flex-col">
             {/* The two-level face: round top half = armed stroke shade (stroke
                 is a dot), squarish bottom half = armed fill shade (fill is a
                 chip — matches the drag ghost / strip rung grammar; specials:
-                adaptive ink over no-fill). */}
+                the armed special — adaptive ink / a gray over no-fill / a gray). */}
             <span
               aria-hidden
               className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-t-full rounded-b border border-ink-500"
               style={{
-                background: `linear-gradient(to bottom, ${f === null ? "#f5f5f5" : strokeShades[f]} 0%, ${f === null ? "#f5f5f5" : strokeShades[f]} 50%, ${
-                  f === null ? "transparent" : fillShades[f]
-                } 50%, ${f === null ? "transparent" : fillShades[f]} 100%)`,
+                background: `linear-gradient(to bottom, ${topFace} 0%, ${topFace} 50%, ${botFace} 50%, ${botFace} 100%)`,
               }}
             />
-            {f === null && (
-              // The no-fill glyph: a slash across the bottom hemisphere only.
+            {f === null && fillSpecial === null && (
+              // The no-fill glyph: a slash across the bottom half only — gone
+              // once a gray is armed there.
               <span aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-[10px] w-5 -translate-x-1/2 overflow-hidden">
                 <span className="absolute left-1/2 top-[3px] h-[1.5px] w-6 -translate-x-1/2 rotate-[20deg] bg-red-400/80" />
               </span>
@@ -337,12 +360,18 @@ function PaintLane({
               type="button"
               data-lane-level="stroke"
               data-lane-value={topValue}
-              {...(f ? { "data-lane-family": f } : {})}
-              aria-label={f === null ? "Adaptive ink — always contrasts the background (`)" : `Stroke ${f} ${strokeShades[f]}`}
+              data-lane-family={f ?? "gray"}
+              aria-label={
+                f === null
+                  ? strokeSpecial === CONTRAST_INK
+                    ? "Adaptive ink — always contrasts the background (`)"
+                    : `Stroke gray ${strokeSpecial}`
+                  : `Stroke ${f} ${strokeShades[f]}`
+              }
               aria-pressed={isTopActive(f)}
               title={
                 (f === null
-                  ? "Adaptive — always contrasts what's behind it (` cycles color)"
+                  ? `${strokeSpecial === CONTRAST_INK ? "Adaptive — always contrasts what's behind it" : `Gray stroke ${strokeSpecial}`} — right-click for smart + grays (\` cycles color, ⌥\` shade)`
                   : `${cap(f)} stroke ${strokeShades[f]} — right-click for shades (\` cycles color, ⌥\` shade)`) +
                 (topDraggable ? DRAG_HINT : "")
               }
@@ -352,7 +381,7 @@ function PaintLane({
               onPointerCancel={onHalfCancel}
               onContextMenu={(e) => {
                 e.preventDefault();
-                if (f) openStrip("stroke", f, e.currentTarget);
+                openStrip("stroke", f ?? "gray", e.currentTarget);
               }}
               onClick={() => {
                 if (suppressClickRef.current) {
@@ -367,11 +396,13 @@ function PaintLane({
               type="button"
               data-lane-level="fill"
               data-lane-value={botValue}
-              {...(f ? { "data-lane-family": f } : {})}
-              aria-label={f === null ? "No fill" : `Fill ${f} ${fillShades[f]}`}
+              data-lane-family={f ?? "gray"}
+              aria-label={f === null ? (fillSpecial === null ? "No fill" : `Fill gray ${fillSpecial}`) : `Fill ${f} ${fillShades[f]}`}
               aria-pressed={isBotActive(f)}
               title={
-                (f === null ? "No fill (⇧` cycles fill)" : `${cap(f)} fill ${fillShades[f]} — right-click for shades (⇧\` cycles fill, ⌥⇧\` shade)`) +
+                (f === null
+                  ? `${fillSpecial === null ? "No fill" : `Gray fill ${fillSpecial}`} — right-click for none + grays (⇧\` cycles fill, ⌥⇧\` shade)`
+                  : `${cap(f)} fill ${fillShades[f]} — right-click for shades (⇧\` cycles fill, ⌥⇧\` shade)`) +
                 (botDraggable ? DRAG_HINT : "")
               }
               onPointerDown={(e) => onHalfDown(e, "fill", f, botFrom(f), botDraggable)}
@@ -380,7 +411,7 @@ function PaintLane({
               onPointerCancel={onHalfCancel}
               onContextMenu={(e) => {
                 e.preventDefault();
-                if (f) openStrip("fill", f, e.currentTarget);
+                openStrip("fill", f ?? "gray", e.currentTarget);
               }}
               onClick={() => {
                 if (suppressClickRef.current) {
@@ -419,9 +450,10 @@ function PaintLane({
           </span>,
           document.body
         )}
-      {/* The shade strip — a changer-picker for one family × one level. Fixed +
+      {/* The shade strip — a changer-picker for one column × one level. Fixed +
           portaled (the toolbar's containment again), anchored above the lane.
-          Its rungs are drop targets too (data-lane-*). */}
+          Its rungs are drop targets too (data-lane-*). The specials strip
+          leads with the level special (smart / none), then the gray ramp. */}
       {strip &&
         createPortal(
           <div
@@ -429,31 +461,47 @@ function PaintLane({
             className="fixed z-[100] flex -translate-x-1/2 flex-col gap-1 rounded-xl border border-ink-500 bg-ink-800 p-1 shadow-[0_4px_16px_rgba(0,0,0,0.5)]"
             style={{ left: strip.x, bottom: window.innerHeight - strip.y + 6 }}
           >
-            {SHADES[strip.family].map((shade) => {
-              const current = (strip.level === "stroke" ? strokeShades : fillShades)[strip.family] === shade;
+            {(strip.family === "gray" ? [strip.level === "stroke" ? CONTRAST_INK : "none", ...GRAYS] : SHADES[strip.family]).map((shade) => {
+              const armed =
+                strip.family === "gray"
+                  ? strip.level === "stroke"
+                    ? strokeSpecial
+                    : (fillSpecial ?? "none")
+                  : (strip.level === "stroke" ? strokeShades : fillShades)[strip.family];
+              const current = armed === shade;
+              const rung =
+                shade === CONTRAST_INK ? "smart" : shade === "none" ? "none" : shade;
               return (
                 <button
                   key={shade}
                   type="button"
                   data-lane-level={strip.level}
                   data-lane-value={shade}
-                  aria-label={`${strip.level === "stroke" ? "Stroke" : "Fill"} ${strip.family} shade ${shade}`}
+                  aria-label={`${strip.level === "stroke" ? "Stroke" : "Fill"} ${strip.family} shade ${rung}`}
                   aria-pressed={current}
-                  title={shade}
+                  title={rung === "smart" ? "Smart — adaptive contrast ink" : rung === "none" ? "No fill" : rung}
                   // The strip lives in a body portal — OUTSIDE the board root.
                   // A default pointerdown would move focus there and the
                   // board would go keyboard-dead (Esc, ⌘A, the ` keys). Menus
                   // don't take focus:
                   onPointerDown={(e) => e.preventDefault()}
                   onClick={() => {
-                    onShade(strip.level, strip.family, shade);
+                    onShade(strip.level, strip.family, shade === "none" ? null : shade);
                     setStrip(null);
                   }}
-                  className={`flex h-7 w-7 items-center justify-center rounded-lg ${current ? "bg-accent-600/25 ring-1 ring-inset ring-accent-500/40" : ""} ${
+                  className={`flex h-7 w-7 items-center justify-center rounded-lg ${current ? "bg-accent-500/40 ring-[1.5px] ring-inset ring-accent-400" : ""} ${
                     drag && drag.over === `${strip.level}:${shade}` ? "ring-2 ring-accent-400" : ""
                   }`}
                 >
-                  {strip.level === "stroke" ? (
+                  {rung === "smart" ? (
+                    // Smart = the adaptive ink: the split face of the two inks
+                    // it resolves to.
+                    <span className="h-[18px] w-[18px] rounded-full border border-ink-400 [background:linear-gradient(135deg,#f5f5f5_50%,#111111_50%)]" />
+                  ) : rung === "none" ? (
+                    <span className="relative h-4 w-4 overflow-hidden rounded border border-ink-400">
+                      <span className="absolute left-1/2 top-1/2 h-[1.5px] w-6 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
+                    </span>
+                  ) : strip.level === "stroke" ? (
                     <span className="h-[18px] w-[18px] rounded-full border border-ink-500" style={{ backgroundColor: shade }} />
                   ) : (
                     <span className="h-4 w-4 rounded border border-ink-500" style={{ backgroundColor: shade }} />
@@ -483,6 +531,8 @@ export function DrawToolbar({
   fills,
   strokeShades,
   fillShades,
+  strokeSpecial,
+  fillSpecial,
   strokeWidth,
   strokeStyle,
   sizeStep = null,
@@ -523,6 +573,9 @@ export function DrawToolbar({
    *  halves paint — see PaintLane / DrawState.strokeShades). */
   strokeShades: Record<HueFamily, string>;
   fillShades: Record<HueFamily, string>;
+  /** The specials column's armed values: smart or a gray / none or a gray. */
+  strokeSpecial: string;
+  fillSpecial: string | null;
   /** The width the size dots display (the selection's own when it has one). */
   strokeWidth: number;
   /** The armed stroke style (solid/dashed/dotted) — the 4 key cycles it. */
@@ -546,8 +599,9 @@ export function DrawToolbar({
   /** A fill half was pressed (null = none; also refills the selection). */
   onFill: (c: string | null) => void;
   /** A shade-strip rung was picked: retune `family`'s armed shade at `level`
-   *  (the changer-picker — see the setShade action). */
-  onShade: (level: "stroke" | "fill", family: HueFamily, shade: string) => void;
+   *  (the changer-picker — see the setShade action). The specials column is
+   *  family "gray"; its none rung arrives as null. */
+  onShade: (level: "stroke" | "fill", family: LaneColumn, shade: string | null) => void;
   /** A highlighted stroke swatch was DRAGGED onto another: repaint just that
    *  color class within the selection (from → to). */
   onRecolor: (from: string, to: string) => void;
@@ -716,6 +770,8 @@ export function DrawToolbar({
       <PaintLane
         strokeShades={strokeShades}
         fillShades={fillShades}
+        strokeSpecial={strokeSpecial}
+        fillSpecial={fillSpecial}
         strokeActive={colors}
         fillActive={fills}
         mergeable={hasSelection}

@@ -202,8 +202,13 @@ export interface DrawState extends DrawDoc {
    *  the lane becomes the palette the selection operates in. */
   strokeShades: Record<HueFamily, string>;
   /** Fill-level counterpart — each family's fill shade is independent of its
-   *  stroke shade. */
+   *  stroke shade. Arms the pastel pole out of the box. */
   fillShades: Record<HueFamily, string>;
+  /** The SPECIALS column's armed value, stroke level: {@link CONTRAST_INK}
+   *  (smart) or a {@link GRAYS} rung. Same lifecycle as the family slots. */
+  strokeSpecial: string;
+  /** Fill-level specials slot: null (none) or a gray. */
+  fillSpecial: string | null;
   strokeWidth: number;
   strokeStyle: StrokeStyle;
   /** Currently selected shapes (move/resize/delete/copy), in no particular order. */
@@ -259,10 +264,9 @@ export function sizeSlotOf(w: number): 0 | 1 | 2 {
   });
   return slot;
 }
-/** The content colors (user's drawing colors — NOT UI chrome; the design-token
- *  rule governs chrome, these are pixels the user paints). The palette shown in
- *  the toolbar is `[primary ink, ...INK_COLORS]`, where primary is the
- *  theme-contrast ink (see {@link defaultInk}). */
+/** The classic content inks (user's drawing colors — NOT UI chrome; the
+ *  design-token rule governs chrome, these are pixels the user paints). Each is
+ *  the BASE rung of its hue family's ramp — see {@link SHADES}. */
 export const INK_COLORS = [
   "#e5484d", // red
   "#f5a623", // amber
@@ -275,16 +279,12 @@ export const CANVAS_BG_DARK = "#1a1a1e";
 /** The "adaptive" primary ink — a sentinel STROKE value. Renderers resolve it
  *  to a solid bright/dark ink contrasting the BACKGROUND sampled under the
  *  shape — where "background" is the paper, the annotated/placed images, and
- *  every FILL beneath it (never other strokes). Stroke-only: fills use the
- *  regular ink options ({@link FILL_COLORS}). */
+ *  every FILL beneath it (never other strokes). Stroke-only: fills ARE the
+ *  background contrast reacts to (an "adaptive fill" would chase itself), so
+ *  the fill specials offer none + the {@link GRAYS} instead. */
 export const CONTRAST_INK = "contrast";
-/** Toolbar palette: the adaptive primary ink first, then the fixed colors. */
-export const PALETTE: readonly string[] = [CONTRAST_INK, ...INK_COLORS];
 /** True for a shape painted with the adaptive ink (resolved per background). */
 export const isContrastInk = (stroke: string) => stroke === CONTRAST_INK;
-/** Fill options — the regular inks. No contrast sentinel here: fills ARE the
- *  background contrast reacts to; an "adaptive fill" would chase itself. */
-export const FILL_COLORS: readonly string[] = INK_COLORS;
 
 /** The lane's hue families — the toolbar columns past the specials column.
  *  A family is a COLUMN identity; which of its shades the column currently
@@ -293,16 +293,38 @@ export const HUE_FAMILIES = ["red", "amber", "green", "blue"] as const;
 export type HueFamily = (typeof HUE_FAMILIES)[number];
 /** Each family's ramp: two tints, the classic base ink (index
  *  {@link BASE_SHADE} — the INK_COLORS hex), two darks. Hand-tuned for
- *  perceptual evenness; all lowercase (familyOf compares lowercased). */
+ *  perceptual evenness; all lowercase (familyOf compares lowercased). The
+ *  bright pole stays a clearly-colored pastel — ramps never wash toward
+ *  white (tint ceiling ~0.8 lum; the unit suite pins it). */
 export const SHADES: Record<HueFamily, readonly string[]> = {
-  red: ["#f8b3b5", "#ef7d80", "#e5484d", "#b02f35", "#7a1e22"],
-  amber: ["#fbd48e", "#f8bd55", "#f5a623", "#c07c14", "#8a570c"],
-  green: ["#93dcb8", "#5cc392", "#30a46c", "#1f7a4e", "#125033"],
-  blue: ["#a3c6fb", "#6ba1f9", "#3b82f6", "#2563c4", "#174a94"],
+  red: ["#f19a9d", "#eb7074", "#e5484d", "#b02f35", "#7a1e22"],
+  amber: ["#f8c165", "#f6b344", "#f5a623", "#c07c14", "#8a570c"],
+  green: ["#7fc7a4", "#57b588", "#30a46c", "#1f7a4e", "#125033"],
+  blue: ["#86b2f9", "#609af8", "#3b82f6", "#2563c4", "#174a94"],
 };
 export const BASE_SHADE = 2;
+/** The specials column's own ramp — five neutrals, near-white → near-black.
+ *  Its poles ARE the two adaptive resolutions ({@link CONTRAST_BRIGHT} /
+ *  {@link CONTRAST_DARK}), so "smart" is literally the auto-pick between this
+ *  ramp's ends. Per level the column's palette is `[smart, ...GRAYS]` for
+ *  strokes and `[none, ...GRAYS]` for fills. */
+export const GRAYS = ["#f5f5f5", "#b8b8b8", "#7d7d7d", "#454545", "#111111"] as const;
+export const isGray = (color: string) => (GRAYS as readonly string[]).includes(color.toLowerCase());
+/** A lane column identity: a hue family, or the specials column ("gray" —
+ *  home of smart / none / the neutral ramp). */
+export type LaneColumn = HueFamily | "gray";
+/** The lane column a STROKE value operates in: smart and the grays belong to
+ *  the specials column; hue rungs to their family; foreign hexes to none. */
+export function strokeColumnOf(color: string): LaneColumn | null {
+  return isContrastInk(color) || isGray(color) ? "gray" : familyOf(color);
+}
+/** Fill counterpart — none (null) lives in the specials column too. */
+export function fillColumnOf(color: string | null): LaneColumn | null {
+  return color === null || isGray(color) ? "gray" : familyOf(color);
+}
 /** The hue family a color belongs to (any rung of its ramp), or null — the
- *  adaptive sentinel and legacy/foreign hexes live outside every family. */
+ *  adaptive sentinel, the grays and legacy/foreign hexes live outside every
+ *  hue family. */
 export function familyOf(color: string): HueFamily | null {
   const h = color.toLowerCase();
   for (const f of HUE_FAMILIES) if (SHADES[f].includes(h)) return f;
@@ -320,6 +342,16 @@ export function baseShades(): Record<HueFamily, string> {
     amber: SHADES.amber[BASE_SHADE],
     green: SHADES.green[BASE_SHADE],
     blue: SHADES.blue[BASE_SHADE],
+  };
+}
+/** The pastel pole of every ramp (rung 0) — what the FILL level arms out of
+ *  the box: default fills read softer than their strokes, on the same ramps. */
+export function pastelShades(): Record<HueFamily, string> {
+  return {
+    red: SHADES.red[0],
+    amber: SHADES.amber[0],
+    green: SHADES.green[0],
+    blue: SHADES.blue[0],
   };
 }
 
@@ -459,7 +491,9 @@ export function initialDrawState(doc?: DrawDoc, opts?: { color?: string }): Draw
     color: opts?.color ?? CONTRAST_INK,
     fill: null,
     strokeShades: baseShades(),
-    fillShades: baseShades(),
+    fillShades: pastelShades(),
+    strokeSpecial: CONTRAST_INK,
+    fillSpecial: null,
     strokeWidth: DEFAULT_STROKE_WIDTH,
     strokeStyle: "solid",
     selectedIds: [],
@@ -1514,18 +1548,22 @@ export type DrawAction =
   | { type: "refill"; from: string | null; to: string | null }
   // The shade strip's pick — a CHANGER-PICKER: retune `family`'s armed shade at
   // `level`, durably in the lane. With a selection, every selected shape of
-  // that family at that level repaints to the new shade (one undo step); the
-  // ambient pref follows when it points at that family. Nothing selected → the
-  // lane just changes and stays.
-  | { type: "setShade"; level: "stroke" | "fill"; family: HueFamily; shade: string }
-  // ` / ⇧` — walk the lane: stroke cycles adaptive → families, fill cycles
-  // none → families, each column contributing its ARMED shade. Applies exactly
-  // like a toolbar click (selection repaint, else ambient).
+  // that COLUMN at that level repaints to the new shade (one undo step); the
+  // ambient pref follows when it operates in that column. Nothing selected →
+  // the lane just changes and stays. family "gray" is the specials column:
+  // its shades are the GRAYS plus the level special — CONTRAST_INK (stroke) /
+  // null = none (fill); smart and none are classes of that column, so they
+  // unify along with the grays.
+  | { type: "setShade"; level: "stroke" | "fill"; family: LaneColumn; shade: string | null }
+  // ` / ⇧` — walk the lane: stroke cycles the specials stop → families, fill
+  // likewise, each column contributing its ARMED value (the specials stop
+  // paints the armed special — smart/none out of the box, a gray if retuned).
+  // Applies exactly like a toolbar click (selection repaint, else ambient).
   | { type: "cyclePaint"; level: "stroke" | "fill"; dir?: 1 | -1 }
-  // ⌥` / ⌥⇧` — dig into the current family (the selection's single family at
+  // ⌥` / ⌥⇧` — dig into the current column (the selection's single column at
   // that level when unambiguous, else the ambient's): step its armed shade one
-  // rung (wraps) and apply like a strip pick. No family (adaptive / none /
-  // mixed selection) → no-op.
+  // rung (wraps) and apply like a strip pick. The specials column steps
+  // through [smart|none, ...GRAYS]. Mixed selection → no-op.
   | { type: "cycleShade"; level: "stroke" | "fill"; dir?: 1 | -1 }
   | { type: "setStrokeWidth"; width: number }
   | { type: "setStrokeStyle"; style: StrokeStyle }
@@ -1775,36 +1813,46 @@ export function normalizeGroups(shapes: Shape[]): Shape[] {
 const keepExisting = (ids: string[], shapes: Shape[]) => ids.filter((id) => shapes.some((sh) => sh.id === id));
 
 /** The lane sync on selection: pull each selected class's shade into its
- *  family's armed slot (per level) — the lane becomes the palette the
- *  selection operates in. Durable (survives deselect); within a family the
- *  last class in paint order wins. */
-function syncShadesFrom(s: DrawState, selectedIds: string[]): Pick<DrawState, "strokeShades" | "fillShades"> {
-  let strokeShades = s.strokeShades;
+ *  column's armed slot (per level) — the lane becomes the palette the
+ *  selection operates in. Specials classes (smart / a gray / none) pull into
+ *  the specials slot the same way. Durable (survives deselect); within a
+ *  column the last class in paint order wins. */
+function syncShadesFrom(s: DrawState, selectedIds: string[]): Pick<DrawState, "strokeShades" | "fillShades" | "strokeSpecial" | "fillSpecial"> {
+  let { strokeShades, fillShades, strokeSpecial, fillSpecial } = s;
   for (const c of selectionStrokes(s.shapes, selectedIds)) {
     const f = familyOf(c);
-    if (f && strokeShades[f] !== c.toLowerCase()) strokeShades = { ...strokeShades, [f]: c.toLowerCase() };
+    if (f) {
+      if (strokeShades[f] !== c.toLowerCase()) strokeShades = { ...strokeShades, [f]: c.toLowerCase() };
+    } else if (isContrastInk(c)) strokeSpecial = CONTRAST_INK;
+    else if (isGray(c)) strokeSpecial = c.toLowerCase();
   }
-  let fillShades = s.fillShades;
   for (const c of selectionFills(s.shapes, selectedIds)) {
-    const f = c === null ? null : familyOf(c);
-    if (f && c && fillShades[f] !== c.toLowerCase()) fillShades = { ...fillShades, [f]: c.toLowerCase() };
+    if (c === null) {
+      fillSpecial = null;
+      continue;
+    }
+    const f = familyOf(c);
+    if (f) {
+      if (fillShades[f] !== c.toLowerCase()) fillShades = { ...fillShades, [f]: c.toLowerCase() };
+    } else if (isGray(c)) fillSpecial = c.toLowerCase();
   }
-  return { strokeShades, fillShades };
+  return { strokeShades, fillShades, strokeSpecial, fillSpecial };
 }
 
-/** The family ⌥` digs into: the selection's SINGLE family at `level` when
- *  unambiguous, else the ambient color's. Mixed families → null (no guessing);
- *  a selection with no family classes (all adaptive / unfilled) falls through
- *  to the ambient. */
-function effectiveFamily(s: DrawState, level: "stroke" | "fill"): HueFamily | null {
+/** The column ⌥` digs into: the selection's SINGLE column at `level` when
+ *  unambiguous, else the ambient's. Mixed columns → null (no guessing).
+ *  Adaptive / none / the grays anchor the specials column — a fresh board
+ *  digs straight into the gray ramp. */
+function effectiveColumn(s: DrawState, level: "stroke" | "fill"): LaneColumn | null {
   if (s.selectedIds.length) {
     const classes = level === "stroke" ? selectionStrokes(s.shapes, s.selectedIds) : selectionFills(s.shapes, s.selectedIds);
-    const fams = [...new Set(classes.map((c) => (c === null ? null : familyOf(c))).filter((f): f is HueFamily => f !== null))];
-    if (fams.length === 1) return fams[0];
-    if (fams.length > 1) return null;
+    const cols = [...new Set(classes.map((c) => (level === "stroke" ? strokeColumnOf(c as string) : fillColumnOf(c))))].filter(
+      (c): c is LaneColumn => c !== null
+    );
+    if (cols.length === 1) return cols[0];
+    if (cols.length > 1) return null;
   }
-  const cur = level === "stroke" ? s.color : s.fill;
-  return cur === null ? null : familyOf(cur);
+  return level === "stroke" ? strokeColumnOf(s.color) : fillColumnOf(s.fill);
 }
 
 export function drawReducer(s: DrawState, a: DrawAction): DrawState {
@@ -1905,34 +1953,53 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       return commit(s, s.shapes.map((sh) => (hit(sh) ? applyFill(sh, a.to) : sh)));
     }
     case "setShade": {
-      // Guard: the shade must belong to the family (the view only sends valid
-      // picks; a stray value must not corrupt the lane).
-      if (familyOf(a.shade) !== a.family) return s;
-      const shade = a.shade.toLowerCase();
       const isStroke = a.level === "stroke";
-      const lane = isStroke ? s.strokeShades : s.fillShades;
-      const laneChanged = lane[a.family] !== shade;
-      // Ambient follows when it operates in this family — the pen keeps
-      // painting the family you just retuned (adaptive/none/others stay put).
+      // Guard: the shade must belong to the column at this level (the view only
+      // sends valid picks; a stray value must not corrupt the lane). The
+      // specials column accepts its grays plus the level special — smart for
+      // strokes, none for fills.
+      if (a.family === "gray") {
+        if (a.shade === null ? isStroke : !isGray(a.shade) && !(isStroke && isContrastInk(a.shade))) return s;
+      } else if (a.shade === null || familyOf(a.shade) !== a.family) return s;
+      const shade = a.shade === null ? null : a.shade.toLowerCase();
+      const gray = a.family === "gray";
+      // Membership: does a value operate in this column at this level? (For the
+      // specials column that's smart + grays on strokes, none + grays on fills.)
+      const inCol = (v: string | null | undefined): boolean =>
+        gray
+          ? isStroke
+            ? v != null && (isContrastInk(v) || isGray(v))
+            : v == null || isGray(v)
+          : v != null && familyOf(v) === a.family;
+      const armed = a.family === "gray" ? (isStroke ? s.strokeSpecial : s.fillSpecial) : (isStroke ? s.strokeShades : s.fillShades)[a.family];
+      const laneChanged = armed !== shade;
+      // Ambient follows when it operates in this column — the pen keeps
+      // painting the column you just retuned (other columns stay put).
       const ambient = isStroke ? s.color : s.fill;
-      const follows = ambient !== null && familyOf(ambient) === a.family && ambient.toLowerCase() !== shade;
+      const follows = inCol(ambient) && (ambient === null ? null : ambient.toLowerCase()) !== shade;
       const base: DrawState = {
         ...s,
-        ...(isStroke ? { strokeShades: { ...s.strokeShades, [a.family]: shade } } : { fillShades: { ...s.fillShades, [a.family]: shade } }),
-        ...(follows ? (isStroke ? { color: shade } : { fill: shade }) : {}),
+        ...(gray
+          ? isStroke
+            ? { strokeSpecial: shade as string }
+            : { fillSpecial: shade }
+          : isStroke
+            ? { strokeShades: { ...s.strokeShades, [a.family]: shade as string } }
+            : { fillShades: { ...s.fillShades, [a.family]: shade as string } }),
+        ...(follows ? (isStroke ? { color: shade as string } : { fill: shade }) : {}),
       };
       // With a selection the retune reaches the drawing: every selected shape
-      // of this family at this level unifies onto the new shade (any rung —
+      // of this column at this level unifies onto the new shade (any rung —
       // "replace the color in the line", not a single-class merge).
       if (s.selectedIds.length) {
         const sel = new Set(s.selectedIds);
         const hit = (sh: Shape) =>
           sel.has(sh.id) &&
           (isStroke
-            ? sh.type !== "image" && familyOf(sh.stroke) === a.family && sh.stroke.toLowerCase() !== shade
-            : isFillable(sh) && sh.fill !== undefined && familyOf(sh.fill) === a.family && sh.fill.toLowerCase() !== shade);
+            ? sh.type !== "image" && inCol(sh.stroke) && sh.stroke.toLowerCase() !== shade
+            : isFillable(sh) && inCol(sh.fill ?? null) && (sh.fill?.toLowerCase() ?? null) !== shade);
         if (s.shapes.some(hit)) {
-          return commit(base, s.shapes.map((sh) => (hit(sh) ? (isStroke ? { ...sh, stroke: shade } : applyFill(sh, shade)) : sh)));
+          return commit(base, s.shapes.map((sh) => (hit(sh) ? (isStroke ? { ...sh, stroke: shade as string } : applyFill(sh, shade)) : sh)));
         }
       }
       return laneChanged || follows ? base : s;
@@ -1941,24 +2008,32 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       const dir = a.dir ?? 1;
       const n = HUE_FAMILIES.length + 1; // the specials column + the families
       if (a.level === "stroke") {
-        const f = isContrastInk(s.color) ? null : familyOf(s.color);
-        const idx = isContrastInk(s.color) ? 0 : f ? 1 + HUE_FAMILIES.indexOf(f) : 0;
+        const col = strokeColumnOf(s.color);
+        const idx = col === null || col === "gray" ? 0 : 1 + HUE_FAMILIES.indexOf(col);
         const next = (idx + dir + n) % n;
-        return drawReducer(s, { type: "setColor", color: next === 0 ? CONTRAST_INK : s.strokeShades[HUE_FAMILIES[next - 1]] });
+        return drawReducer(s, { type: "setColor", color: next === 0 ? s.strokeSpecial : s.strokeShades[HUE_FAMILIES[next - 1]] });
       }
-      const f = s.fill === null ? null : familyOf(s.fill);
-      const idx = s.fill === null ? 0 : f ? 1 + HUE_FAMILIES.indexOf(f) : 0;
+      const col = fillColumnOf(s.fill);
+      const idx = col === null || col === "gray" ? 0 : 1 + HUE_FAMILIES.indexOf(col);
       const next = (idx + dir + n) % n;
-      return drawReducer(s, { type: "setFill", fill: next === 0 ? null : s.fillShades[HUE_FAMILIES[next - 1]] });
+      return drawReducer(s, { type: "setFill", fill: next === 0 ? s.fillSpecial : s.fillShades[HUE_FAMILIES[next - 1]] });
     }
     case "cycleShade": {
       const dir = a.dir ?? 1;
-      const f = effectiveFamily(s, a.level);
-      if (!f) return s;
+      const col = effectiveColumn(s, a.level);
+      if (!col) return s;
+      if (col === "gray") {
+        // The specials strip: the level special leads, then the gray ramp.
+        const palette: readonly (string | null)[] = a.level === "stroke" ? [CONTRAST_INK, ...GRAYS] : [null, ...GRAYS];
+        const armed = a.level === "stroke" ? s.strokeSpecial : s.fillSpecial;
+        const cur = palette.indexOf(armed === null ? null : armed.toLowerCase());
+        const next = palette[((cur < 0 ? 0 : cur) + dir + palette.length) % palette.length];
+        return drawReducer(s, { type: "setShade", level: a.level, family: "gray", shade: next });
+      }
       const lane = a.level === "stroke" ? s.strokeShades : s.fillShades;
-      const cur = SHADES[f].indexOf(lane[f]);
-      const next = SHADES[f][((cur < 0 ? BASE_SHADE : cur) + dir + SHADES[f].length) % SHADES[f].length];
-      return drawReducer(s, { type: "setShade", level: a.level, family: f, shade: next });
+      const cur = SHADES[col].indexOf(lane[col]);
+      const next = SHADES[col][((cur < 0 ? BASE_SHADE : cur) + dir + SHADES[col].length) % SHADES[col].length];
+      return drawReducer(s, { type: "setShade", level: a.level, family: col, shade: next });
     }
     case "setStrokeWidth": {
       if (s.draftId) {

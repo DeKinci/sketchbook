@@ -429,7 +429,8 @@ export function DrawCanvas({
 
   // Downscaled luminance map of the "backdrop" the ink contrasts against — the
   // annotated background image, any dropped image shapes, AND every painted
-  // fill (a fill is background; see FILL_COLORS) — but NEVER the strokes.
+  // fill (a fill is background; that's why fills offer no adaptive option) —
+  // but NEVER the strokes.
   // Sampled over the union RECT of those (an infinite board has no canvas box
   // to cover; everything outside the rect is the dark board). Rebuilt only when
   // that backdrop changes (image + fill signatures), not on every pen point.

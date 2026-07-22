@@ -1213,6 +1213,8 @@ export function DrawEditor({
       sizeStep={sizeTarget ? unitSizeStep(state.shapes, sizeTarget) : null}
       strokeShades={state.strokeShades}
       fillShades={state.fillShades}
+      strokeSpecial={state.strokeSpecial}
+      fillSpecial={state.fillSpecial}
       hasSelection={state.selectedIds.length > 0}
       groupAction={groupActionFor(state.shapes, state.selectedIds)}
       onGroup={() => {

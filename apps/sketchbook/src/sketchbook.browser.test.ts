@@ -1609,7 +1609,9 @@ async function probePixel(page: Page, sx: number, sy: number): Promise<{ r: numb
   }, png.toString("base64"));
 }
 
-const isAmber = (p: { r: number; g: number; b: number }) => p.r > 200 && p.g > 110 && p.g < 210 && p.b < 100;
+// Loose amber match — admits the base ink AND its pastel tints (the fill level
+// arms the pastel pole out of the box).
+const isAmber = (p: { r: number; g: number; b: number }) => p.r > 200 && p.g > 110 && p.g < 215 && p.b < 130;
 
 test("fill flow: swatch → filled rect + filled loop, and the adaptive ink darkens over a light fill", async ({ page }) => {
   await open(page);
@@ -1620,8 +1622,9 @@ test("fill flow: swatch → filled rect + filled loop, and the adaptive ink dark
   });
   const S = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
 
-  // Pick the amber fill, arm the rectangle tool, drag one out.
-  await page.locator('button[aria-label="Fill amber #f5a623"]').click();
+  // Pick the amber fill (the armed default = the pastel pole), arm the
+  // rectangle tool, drag one out.
+  await page.locator('button[aria-label="Fill amber #f8c165"]').click();
   await page.locator('button[aria-label^="Rectangle"]').click();
   const a = S({ x: 120, y: 120 });
   const b = S({ x: 280, y: 220 });
@@ -1629,7 +1632,7 @@ test("fill flow: swatch → filled rect + filled loop, and the adaptive ink dark
   await page.mouse.down();
   await page.mouse.move(b.x, b.y, { steps: 4 });
   await page.mouse.up();
-  await expect.poll(async () => (await stored(page))[0]?.doc.shapes).toMatchObject([{ type: "rect", fill: "#f5a623" }]);
+  await expect.poll(async () => (await stored(page))[0]?.doc.shapes).toMatchObject([{ type: "rect", fill: "#f8c165" }]);
   const inside = await probePixel(page, S({ x: 200, y: 190 }).x, S({ x: 200, y: 190 }).y);
   expect(isAmber(inside), `rect interior should be amber, got ${JSON.stringify(inside)}`).toBe(true);
 
@@ -1673,9 +1676,10 @@ test.describe("the paint lane — declaration, class merges, shade strips, the `
   const RED = "#e5484d";
   const GREEN = "#30a46c";
   const BLUE = "#3b82f6";
-  const AMBER = "#f5a623";
+  // The fill level's armed defaults — the pastel pole of each ramp.
+  const AMBER_PASTEL = "#f8c165";
   /** hex → its lane family (labels read `Stroke <family> <armed shade>`). */
-  const FAM: Record<string, string> = { [RED]: "red", [GREEN]: "green", [BLUE]: "blue", [AMBER]: "amber" };
+  const FAM: Record<string, string> = { [RED]: "red", [GREEN]: "green", [BLUE]: "blue", [AMBER_PASTEL]: "amber" };
 
   /** Drag one lane half onto another (the class-merge gesture). */
   async function dragSwatch(page: Page, from: ReturnType<Page["locator"]>, to: ReturnType<Page["locator"]>) {
@@ -1741,24 +1745,27 @@ test.describe("the paint lane — declaration, class merges, shade strips, the `
     await expect(fillSwatch(RED)).toHaveAttribute("aria-pressed", "true");
     await expect(none).toHaveAttribute("aria-pressed", "true");
 
-    await dragSwatch(page, none, fillSwatch(AMBER));
-    await expect.poll(fills).toEqual([RED, AMBER]);
+    // The amber column's fill half carries its armed pastel — the merge lands
+    // on exactly that rung.
+    await dragSwatch(page, none, fillSwatch(AMBER_PASTEL));
+    await expect.poll(fills).toEqual([RED, AMBER_PASTEL]);
     await expect(none).toHaveAttribute("aria-pressed", "false");
-    await expect(fillSwatch(AMBER)).toHaveAttribute("aria-pressed", "true");
+    await expect(fillSwatch(AMBER_PASTEL)).toHaveAttribute("aria-pressed", "true");
     await expect(fillSwatch(RED)).toHaveAttribute("aria-pressed", "true");
   });
 
   test("selecting pulls an element's shades into the lane — it becomes the palette the element operates in, independently per level", async ({ page }) => {
-    await openSeeded(page, [rect("A", 60, 60, 80, 60, { stroke: "#7a1e22", fill: "#a3c6fb" })]);
-    // The lane starts on the classic bases…
+    await openSeeded(page, [rect("A", 60, 60, 80, 60, { stroke: "#7a1e22", fill: "#609af8" })]);
+    // The lane starts on its defaults: base strokes, pastel fills…
     await expect(page.locator('button[aria-label="Stroke red #e5484d"]')).toBeVisible();
+    await expect(page.locator('button[aria-label="Fill blue #86b2f9"]')).toBeVisible();
     await page.keyboard.press("ControlOrMeta+a");
     // …and retunes to the selection's rungs: stroke red → darkest, fill blue →
-    // lightest tint — each level pulled independently.
+    // its second tint — each level pulled independently.
     await expect(page.locator('button[aria-label="Stroke red #7a1e22"]')).toHaveAttribute("aria-pressed", "true");
-    await expect(page.locator('button[aria-label="Fill blue #a3c6fb"]')).toHaveAttribute("aria-pressed", "true");
-    // Independence: the sibling levels kept their bases.
-    await expect(page.locator('button[aria-label="Fill red #e5484d"]')).toBeVisible();
+    await expect(page.locator('button[aria-label="Fill blue #609af8"]')).toHaveAttribute("aria-pressed", "true");
+    // Independence: the sibling levels kept their defaults.
+    await expect(page.locator('button[aria-label="Fill red #f19a9d"]')).toBeVisible();
     await expect(page.locator('button[aria-label="Stroke blue #3b82f6"]')).toBeVisible();
   });
 
@@ -1785,11 +1792,40 @@ test.describe("the paint lane — declaration, class merges, shade strips, the `
     await expect(half("Stroke red #e5484d")).toHaveAttribute("aria-pressed", "true");
     await page.keyboard.press("Alt+Backquote"); // dig red one rung darker
     await expect(half("Stroke red #b02f35")).toHaveAttribute("aria-pressed", "true");
-    await page.keyboard.press("Shift+Backquote"); // fill lane: none → red (its own level, still base)
-    await expect(half("Fill red #e5484d")).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("Shift+Backquote"); // fill lane: none → red (its own level — the armed pastel)
+    await expect(half("Fill red #f19a9d")).toHaveAttribute("aria-pressed", "true");
     await page.keyboard.press("Alt+Shift+Backquote"); // dig red's FILL shade independently
-    await expect(half("Fill red #b02f35")).toHaveAttribute("aria-pressed", "true");
+    await expect(half("Fill red #eb7074")).toHaveAttribute("aria-pressed", "true");
     await expect(half("Stroke red #b02f35")).toHaveAttribute("aria-pressed", "true"); // stroke level untouched by the fill dig
+  });
+
+  test("the specials column strips: smart + grays on the stroke level, none + grays on the fill level — a gray retunes durably, smart/none are rungs too", async ({ page }) => {
+    await openSeeded(page, [rect("A", 60, 60, 80, 60, { stroke: "contrast" }), rect("B", 200, 60, 80, 60, { stroke: BLUE })]);
+    const strokes = async () => (await stored(page))[0].doc.shapes.map((s) => (s as { stroke: string }).stroke);
+    await page.keyboard.press("ControlOrMeta+a");
+    // Right-click the adaptive half → its strip leads with smart, then grays.
+    await page.locator('button[aria-label^="Adaptive ink"]').click({ button: "right" });
+    await expect(page.locator('button[aria-label="Stroke gray shade smart"]')).toBeVisible();
+    await page.locator('button[aria-label="Stroke gray shade #7d7d7d"]').click();
+    // The smart class repainted to the gray; blue (another column) untouched.
+    await expect.poll(strokes).toEqual(["#7d7d7d", BLUE]);
+    const grayHalf = page.locator('button[aria-label="Stroke gray #7d7d7d"]');
+    await expect(grayHalf).toHaveAttribute("aria-pressed", "true");
+    // Smart is a rung of the same strip — picking it walks the class home.
+    await grayHalf.click({ button: "right" });
+    await page.locator('button[aria-label="Stroke gray shade smart"]').click();
+    await expect.poll(strokes).toEqual(["contrast", BLUE]);
+    await page.keyboard.press("Escape");
+    await expect(page.locator('button[aria-label^="Adaptive ink"]')).toHaveAttribute("aria-pressed", "true");
+    // Fill level, nothing selected: none ↔ gray via the strip, armed durably.
+    await page.locator('button[aria-label="No fill"]').click({ button: "right" });
+    await expect(page.locator('button[aria-label="Fill gray shade none"]')).toBeVisible();
+    await page.locator('button[aria-label="Fill gray shade #b8b8b8"]').click();
+    const grayFill = page.locator('button[aria-label="Fill gray #b8b8b8"]');
+    await expect(grayFill).toHaveAttribute("aria-pressed", "true"); // the ambient followed — "it will stay there"
+    await grayFill.click({ button: "right" });
+    await page.locator('button[aria-label="Fill gray shade none"]').click();
+    await expect(page.locator('button[aria-label="No fill"]')).toHaveAttribute("aria-pressed", "true");
   });
 });
 
