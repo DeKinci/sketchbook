@@ -2,32 +2,37 @@
  * Pure DrawDoc → SVG serializer.
  *
  * A reconstruction, not a Konva screenshot: geometry is exact, styling matches
- * the board's renderer (dark ground, stroke widths, arrowheads via the same
- * size formula), with two documented approximations — pen strokes
+ * the board's renderer (dark ground, fills, stroke widths, arrowheads via the
+ * same size formula), with two documented approximations — pen strokes
  * smooth through midpoint quadratics (Konva uses its own tension spline) and
- * the adaptive contrast ink resolves to bright (the exported ground is the
- * dark board; per-pixel adaptation needs a raster).
+ * the adaptive contrast ink resolves against fills/paper only (per-pixel
+ * adaptation over an IMAGE needs a raster; an image-covered contrast stroke
+ * exports bright).
  *
  * The "rich" flag embeds the doc as JSON inside a <metadata> element keyed by
  * {@link SVG_META_ID}, making the file re-importable as a full board — the SVG
  * sibling of the PNG iTXt chunk.
  */
-import { boundingBox, dashFor, isContrastInk, paintOrder, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
+import { boundingBox, contrastSolidOver, dashFor, fillAt, isContrastInk, isEnclosed, paintOrder, textBgBox, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
 import { wrapLines } from "./textMetrics.ts";
 import { BOARD_FONT_STACK } from "./boardFont.ts";
 import { contentCropLogical } from "./exportPng.ts";
 
 export const SVG_META_ID = "draw-board-doc";
-/** Bright resolution of the adaptive ink on the exported dark ground. */
-const BRIGHT_INK = "#f5f5f5";
 
 const esc = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 const num = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(2));
 
-function inkOf(sh: Shape): string {
-  return isContrastInk(sh.stroke) ? BRIGHT_INK : sh.stroke;
+/** Adaptive ink resolves against the topmost FILL under the shape's center
+ *  (else the dark ground → bright) — matching the board's sampler, minus
+ *  images (per-pixel adaptation over a raster stays a documented
+ *  approximation: an image-covered contrast stroke exports bright). */
+function inkOf(sh: Shape, shapes: Shape[]): string {
+  if (!isContrastInk(sh.stroke)) return sh.stroke;
+  const b = boundingBox(sh);
+  return contrastSolidOver(fillAt(shapes, b.x + b.width / 2, b.y + b.height / 2));
 }
 
 /** Midpoint-quadratic smoothing — visually close to the board's tension spline. */
@@ -60,8 +65,8 @@ function arrowHead(x1: number, y1: number, x2: number, y2: number, sw: number, c
   return `<path d="M ${num(x2)} ${num(y2)} L ${num(bx + ox)} ${num(by + oy)} L ${num(bx - ox)} ${num(by - oy)} Z" fill="${color}"/>`;
 }
 
-function shapeSvg(sh: Shape): string {
-  const color = inkOf(sh);
+function shapeSvg(sh: Shape, shapes: Shape[]): string {
+  const color = inkOf(sh, shapes);
   const sw = sh.strokeWidth;
   // Stroke style → dasharray (same width-derived pattern the board renders);
   // dotted boxes need the round cap the open strokes already carry.
@@ -71,11 +76,11 @@ function shapeSvg(sh: Shape): string {
   switch (sh.type) {
     case "rect": {
       const b = boundingBox(sh);
-      return `<rect x="${num(b.x)}" y="${num(b.y)}" width="${num(b.width)}" height="${num(b.height)}" fill="none" stroke="${color}" stroke-width="${sw}"${dash}${boxCap}/>`;
+      return `<rect x="${num(b.x)}" y="${num(b.y)}" width="${num(b.width)}" height="${num(b.height)}" fill="${sh.fill ?? "none"}" stroke="${color}" stroke-width="${sw}"${dash}${boxCap}/>`;
     }
     case "ellipse": {
       const b = boundingBox(sh);
-      return `<ellipse cx="${num(b.x + b.width / 2)}" cy="${num(b.y + b.height / 2)}" rx="${num(b.width / 2)}" ry="${num(b.height / 2)}" fill="none" stroke="${color}" stroke-width="${sw}"${dash}${boxCap}/>`;
+      return `<ellipse cx="${num(b.x + b.width / 2)}" cy="${num(b.y + b.height / 2)}" rx="${num(b.width / 2)}" ry="${num(b.height / 2)}" fill="${sh.fill ?? "none"}" stroke="${color}" stroke-width="${sw}"${dash}${boxCap}/>`;
     }
     case "line": {
       const [x1, y1, x2, y2] = sh.points;
@@ -90,13 +95,29 @@ function shapeSvg(sh: Shape): string {
       if ((sh as SegmentShape).doubleHead) parts.push(arrowHead(x2, y2, x1, y1, sw, color));
       return parts.join("");
     }
-    case "pen":
-      return `<path d="${penPath(sh.points)}" fill="none" stroke="${color}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"${dash}/>`;
-    case "text":
-      // One <text> per rendered line — the SAME wrap the board draws (model-owned).
-      return wrapLines(sh.text, sh.fontSize, sh.width)
-        .map((ln, i) => `<text x="${num(sh.x)}" y="${num(sh.y + sh.fontSize * (i + 1))}" font-family="${BOARD_FONT_STACK}" font-size="${sh.fontSize}" fill="${color}">${esc(ln)}</text>`)
-        .join("");
+    case "pen": {
+      // An ENCLOSED doodle's fill: a closed strokeless twin UNDER the real
+      // stroke (mirrors the board — the visible stroke keeps its open path).
+      const fillPath =
+        sh.fill && isEnclosed(sh.points) ? `<path d="${penPath(sh.points)} Z" fill="${sh.fill}" stroke="none"/>` : "";
+      return `${fillPath}<path d="${penPath(sh.points)}" fill="none" stroke="${color}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"${dash}/>`;
+    }
+    case "text": {
+      // Background highlight first (the padded block), then one <text> per
+      // rendered line — the SAME wrap the board draws (model-owned).
+      const bg = sh.fill
+        ? (() => {
+            const b = textBgBox(sh);
+            return `<rect x="${num(b.x)}" y="${num(b.y)}" width="${num(b.width)}" height="${num(b.height)}" rx="${num(b.pad)}" fill="${sh.fill}"/>`;
+          })()
+        : "";
+      return (
+        bg +
+        wrapLines(sh.text, sh.fontSize, sh.width)
+          .map((ln, i) => `<text x="${num(sh.x)}" y="${num(sh.y + sh.fontSize * (i + 1))}" font-family="${BOARD_FONT_STACK}" font-size="${sh.fontSize}" fill="${color}">${esc(ln)}</text>`)
+          .join("")
+      );
+    }
     case "image": {
       return `<image x="${num(sh.x)}" y="${num(sh.y)}" width="${num(sh.width)}" height="${num(sh.height)}" href="data:${sh.mediaType};base64,${sh.dataBase64}" preserveAspectRatio="none"/>`;
     }
@@ -118,7 +139,9 @@ export function exportSvg(doc: DrawDoc, opts?: SvgExportOptions): string {
   const crop = doc.background
     ? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 }
     : contentCropLogical(doc, { clamp: false }) ?? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 };
-  const body = paintOrder(doc.shapes).map(shapeSvg).join("\n  ");
+  const body = paintOrder(doc.shapes)
+    .map((sh) => shapeSvg(sh, doc.shapes))
+    .join("\n  ");
   const bg = doc.background
     ? `<image x="0" y="0" width="${num(doc.width)}" height="${num(doc.height)}" href="data:${doc.background.mediaType};base64,${doc.background.dataBase64}" preserveAspectRatio="none"/>`
     : `<rect x="${num(crop.x)}" y="${num(crop.y)}" width="${num(crop.width)}" height="${num(crop.height)}" fill="${CANVAS_BG_DARK}"/>`;

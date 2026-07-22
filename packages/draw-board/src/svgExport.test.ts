@@ -63,6 +63,37 @@ describe("exportSvg", () => {
     expect(free).toMatch(/y="70"[^>]*>two<\/text>/);
   });
 
+  it("fills: interior on boxes, closed twin under an enclosed doodle, padded bg chip behind text", () => {
+    const shapes: Shape[] = [
+      { ...rect("rf"), fill: "#f5a623" } as Shape,
+      { id: "e", type: "ellipse", stroke: "#3b82f6", strokeWidth: 3, x: 200, y: 100, width: 80, height: 40, fill: "#30a46c" },
+      // Enclosed loop with fill → a strokeless closed fill path + the open stroke path.
+      { id: "p", type: "pen", stroke: "#e5484d", strokeWidth: 3, points: [0, 0, 100, 0, 100, 100, 0, 100, 2, 6], fill: "#8267c1" },
+      // Open scribble with a stored fill → NO fill path (not enclosed).
+      { id: "po", type: "pen", stroke: "#e5484d", strokeWidth: 3, points: [0, 200, 80, 210], fill: "#8267c1" },
+      { id: "t", type: "text", stroke: "#3b82f6", strokeWidth: 3, x: 5, y: 200, text: "hi", fontSize: 20, fill: "#e5484d" },
+    ];
+    const svg = exportSvg(doc(shapes));
+    expect(svg).toContain('width="60" height="40" fill="#f5a623"');
+    expect(svg).toContain('rx="40" ry="20" fill="#30a46c"');
+    expect((svg.match(/fill="#8267c1"/g) ?? []).length).toBe(1); // the enclosed loop only
+    expect(svg).toContain('Z" fill="#8267c1" stroke="none"'); // closed twin, strokeless
+    // Text bg: padded block (pad = fontSize * 0.15 = 3) with matching corner radius.
+    expect(svg).toContain('<rect x="2" y="197"');
+    expect(svg).toContain('rx="3" fill="#e5484d"');
+  });
+
+  it("contrast ink resolves against the fill beneath: dark on a light fill, bright elsewhere", () => {
+    const shapes: Shape[] = [
+      { ...rect("bg", 0, 0), width: 200, height: 200, fill: "#f5a623" } as Shape, // light amber ground
+      { id: "s1", type: "pen", stroke: "contrast", strokeWidth: 3, points: [50, 50, 150, 150] }, // over the amber
+      { id: "s2", type: "pen", stroke: "contrast", strokeWidth: 3, points: [500, 500, 600, 600] }, // bare paper
+    ];
+    const svg = exportSvg(doc(shapes));
+    expect(svg).toContain('d="M 50 50 L 150 150" fill="none" stroke="#111111"');
+    expect(svg).toContain('d="M 500 500 L 600 600" fill="none" stroke="#f5f5f5"');
+  });
+
   it("rich round-trip: readSvgDoc returns the exact doc; slim has no metadata", () => {
     const d = doc([rect("r"), { id: "t", type: "text", stroke: "contrast", strokeWidth: 3, x: 1, y: 2, text: 'q"uote', fontSize: 18 } as Shape]);
     expect(readSvgDoc(exportSvg(d))).toEqual(d);

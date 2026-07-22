@@ -86,6 +86,10 @@ export interface BoxShape extends BaseShape {
   y: number;
   width: number;
   height: number;
+  /** Interior fill color, or none (absent). Regular ink options only — never
+   *  the adaptive contrast sentinel: contrast is stroke-only, and fills are
+   *  what it contrasts AGAINST (they join the sampled background). */
+  fill?: string;
 }
 /** A bound endpoint, stored relative to the connection direction: `angle` is the
  *  OFFSET from the direction toward the other endpoint at bind time, and `gap` is
@@ -115,6 +119,10 @@ export interface SegmentShape extends BaseShape {
 export interface FreehandShape extends BaseShape {
   type: "pen";
   points: number[];
+  /** Interior fill for an ENCLOSED doodle (see {@link isEnclosed}) — stored
+   *  regardless, rendered only while the loop is closed, so extending the
+   *  stroke can open/close the fill without losing the choice. */
+  fill?: string;
 }
 export interface TextShape extends BaseShape {
   type: "text";
@@ -128,6 +136,9 @@ export interface TextShape extends BaseShape {
    *  newlines). Lines re-wrap from `text` wherever they're rendered — the
    *  stored text is always the unwrapped source. */
   width?: number;
+  /** Background highlight painted behind the block (see {@link textBgBox}) —
+   *  purely visual: layout/hit/attach metrics stay the bare block. */
+  fill?: string;
 }
 /** A raster placed onto the canvas (dropped/pasted image) — movable/resizable,
  *  distinct from the single full-canvas background. */
@@ -183,6 +194,8 @@ export interface DrawState extends DrawDoc {
   shapeVariant: ShapeVariant;
   lineVariant: LineVariant;
   color: string;
+  /** Ambient fill for new shapes (rect/ellipse/pen/text bg), or none. */
+  fill: string | null;
   strokeWidth: number;
   strokeStyle: StrokeStyle;
   /** Currently selected shapes (move/resize/delete/copy), in no particular order. */
@@ -251,15 +264,116 @@ export const INK_COLORS = [
 
 /** Operator is dark-only — a blank sketch canvas is this dark surface. */
 export const CANVAS_BG_DARK = "#1a1a1e";
-/** The "adaptive" primary ink — a sentinel stroke value. The canvas renders it
- *  white with a `difference` composite so it always contrasts whatever is behind
- *  it, PER PIXEL, updating live as the shape is moved (over dark → light, over a
- *  photo → the negative, over red → cyan). No luminance sampling needed. */
+/** The "adaptive" primary ink — a sentinel STROKE value. Renderers resolve it
+ *  to a solid bright/dark ink contrasting the BACKGROUND sampled under the
+ *  shape — where "background" is the paper, the annotated/placed images, and
+ *  every FILL beneath it (never other strokes). Stroke-only: fills use the
+ *  regular ink options ({@link FILL_COLORS}). */
 export const CONTRAST_INK = "contrast";
 /** Toolbar palette: the adaptive primary ink first, then the fixed colors. */
 export const PALETTE: readonly string[] = [CONTRAST_INK, ...INK_COLORS];
-/** True for a shape painted with the adaptive ink (render white + `difference`). */
+/** True for a shape painted with the adaptive ink (resolved per background). */
 export const isContrastInk = (stroke: string) => stroke === CONTRAST_INK;
+/** Fill options — the regular inks. No contrast sentinel here: fills ARE the
+ *  background contrast reacts to; an "adaptive fill" would chase itself. */
+export const FILL_COLORS: readonly string[] = INK_COLORS;
+
+/** The two solid resolutions of the adaptive ink. */
+export const CONTRAST_DARK = "#111111";
+export const CONTRAST_BRIGHT = "#f5f5f5";
+/** Rec.709 luminance of a #rgb/#rrggbb hex (0..1); non-hex → dark (bright ink). */
+export function hexLum(hex: string): number {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return 0;
+  const h = m[1].length === 3 ? [...m[1]].map((c) => c + c).join("") : m[1];
+  const n = parseInt(h, 16);
+  return (0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)) / 255;
+}
+/** Solid ink for the adaptive stroke over a given backdrop color (a fill, or
+ *  the paper when none): dark ink on a light ground, bright on a dark one.
+ *  Same 0.55 threshold the canvas's raster sampler uses. */
+export function contrastSolidOver(backdrop: string | null | undefined): string {
+  return hexLum(backdrop ?? CANVAS_BG_DARK) > 0.55 ? CONTRAST_DARK : CONTRAST_BRIGHT;
+}
+
+/** Whether a pen doodle is ENCLOSED — its endpoints meet closely enough,
+ *  relative to how long the stroke is, to read as a closed loop (then its
+ *  `fill` renders). Tolerance grows with path length (hand-drawn loops rarely
+ *  land exactly) but is capped so a long open scribble never counts. */
+export function isEnclosed(points: number[]): boolean {
+  const n = points.length / 2;
+  if (n < 3) return false;
+  let len = 0;
+  for (let i = 0; i + 3 < points.length; i += 2) len += Math.hypot(points[i + 2] - points[i], points[i + 3] - points[i + 1]);
+  const gap = Math.hypot(points[points.length - 2] - points[0], points[points.length - 1] - points[1]);
+  return gap <= Math.max(16, Math.min(60, len * 0.12)) && len > gap * 2;
+}
+
+/** Ray-cast point-in-polygon over a flat [x1,y1,…] ring (implicitly closed). */
+export function pointInPolygon(px: number, py: number, points: number[]): boolean {
+  let inside = false;
+  const n = points.length / 2;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = points[i * 2], yi = points[i * 2 + 1];
+    const xj = points[j * 2], yj = points[j * 2 + 1];
+    if (yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/** The RENDERED box of a text background highlight: the block padded a touch
+ *  (font-relative) so the highlight reads as a chip, not a crop. Visual only —
+ *  layout/hit/attach metrics stay {@link boundingBox}'s bare block. */
+export function textBgBox(sh: TextShape): { x: number; y: number; width: number; height: number; pad: number } {
+  const b = textBlockSize(sh.text, sh.fontSize, sh.width);
+  const pad = sh.fontSize * 0.15;
+  return { x: sh.x - pad, y: sh.y - pad, width: b.width + pad * 2, height: b.height + pad * 2, pad };
+}
+
+/** Whether a shape currently PAINTS a fill (pen only while enclosed). */
+export function paintsFill(sh: Shape): boolean {
+  switch (sh.type) {
+    case "rect":
+    case "ellipse":
+    case "text":
+      return !!sh.fill;
+    case "pen":
+      return !!sh.fill && isEnclosed(sh.points);
+    default:
+      return false;
+  }
+}
+
+/** The topmost fill color under a point — the backdrop the adaptive ink
+ *  contrasts against there (images excluded: pure-land callers — SVG export,
+ *  the edit overlay — have no pixels; the canvas's raster sampler adds them).
+ *  Null = bare paper. */
+export function fillAt(shapes: Shape[], px: number, py: number): string | null {
+  for (let i = shapes.length - 1; i >= 0; i--) {
+    const sh = shapes[i];
+    switch (sh.type) {
+      case "pen":
+        if (sh.fill && isEnclosed(sh.points) && pointInPolygon(px, py, sh.points)) return sh.fill;
+        continue;
+      case "rect":
+      case "ellipse":
+      case "text": {
+        if (!sh.fill) continue;
+        const b = sh.type === "text" ? textBgBox(sh) : boundingBox(sh);
+        if (px < b.x || px > b.x + b.width || py < b.y || py > b.y + b.height) continue;
+        if (sh.type === "ellipse") {
+          const nx = (px - (b.x + b.width / 2)) / (b.width / 2 || 1);
+          const ny = (py - (b.y + b.height / 2)) / (b.height / 2 || 1);
+          if (nx * nx + ny * ny > 1) continue;
+        }
+        return sh.fill;
+      }
+      default:
+        continue;
+    }
+  }
+  return null;
+}
 
 const DEFAULT_STAGE = { width: 720, height: 460 };
 
@@ -278,6 +392,7 @@ export function initialDrawState(doc?: DrawDoc, opts?: { color?: string }): Draw
     shapeVariant: "rect",
     lineVariant: "arrow",
     color: opts?.color ?? CONTRAST_INK,
+    fill: null,
     strokeWidth: DEFAULT_STROKE_WIDTH,
     strokeStyle: "solid",
     selectedIds: [],
@@ -1293,6 +1408,9 @@ export type DrawAction =
   // cycle to the next variant. One key/button both selects and switches.
   | { type: "armCluster"; cluster: "shape" | "line" }
   | { type: "setColor"; color: string }
+  // Fill (interior / text background): null = none. Mirrors setColor's scope
+  // rules; only fillable shapes (rect/ellipse/pen/text) are touched.
+  | { type: "setFill"; fill: string | null }
   | { type: "setStrokeWidth"; width: number }
   | { type: "setStrokeStyle"; style: StrokeStyle }
   // Select shapes. Non-deep selects NORMALIZE: every id expands to its full root
@@ -1604,6 +1722,40 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         return { ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), (sh) => ({ ...sh, stroke: a.color }))), color: a.color };
       }
       return { ...s, color: a.color };
+    }
+    case "setFill": {
+      // Mirrors setColor: live-refill a draft, else the selection (undoable),
+      // else just the pref. Segments/images carry no interior to fill; "none"
+      // drops the field (persisted docs stay slim).
+      const fillOne = (sh: BoxShape | FreehandShape | TextShape): Shape => {
+        if (a.fill === null) {
+          if (sh.fill === undefined) return sh;
+          const next = { ...sh };
+          delete next.fill;
+          return next;
+        }
+        return { ...sh, fill: a.fill };
+      };
+      const refill = (sh: Shape): Shape => {
+        switch (sh.type) {
+          case "rect":
+          case "ellipse":
+            return fillOne(sh);
+          case "pen":
+            return fillOne(sh);
+          case "text":
+            return fillOne(sh);
+          default:
+            return sh;
+        }
+      };
+      if (s.draftId) {
+        return { ...s, fill: a.fill, shapes: mapShapes(s.shapes, new Set([s.draftId]), refill) };
+      }
+      if (s.selectedIds.length) {
+        return { ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), refill)), fill: a.fill };
+      }
+      return { ...s, fill: a.fill };
     }
     case "setStrokeWidth": {
       if (s.draftId) {

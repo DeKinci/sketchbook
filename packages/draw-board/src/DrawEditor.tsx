@@ -33,6 +33,8 @@ import {
   CANVAS_BG_DARK,
   CONTRAST_INK,
   PALETTE,
+  contrastSolidOver,
+  fillAt,
   type DrawDoc,
   type ImageShape,
   type Shape,
@@ -61,9 +63,6 @@ const FIT_CAP = 6;
 
 /** Marker key of the system-clipboard shapes envelope (see `copy`). */
 const SHAPES_ENVELOPE = "application/x-draw-board-shapes";
-/** A concrete color for the text-edit overlay/caret when the adaptive ink is
- *  active (an HTML textarea can't do the canvas blend). */
-const CONTRAST_OVERLAY = "#ffffff";
 
 /** Raster bytes for an image placed on the board (paste/drop/pick). */
 export interface BoardImageData {
@@ -83,6 +82,19 @@ function strokeBase(s: { shapes: Shape[]; selectedIds: string[]; strokeWidth: nu
   const widths = new Set<number>();
   for (const sh of s.shapes) if (sel.has(sh.id)) widths.add(sh.type === "text" ? strokeForFont(sh.fontSize) : sh.strokeWidth);
   return widths.size === 1 ? [...widths][0] : s.strokeWidth;
+}
+
+/** The fill the swatches display: the selection's own when uniform across its
+ *  fillable members (segments/images have no interior), else the ambient pref. */
+function fillBase(s: { shapes: Shape[]; selectedIds: string[]; fill: string | null }): string | null {
+  if (!s.selectedIds.length) return s.fill;
+  const sel = new Set(s.selectedIds);
+  const fills = new Set<string | null>();
+  for (const sh of s.shapes) {
+    if (!sel.has(sh.id)) continue;
+    if (sh.type === "rect" || sh.type === "ellipse" || sh.type === "pen" || sh.type === "text") fills.add(sh.fill ?? null);
+  }
+  return fills.size === 1 ? [...fills][0] : s.fill;
 }
 
 function defaultImageToData(file: File): Promise<BoardImageData> {
@@ -145,6 +157,10 @@ interface EditSession {
   gy: number;
   anchorX: number;
   anchorY: number;
+  /** Background highlight (the shape's `fill`, or the ambient fill for a new
+   *  text) — the field paints it live so the edit is WYSIWYG, and the adaptive
+   *  ink resolves its glyph color against it. Null = none. */
+  fill: string | null;
 }
 
 /**
@@ -218,9 +234,9 @@ export function DrawEditor({
    *  placed image, wherever it lands. Absent (Operator): no probing at all. */
   onImportBoard?: (doc: DrawDoc) => void;
 }) {
-  // Operator is dark-only. The primary ink is adaptive (CONTRAST_INK) — it
-  // renders via a `difference` blend in the canvas, so it always contrasts the
-  // background per pixel with no luminance sampling here.
+  // Operator is dark-only. The primary ink is adaptive (CONTRAST_INK) — the
+  // canvas resolves it to a bright/dark solid contrasting the BACKGROUND
+  // sampled under each shape (paper, images, and fills — never strokes).
   const palette = PALETTE;
   const paletteRef = useRef(palette);
   paletteRef.current = palette;
@@ -439,7 +455,7 @@ export function DrawEditor({
     (x: number, y: number) => {
       const s = stateRef.current;
       setValue("");
-      setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, maxWidth: containKap(x, y), gx: 0, gy: 0, anchorX: x, anchorY: y });
+      setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, fill: s.fill, maxWidth: containKap(x, y), gx: 0, gy: 0, anchorX: x, anchorY: y });
     },
     [containKap]
   );
@@ -461,6 +477,7 @@ export function DrawEditor({
         y: sh.y,
         fontSize: sh.fontSize,
         color: sh.stroke,
+        fill: sh.fill ?? null,
         maxWidth: sh.width ?? containKap(sh.x, sh.y),
         gx,
         gy,
@@ -485,7 +502,7 @@ export function DrawEditor({
           type: "addShapes",
           detectAttach: true, // a placed text glues to a shape it's dropped against
           distScale: distScale(), // screen-true glue range, same as every other placement
-          shapes: [{ id: newShapeId(), type: "text", stroke: cur.color, strokeWidth: stateRef.current.strokeWidth, x: cur.x, y: cur.y, text, fontSize: cur.fontSize, ...(width !== undefined && { width }) }],
+          shapes: [{ id: newShapeId(), type: "text", stroke: cur.color, strokeWidth: stateRef.current.strokeWidth, x: cur.x, y: cur.y, text, fontSize: cur.fontSize, ...(width !== undefined && { width }), ...(cur.fill && { fill: cur.fill }) }],
         });
         // Text is one-use → snap back to the last selectable tool.
         dispatch({ type: "setTool", tool: stateRef.current.baseTool });
@@ -715,7 +732,7 @@ export function DrawEditor({
         type: "addShapes",
         detectAttach: true,
         distScale: distScale(),
-        shapes: [{ id: newShapeId(), type: "text", stroke: s.color, strokeWidth: s.strokeWidth, x, y, text, fontSize: fontForStroke(s.strokeWidth) }],
+        shapes: [{ id: newShapeId(), type: "text", stroke: s.color, strokeWidth: s.strokeWidth, x, y, text, fontSize: fontForStroke(s.strokeWidth), ...(s.fill && { fill: s.fill }) }],
       });
       dispatch({ type: "setTool", tool: "select" });
     },
@@ -1194,6 +1211,7 @@ export function DrawEditor({
       shapeVariant={state.shapeVariant}
       lineVariant={state.lineVariant}
       color={state.color}
+      fill={fillBase(state)}
       strokeWidth={strokeBase(state)}
       strokeStyle={state.strokeStyle}
       sizeStep={sizeTarget ? unitSizeStep(state.shapes, sizeTarget) : null}
@@ -1211,6 +1229,7 @@ export function DrawEditor({
       onTool={(tool) => dispatch({ type: "setTool", tool })}
       onArmCluster={(cluster) => dispatch({ type: "armCluster", cluster })}
       onColor={(color) => dispatch({ type: "setColor", color })}
+      onFill={(fill) => dispatch({ type: "setFill", fill })}
       onStrokeStyle={(style) => dispatch({ type: "setStrokeStyle", style })}
       onSizeSlot={onSizeSlot}
       onUndo={() => dispatch({ type: "undo" })}
@@ -1307,20 +1326,33 @@ export function DrawEditor({
                 className="draw-text-input absolute m-0 resize-none overflow-hidden whitespace-pre border-0 bg-transparent p-0 text-left leading-none outline-none"
                 // No left/top here — the WYSIWYG sizing effect places the box
                 // off its bond-pinned anchor (pre-paint) after each measure.
-                style={{
-                  color: session.color === CONTRAST_INK ? CONTRAST_OVERLAY : session.color,
-                  caretColor: session.color === CONTRAST_INK ? CONTRAST_OVERLAY : session.color,
-                  fontSize: session.fontSize * view.scale,
-                  fontFamily: BOARD_FONT_STACK,
-                  // Capped: the field IS the wrap box — it wraps at the parent's
-                  // edge (or the text's own box) instead of growing out of it.
-                  // Uncapped: no width here — the WYSIWYG effect grows it with
-                  // the longest line (minWidth just keeps an empty field's caret
-                  // clickable).
-                  ...(session.maxWidth !== undefined
-                    ? { width: session.maxWidth * view.scale, whiteSpace: "pre-wrap" as const, overflowWrap: "break-word" as const }
-                    : { minWidth: "2rem" }),
-                }}
+                style={(() => {
+                  // Adaptive ink resolves against the field's own background
+                  // fill, else whatever fill sits under it, else the paper —
+                  // the same resolve the committed glyphs will get.
+                  const ink =
+                    session.color === CONTRAST_INK
+                      ? contrastSolidOver(session.fill ?? fillAt(state.shapes, session.anchorX + 1, session.anchorY + 1))
+                      : session.color;
+                  // The bg highlight paints live (WYSIWYG): the box-shadow
+                  // spread renders the same font-relative pad the commit will.
+                  const pad = session.fontSize * 0.15 * view.scale;
+                  return {
+                    color: ink,
+                    caretColor: ink,
+                    ...(session.fill && { backgroundColor: session.fill, boxShadow: `0 0 0 ${pad}px ${session.fill}` }),
+                    fontSize: session.fontSize * view.scale,
+                    fontFamily: BOARD_FONT_STACK,
+                    // Capped: the field IS the wrap box — it wraps at the parent's
+                    // edge (or the text's own box) instead of growing out of it.
+                    // Uncapped: no width here — the WYSIWYG effect grows it with
+                    // the longest line (minWidth just keeps an empty field's caret
+                    // clickable).
+                    ...(session.maxWidth !== undefined
+                      ? { width: session.maxWidth * view.scale, whiteSpace: "pre-wrap" as const, overflowWrap: "break-word" as const }
+                      : { minWidth: "2rem" }),
+                  };
+                })()}
               />
             )}
             {policy !== "fixed" && (

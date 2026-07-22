@@ -1586,6 +1586,127 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
   });
 });
 
+/** Average color of the ~3×3 CSS px around a SCREEN point (screenshot-decoded). */
+async function probePixel(page: Page, sx: number, sy: number): Promise<{ r: number; g: number; b: number }> {
+  const png = await page.screenshot({ clip: { x: sx - 1, y: sy - 1, width: 3, height: 3 } });
+  return page.evaluate(async (b64: string) => {
+    const img = new Image();
+    img.src = "data:image/png;base64," + b64;
+    await img.decode();
+    const c = document.createElement("canvas");
+    c.width = img.width;
+    c.height = img.height;
+    const ctx = c.getContext("2d")!;
+    ctx.drawImage(img, 0, 0);
+    const d = ctx.getImageData(Math.floor(img.width / 2), Math.floor(img.height / 2), 1, 1).data;
+    return { r: d[0], g: d[1], b: d[2] };
+  }, png.toString("base64"));
+}
+
+const isAmber = (p: { r: number; g: number; b: number }) => p.r > 200 && p.g > 110 && p.g < 210 && p.b < 100;
+
+test("fill flow: swatch → filled rect + filled loop, and the adaptive ink darkens over a light fill", async ({ page }) => {
+  await open(page);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const S = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+
+  // Pick the amber fill, arm the rectangle tool, drag one out.
+  await page.locator('button[aria-label="Fill #f5a623"]').click();
+  await page.locator('button[aria-label^="Rectangle"]').click();
+  const a = S({ x: 120, y: 120 });
+  const b = S({ x: 280, y: 220 });
+  await page.mouse.move(a.x, a.y);
+  await page.mouse.down();
+  await page.mouse.move(b.x, b.y, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => (await stored(page))[0]?.doc.shapes).toMatchObject([{ type: "rect", fill: "#f5a623" }]);
+  const inside = await probePixel(page, S({ x: 200, y: 190 }).x, S({ x: 200, y: 190 }).y);
+  expect(isAmber(inside), `rect interior should be amber, got ${JSON.stringify(inside)}`).toBe(true);
+
+  // The tool snapped back to pen (default primary ink = adaptive). A stroke
+  // ACROSS the amber fill resolves DARK — the fill is background to it.
+  const s1 = S({ x: 130, y: 170 });
+  const s2 = S({ x: 270, y: 170 });
+  await page.mouse.move(s1.x, s1.y);
+  await page.mouse.down();
+  await page.mouse.move(s2.x, s2.y, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length).toBe(2);
+  const onStroke = await probePixel(page, S({ x: 200, y: 170 }).x, S({ x: 200, y: 170 }).y);
+  expect(onStroke.r + onStroke.g + onStroke.b, `stroke over amber should be dark, got ${JSON.stringify(onStroke)}`).toBeLessThan(220);
+
+  // The SAME adaptive pen on bare paper stays bright.
+  const p1 = S({ x: 500, y: 400 });
+  const p2 = S({ x: 560, y: 400 });
+  await page.mouse.move(p1.x, p1.y);
+  await page.mouse.down();
+  await page.mouse.move(p2.x, p2.y, { steps: 4 });
+  await page.mouse.up();
+  const onPaper = await probePixel(page, S({ x: 530, y: 400 }).x, S({ x: 530, y: 400 }).y);
+  expect(onPaper.r + onPaper.g + onPaper.b, `stroke on paper should be bright, got ${JSON.stringify(onPaper)}`).toBeGreaterThan(600);
+
+  // A pen LOOP (fill still armed) closes into an enclosed doodle → interior fills.
+  const c = { x: 430, y: 300 };
+  const r = 40;
+  const arc = (i: number) => S({ x: c.x + r * Math.cos((i / 12) * Math.PI * 2), y: c.y + r * Math.sin((i / 12) * Math.PI * 2) });
+  await page.mouse.move(arc(0).x, arc(0).y);
+  await page.mouse.down();
+  for (let i = 1; i <= 11; i++) await page.mouse.move(arc(i).x, arc(i).y, { steps: 2 });
+  await page.mouse.move(arc(0).x + 4 * cam.scale, arc(0).y - 3 * cam.scale, { steps: 2 }); // land near the start — enclosed
+  await page.mouse.up();
+  await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length).toBe(4);
+  const inLoop = await probePixel(page, S(c).x, S(c).y);
+  expect(isAmber(inLoop), `enclosed doodle interior should be amber, got ${JSON.stringify(inLoop)}`).toBe(true);
+});
+
+test("text background highlight: amber chip behind DARK adaptive glyphs, live in the editor too", async ({ page }) => {
+  await openSeeded(page, [
+    { id: "t", type: "text", stroke: "contrast", strokeWidth: 3, x: 100, y: 100, fontSize: 24, text: "hello", fill: "#f5a623" },
+  ]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const S = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+
+  // The padded bg chip (pad = 24 * 0.15 = 3.6): a pixel just outside the glyph
+  // block but inside the pad is pure chip.
+  const chip = await probePixel(page, S({ x: 99, y: 99 }).x, S({ x: 99, y: 99 }).y);
+  expect(isAmber(chip), `bg chip should be amber, got ${JSON.stringify(chip)}`).toBe(true);
+  // Adaptive glyphs over their own light bg resolve DARK: the block clip must
+  // hold a meaningful count of near-black pixels.
+  const tl = S({ x: 98, y: 98 });
+  const png = await page.screenshot({ clip: { x: tl.x, y: tl.y, width: 70 * cam.scale, height: 28 * cam.scale } });
+  const darkCount = await page.evaluate(async (b64: string) => {
+    const img = new Image();
+    img.src = "data:image/png;base64," + b64;
+    await img.decode();
+    const c = document.createElement("canvas");
+    c.width = img.width;
+    c.height = img.height;
+    const ctx = c.getContext("2d")!;
+    ctx.drawImage(img, 0, 0);
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] < 180) n++;
+    return n;
+  }, png.toString("base64"));
+  expect(darkCount).toBeGreaterThan(15);
+
+  // Live edit: the field paints the same chip (bg + pad) around the glyphs.
+  await page.mouse.dblclick(S({ x: 120, y: 112 }).x, S({ x: 120, y: 112 }).y);
+  await page.waitForSelector(".draw-text-input");
+  await page.keyboard.press("Control+End");
+  await page.waitForTimeout(120);
+  const liveChip = await probePixel(page, S({ x: 99, y: 99 }).x, S({ x: 99, y: 99 }).y);
+  expect(isAmber(liveChip), `live edit bg should stay amber, got ${JSON.stringify(liveChip)}`).toBe(true);
+});
+
 test("export menu stacks ABOVE the minimap (hit-test in the overlap)", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 560 }); // force menu/minimap overlap
   await open(page);

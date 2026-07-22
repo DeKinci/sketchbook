@@ -34,6 +34,14 @@ import {
   PALETTE,
   CONTRAST_INK,
   isContrastInk,
+  FILL_COLORS,
+  isEnclosed,
+  paintsFill,
+  fillAt,
+  contrastSolidOver,
+  textBgBox,
+  CONTRAST_DARK,
+  CONTRAST_BRIGHT,
   type DrawState,
   type BoxShape,
   type TextShape,
@@ -370,6 +378,90 @@ describe("drawReducer — selection", () => {
     const before = s.past.length;
     s = drawReducer(s, { type: "deleteShapes", ids: ["nope"] });
     expect(s.past.length).toBe(before);
+  });
+});
+
+describe("fills — setFill / enclosure / fillAt / contrast resolve", () => {
+  // A closed-ish hand loop: square path whose end lands near its start.
+  const loop = [0, 0, 100, 0, 100, 100, 0, 100, 2, 6];
+
+  it("setFill fills the selection (fillable types only) as one undoable edit + sets the pref", () => {
+    let s = seeded([
+      box("r1"),
+      { id: "l1", type: "line", stroke: "#000", strokeWidth: 3, points: [0, 0, 50, 50] } as Shape,
+    ]);
+    s = drawReducer(s, { type: "select", ids: ["r1", "l1"] });
+    s = drawReducer(s, { type: "setFill", fill: "#f5a623" });
+    expect(s.shapes.find((sh) => sh.id === "r1")).toMatchObject({ fill: "#f5a623" });
+    expect("fill" in s.shapes.find((sh) => sh.id === "l1")!).toBe(false); // segments have no interior
+    expect(s.fill).toBe("#f5a623");
+    s = drawReducer(s, { type: "undo" });
+    expect("fill" in s.shapes.find((sh) => sh.id === "r1")!).toBe(false);
+  });
+
+  it("setFill null STRIPS the field (docs stay slim), nothing selected sets only the pref", () => {
+    let s = seeded([box("r1", { fill: "#30a46c" })]);
+    s = drawReducer(s, { type: "select", ids: ["r1"] });
+    s = drawReducer(s, { type: "setFill", fill: null });
+    expect("fill" in s.shapes[0]).toBe(false);
+    s = drawReducer(s, { type: "select", ids: [] });
+    s = drawReducer(s, { type: "setFill", fill: "#3b82f6" });
+    expect("fill" in s.shapes[0]).toBe(false);
+    expect(s.fill).toBe("#3b82f6");
+  });
+
+  it("refills the in-progress draft live, without a history entry", () => {
+    let s = seeded([]);
+    s = drawReducer(s, { type: "beginDraw", shape: { id: "p1", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0] } });
+    s = drawReducer(s, { type: "extendFreehand", point: { x: 5, y: 5 } });
+    s = drawReducer(s, { type: "setFill", fill: "#e5484d" });
+    expect(s.shapes[0]).toMatchObject({ fill: "#e5484d" });
+    expect(s.past).toHaveLength(0);
+  });
+
+  it("isEnclosed: a loop that lands near its start closes; open strokes and long-gap scribbles don't", () => {
+    expect(isEnclosed(loop)).toBe(true);
+    expect(isEnclosed([0, 0, 100, 0, 200, 0])).toBe(false); // straight line
+    expect(isEnclosed([0, 0, 10, 10])).toBe(false); // too few points
+    // 1000-long path ending 100 away: over the capped tolerance.
+    expect(isEnclosed([0, 0, 500, 0, 500, 500, 100, 0])).toBe(false);
+  });
+
+  it("paintsFill: pen fills only while enclosed; segments/images never", () => {
+    expect(paintsFill(box("r", { fill: "#e5484d" }))).toBe(true);
+    expect(paintsFill(box("r"))).toBe(false);
+    expect(paintsFill({ id: "p", type: "pen", stroke: "#000", strokeWidth: 3, points: loop, fill: "#e5484d" } as Shape)).toBe(true);
+    expect(paintsFill({ id: "p", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0, 80, 0], fill: "#e5484d" } as Shape)).toBe(false);
+    expect(paintsFill({ id: "l", type: "line", stroke: "#000", strokeWidth: 3, points: [0, 0, 9, 9] } as Shape)).toBe(false);
+  });
+
+  it("fillAt: topmost fill wins; ellipse corners miss; text bg spans the padded block", () => {
+    const under = box("under", { x: 0, y: 0, width: 200, height: 200, fill: "#30a46c" });
+    const over = box("over", { x: 50, y: 50, width: 60, height: 60, fill: "#e5484d" });
+    expect(fillAt([under, over], 80, 80)).toBe("#e5484d");
+    expect(fillAt([under, over], 10, 10)).toBe("#30a46c");
+    expect(fillAt([under, over], 300, 300)).toBeNull();
+    // Ellipse: bbox corner is OUTSIDE the curve → the fill below shows through.
+    const ell = box("e", { type: "ellipse", x: 50, y: 50, width: 60, height: 60, fill: "#3b82f6" });
+    expect(fillAt([under, ell], 52, 52)).toBe("#30a46c");
+    expect(fillAt([under, ell], 80, 80)).toBe("#3b82f6");
+    // Text bg: the PADDED block is the painted area.
+    const t = text("t", { x: 100, y: 100, fontSize: 18, text: "hi", fill: "#f5a623" });
+    const bg = textBgBox(t);
+    expect(fillAt([t], bg.x + 1, bg.y + 1)).toBe("#f5a623");
+    expect(fillAt([t], bg.x - 2, bg.y - 2)).toBeNull();
+    // Enclosed doodle: point-in-polygon, not bbox.
+    const pen = { id: "p", type: "pen", stroke: "#000", strokeWidth: 3, points: loop, fill: "#8267c1" } as Shape;
+    expect(fillAt([pen], 50, 50)).toBe("#8267c1");
+    expect(fillAt([pen], -10, 50)).toBeNull();
+  });
+
+  it("contrastSolidOver: dark ink on light fills, bright on dark fills / bare paper; fill palette has no contrast sentinel", () => {
+    expect(contrastSolidOver("#f5a623")).toBe(CONTRAST_DARK); // amber is light
+    expect(contrastSolidOver("#e5484d")).toBe(CONTRAST_BRIGHT); // red is dark enough
+    expect(contrastSolidOver(null)).toBe(CONTRAST_BRIGHT); // bare dark paper
+    expect(contrastSolidOver("#ffffff")).toBe(CONTRAST_DARK);
+    expect(FILL_COLORS.includes(CONTRAST_INK)).toBe(false);
   });
 });
 

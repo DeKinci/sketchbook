@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
 import type { KonvaEventObject } from "konva/lib/Node.js";
 import { Stage, Layer, Rect, Ellipse, Line, Arrow, Text, Image as KonvaImage, Group, Transformer } from "react-konva";
@@ -23,6 +23,10 @@ import {
   EDGE_TOUCH,
   CANVAS_BG_DARK,
   dashFor,
+  isEnclosed,
+  paintsFill,
+  pointInPolygon,
+  textBgBox,
   type Attach,
   type DrawAction,
   type DrawState,
@@ -187,7 +191,7 @@ export function DrawCanvas({
   newId: () => string;
 }) {
   const trRef = useRef<Konva.Transformer>(null);
-  const { tool, shapes, selectedIds, color, strokeWidth, strokeStyle } = state;
+  const { tool, shapes, selectedIds, color, fill, strokeWidth, strokeStyle } = state;
   const selected = new Set(selectedIds);
   const [marquee, setMarquee] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
@@ -424,11 +428,11 @@ export function DrawCanvas({
   }, [shapes, imgEls]);
 
   // Downscaled luminance map of the "backdrop" the ink contrasts against — the
-  // annotated background image AND any dropped image shapes, but NEVER the
-  // scribbles. Sampled over the union RECT of those rasters (an infinite board
-  // has no canvas box to cover; everything outside the rect is the dark board).
-  // Rebuilt only when that backdrop changes (a signature of the image shapes),
-  // not on every pen point.
+  // annotated background image, any dropped image shapes, AND every painted
+  // fill (a fill is background; see FILL_COLORS) — but NEVER the strokes.
+  // Sampled over the union RECT of those (an infinite board has no canvas box
+  // to cover; everything outside the rect is the dark board). Rebuilt only when
+  // that backdrop changes (image + fill signatures), not on every pen point.
   const shapesRef = useRef(shapes);
   shapesRef.current = shapes;
   const bgLumRef = useRef<{ data: Uint8ClampedArray; w: number; h: number; rect: Box } | null>(null);
@@ -437,16 +441,28 @@ export function DrawCanvas({
     .filter((s) => s.type === "image")
     .map((s) => `${s.id}:${Math.round((s as { x: number }).x)}:${Math.round((s as { y: number }).y)}:${(s as { width: number }).width | 0}:${(s as { height: number }).height | 0}`)
     .join("|");
+  // Fills are background too (the adaptive ink contrasts against them, never
+  // against strokes) — a fill change/move re-rasters like an image move does.
+  // Open pen doodles are excluded (paintsFill), so live pen drawing never
+  // re-rasters per point; the sig flips only when the loop closes.
+  const fillSig = shapes
+    .filter(paintsFill)
+    .map((s) => {
+      const b = boundingBox(s);
+      return `${s.id}:${(s as { fill?: string }).fill}:${Math.round(b.x)}:${Math.round(b.y)}:${b.width | 0}:${b.height | 0}`;
+    })
+    .join("|");
   useEffect(() => {
     let rect: Box | null = bgImage ? { x: 0, y: 0, width: state.width, height: state.height } : null;
     for (const sh of shapesRef.current) {
-      if (sh.type !== "image") continue;
-      const b = boundingBox(sh);
+      if (sh.type !== "image" && !paintsFill(sh)) continue;
+      const b = sh.type === "text" ? textBgBox(sh) : boundingBox(sh);
       if (b.width <= 0 || b.height <= 0) continue;
       rect = rect ? unionBox(rect, b) : b;
     }
     if (!rect || rect.width <= 0 || rect.height <= 0) {
       bgLumRef.current = null;
+      setLumEpoch((e) => e + 1);
       return;
     }
     const w = Math.min(240, Math.max(1, Math.round(rect.width)));
@@ -460,7 +476,10 @@ export function DrawCanvas({
       return;
     }
     // Base: the dark board; then the annotated background image at the doc box;
-    // then every placed image shape at its rect — all mapped into the union rect.
+    // then every placed image shape at its rect; then every painted FILL in
+    // draw order (fills sit above images on the board — paintOrder) — all
+    // mapped into the union rect. Strokes are never painted here: they don't
+    // count as background for the adaptive ink.
     const mx = (x: number) => ((x - rect.x) / rect.width) * w;
     const my = (y: number) => ((y - rect.y) / rect.height) * h;
     ctx.fillStyle = CANVAS_BG_DARK;
@@ -472,6 +491,40 @@ export function DrawCanvas({
       if (!el) continue;
       ctx.drawImage(el, mx(sh.x), my(sh.y), (sh.width / rect.width) * w, (sh.height / rect.height) * h);
     }
+    for (const sh of shapesRef.current) {
+      if (!paintsFill(sh)) continue;
+      switch (sh.type) {
+        case "pen": {
+          ctx.fillStyle = sh.fill!;
+          ctx.beginPath();
+          ctx.moveTo(mx(sh.points[0]), my(sh.points[1]));
+          for (let i = 2; i + 1 < sh.points.length; i += 2) ctx.lineTo(mx(sh.points[i]), my(sh.points[i + 1]));
+          ctx.closePath();
+          ctx.fill();
+          break;
+        }
+        case "ellipse": {
+          const b = boundingBox(sh);
+          ctx.fillStyle = sh.fill!;
+          ctx.beginPath();
+          ctx.ellipse(mx(b.x + b.width / 2), my(b.y + b.height / 2), (b.width / 2 / rect.width) * w, (b.height / 2 / rect.height) * h, 0, 0, Math.PI * 2);
+          ctx.fill();
+          break;
+        }
+        case "rect": {
+          const b = boundingBox(sh);
+          ctx.fillStyle = sh.fill!;
+          ctx.fillRect(mx(b.x), my(b.y), (b.width / rect.width) * w, (b.height / rect.height) * h);
+          break;
+        }
+        case "text": {
+          const b = textBgBox(sh);
+          ctx.fillStyle = sh.fill!;
+          ctx.fillRect(mx(b.x), my(b.y), (b.width / rect.width) * w, (b.height / rect.height) * h);
+          break;
+        }
+      }
+    }
     try {
       bgLumRef.current = { data: ctx.getImageData(0, 0, w, h).data, w, h, rect };
     } catch {
@@ -479,7 +532,7 @@ export function DrawCanvas({
     }
     setLumEpoch((e) => e + 1); // adaptive ink resamples → cached elements stale
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bgImage, imgEls, imgSig, state.width, state.height]);
+  }, [bgImage, imgEls, imgSig, fillSig, state.width, state.height]);
 
   /** Solid render color for a shape: its own color, or — for the adaptive ink —
    *  white/near-black chosen to contrast the background sampled under it. Outside
@@ -587,6 +640,9 @@ export function DrawCanvas({
     for (const sh of index.queryPoint(pt, pad)) {
       if (sh.type === "line" || sh.type === "arrow" || sh.type === "pen") {
         if (onStroke(sh, pt) && (!bestStroke || area(sh) < area(bestStroke))) bestStroke = sh;
+        // A FILLED enclosed doodle is an area shape too: its painted interior
+        // is clickable like a rect's, not just its outline.
+        else if (sh.type === "pen" && paintsFill(sh) && pointInPolygon(pt.x, pt.y, sh.points) && (!bestArea || area(sh) < area(bestArea))) bestArea = sh;
       } else if (inBox(sh, pt) && (!bestArea || area(sh) < area(bestArea))) {
         bestArea = sh;
       }
@@ -748,12 +804,15 @@ export function DrawCanvas({
       return;
     }
     const id = newId();
-    // Solid is the absent default — only a non-solid style is stamped.
+    // Solid is the absent default — only a non-solid style is stamped. Same for
+    // fill: the ambient fill stamps onto fillable draws (pen fills render only
+    // once the doodle closes into a loop).
     const style = strokeStyle !== "solid" ? { strokeStyle } : null;
+    const inkFill = fill ? { fill } : null;
     if (tool === "pen") {
-      dispatch({ type: "beginDraw", shape: { id, type: "pen", stroke: color, strokeWidth, ...style, points: [x, y] } });
+      dispatch({ type: "beginDraw", shape: { id, type: "pen", stroke: color, strokeWidth, ...style, ...inkFill, points: [x, y] } });
     } else if (tool === "rect" || tool === "ellipse") {
-      dispatch({ type: "beginDraw", shape: { id, type: tool, stroke: color, strokeWidth, ...style, x, y, width: 0, height: 0 } });
+      dispatch({ type: "beginDraw", shape: { id, type: tool, stroke: color, strokeWidth, ...style, ...inkFill, x, y, width: 0, height: 0 } });
     } else if (tool === "line" || tool === "arrow" || tool === "darrow") {
       // A double-arrow is a normal arrow shape flagged `doubleHead` (identical
       // geometry, a head at both ends in the view).
@@ -1334,13 +1393,13 @@ export function DrawCanvas({
           switch (sh.type) {
             case "rect": {
               const b = viewBox(sh);
-              return <Rect key={sh.id} {...common(sh)} {...b} stroke={stroke} strokeWidth={sw} dash={dash} lineCap={dotCap} />;
+              return <Rect key={sh.id} {...common(sh)} {...b} fill={sh.fill} stroke={stroke} strokeWidth={sw} dash={dash} lineCap={dotCap} />;
             }
             case "ellipse": {
               const b = viewBox(sh);
               return (
                 <Group key={sh.id} {...common(sh)} x={b.x} y={b.y}>
-                  <Ellipse x={b.width / 2} y={b.height / 2} radiusX={b.width / 2} radiusY={b.height / 2} stroke={stroke} strokeWidth={sw} dash={dash} lineCap={dotCap} />
+                  <Ellipse x={b.width / 2} y={b.height / 2} radiusX={b.width / 2} radiusY={b.height / 2} fill={sh.fill} stroke={stroke} strokeWidth={sw} dash={dash} lineCap={dotCap} />
                 </Group>
               );
             }
@@ -1367,18 +1426,26 @@ export function DrawCanvas({
               );
             case "pen":
               return (
-                <Line
-                  key={sh.id}
-                  {...common(sh)}
-                  points={sh.points}
-                  stroke={stroke}
-                  strokeWidth={sw}
-                  dash={dash}
-                  lineCap="round"
-                  lineJoin="round"
-                  tension={0.4}
-
-                />
+                <Fragment key={sh.id}>
+                  {/* An ENCLOSED doodle's fill: a closed, strokeless twin UNDER
+                      the real stroke (same tension spline) — the visible stroke
+                      keeps its true open path, no synthetic closing segment.
+                      Keyless/id-less: every id-lookup (transformer, export
+                      stroke overrides, the floor walk) must find the STROKE. */}
+                  {sh.fill && isEnclosed(sh.points) && (
+                    <Line points={sh.points} closed fill={sh.fill} listening={false} tension={0.4} />
+                  )}
+                  <Line
+                    {...common(sh)}
+                    points={sh.points}
+                    stroke={stroke}
+                    strokeWidth={sw}
+                    dash={dash}
+                    lineCap="round"
+                    lineJoin="round"
+                    tension={0.4}
+                  />
+                </Fragment>
               );
             case "text":
               // The MODEL wraps (textMetrics) and the node renders its lines —
@@ -1388,18 +1455,25 @@ export function DrawCanvas({
               // and never measures 0 where canvas font metrics don't exist
               // (headless box without font files).
               return (
-                <Text
-                  key={sh.id}
-                  {...common(sh)}
-                  x={sh.x}
-                  y={sh.y}
-                  width={boundingBox(sh).width}
-                  wrap="none"
-                  text={wrapLines(sh.text, sh.fontSize, sh.width).join("\n")}
-                  fontSize={sh.fontSize}
-                  fontFamily={BOARD_FONT_STACK}
-                  fill={stroke}
-                />
+                <Fragment key={sh.id}>
+                  {/* Background highlight: the padded block behind the glyphs
+                      (visual only — layout/hit metrics stay the bare block). */}
+                  {sh.fill && (() => {
+                    const bg = textBgBox(sh);
+                    return <Rect x={bg.x} y={bg.y} width={bg.width} height={bg.height} cornerRadius={bg.pad} fill={sh.fill} listening={false} />;
+                  })()}
+                  <Text
+                    {...common(sh)}
+                    x={sh.x}
+                    y={sh.y}
+                    width={boundingBox(sh).width}
+                    wrap="none"
+                    text={wrapLines(sh.text, sh.fontSize, sh.width).join("\n")}
+                    fontSize={sh.fontSize}
+                    fontFamily={BOARD_FONT_STACK}
+                    fill={stroke}
+                  />
+                </Fragment>
               );
             case "image": {
               const img = imgEls[sh.id];

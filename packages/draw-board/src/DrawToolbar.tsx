@@ -19,7 +19,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { IconButton } from "./IconButton.tsx";
-import { CONTRAST_INK, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
+import { CONTRAST_INK, FILL_COLORS, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
 
 /** The two persistent tools live in a segmented "well" that slides to whichever
  *  is armed; the one-use tools (shape / connector clusters + text) follow it. */
@@ -105,6 +105,7 @@ export function DrawToolbar({
   shapeVariant,
   lineVariant,
   color,
+  fill,
   strokeWidth,
   strokeStyle,
   sizeStep = null,
@@ -117,6 +118,7 @@ export function DrawToolbar({
   onTool,
   onArmCluster,
   onColor,
+  onFill,
   onStrokeStyle,
   onSizeSlot,
   onUndo,
@@ -134,6 +136,8 @@ export function DrawToolbar({
   shapeVariant: ShapeVariant;
   lineVariant: LineVariant;
   color: string;
+  /** Interior/background fill (the selection's own when uniform), null = none. */
+  fill: string | null;
   /** The width the size dots display (the selection's own when it has one). */
   strokeWidth: number;
   /** The armed stroke style (solid/dashed/dotted) — the 4 key cycles it. */
@@ -156,6 +160,8 @@ export function DrawToolbar({
   /** Arm a one-use cluster (select its variant, or cycle if already armed). */
   onArmCluster: (cluster: "shape" | "line") => void;
   onColor: (c: string) => void;
+  /** A fill swatch was pressed (null = none; also refills the selection). */
+  onFill: (c: string | null) => void;
   /** A stroke-style swatch was pressed (also restyles the selection). */
   onStrokeStyle: (s: StrokeStyle) => void;
   /** A size dot was pressed (0 small · 1 mid · 2 large). The EDITOR owns the
@@ -332,6 +338,36 @@ export function DrawToolbar({
             </button>
           );
         })}
+      </div>
+
+      {/* Fill swatches — interior / text-background color, none first. SQUARE
+          swatches (area) vs the stroke circles; regular inks only — the
+          adaptive ink is stroke-only (fills are what it contrasts against). */}
+      <div className="relative flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5">
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0.5 left-0.5 w-7 rounded-full bg-accent-600/25 ring-1 ring-inset ring-accent-500/40 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]"
+          style={{ transform: `translateX(${(fill ? FILL_COLORS.findIndex((c) => c.toLowerCase() === fill.toLowerCase()) + 1 : 0) * 100}%)` }}
+        />
+        {[null, ...FILL_COLORS].map((c) => (
+          <button
+            key={c ?? "none"}
+            type="button"
+            aria-label={c ? `Fill ${c}` : "No fill"}
+            aria-pressed={(fill ?? null) === c}
+            title={c ? `Fill ${c}` : "No fill"}
+            onClick={() => onFill(c)}
+            className="relative z-10 flex h-7 w-7 items-center justify-center rounded-full"
+          >
+            {c ? (
+              <span className="h-4 w-4 rounded border border-ink-500" style={{ backgroundColor: c }} />
+            ) : (
+              <span className="relative h-4 w-4 overflow-hidden rounded border border-ink-400">
+                <span className="absolute left-1/2 top-1/2 h-[1.5px] w-6 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
+              </span>
+            )}
+          </button>
+        ))}
       </div>
 
 {/* Stroke / text size — same sliding accent well. Three dots, more sizes: the
