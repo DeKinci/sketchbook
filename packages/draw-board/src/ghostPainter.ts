@@ -3,7 +3,7 @@
  * minimap and doc thumbnails (sidebar hover previews). Draws in LOGICAL
  * coordinates; the caller owns the transform and line width.
  */
-import { boundingBox, contentBounds, isContrastInk, isEnclosed, textBgBox, CANVAS_BG_DARK, type DrawDoc, type Shape } from "./drawModel.ts";
+import { boundingBox, contentBounds, isContrastInk, isEnclosed, isNoStroke, textBgBox, CANVAS_BG_DARK, type DrawDoc, type Shape } from "./drawModel.ts";
 import { fitView, padBox, type Size } from "./viewport.ts";
 
 /** Ghost color for the adaptive contrast ink (ghosts sit on a dark ground). */
@@ -21,7 +21,10 @@ export function paintShapeGhosts(ctx: CanvasRenderingContext2D, shapes: readonly
     ctx.globalAlpha = prev;
   };
   for (const sh of shapes) {
-    const color = isContrastInk(sh.stroke) ? GHOST_INK : sh.stroke;
+    // "transparent" (a real CSS color) — an invalid strokeStyle assignment
+    // would silently KEEP the previous shape's color and paint a ghost the
+    // board doesn't show.
+    const color = isContrastInk(sh.stroke) ? GHOST_INK : isNoStroke(sh.stroke) ? "transparent" : sh.stroke;
     ctx.strokeStyle = color;
     if (sh.type === "line" || sh.type === "arrow") {
       ctx.beginPath();

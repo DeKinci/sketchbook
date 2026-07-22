@@ -94,6 +94,12 @@ describe("exportSvg", () => {
     expect(svg).toContain('d="M 500 500 L 600 600" fill="none" stroke="#f5f5f5"');
   });
 
+  it("no-stroke exports a literal stroke none — the fill still paints", () => {
+    const svg = exportSvg(doc([{ ...rect("r"), stroke: "none", fill: "#f19a9d" } as Shape]));
+    expect(svg).toContain('<rect x="100" y="100" width="60" height="40"');
+    expect(svg).toMatch(/<rect[^>]*fill="#f19a9d"[^>]*stroke="none"/);
+  });
+
   it("rich round-trip: readSvgDoc returns the exact doc; slim has no metadata", () => {
     const d = doc([rect("r"), { id: "t", type: "text", stroke: "contrast", strokeWidth: 3, x: 1, y: 2, text: 'q"uote', fontSize: 18 } as Shape]);
     expect(readSvgDoc(exportSvg(d))).toEqual(d);

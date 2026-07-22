@@ -36,6 +36,7 @@ import {
   STROKE_STYLES,
   CANVAS_BG_DARK,
   CONTRAST_INK,
+  isNoStroke,
   contrastSolidOver,
   fillAt,
   type DrawDoc,
@@ -1405,7 +1406,9 @@ export function DrawEditor({
                   const ink =
                     session.color === CONTRAST_INK
                       ? contrastSolidOver(session.fill ?? fillAt(state.shapes, session.anchorX + 1, session.anchorY + 1))
-                      : session.color;
+                      : isNoStroke(session.color)
+                        ? "transparent" // WYSIWYG: committed glyphs paint nothing too
+                        : session.color;
                   // The bg highlight paints live (WYSIWYG): the box-shadow
                   // spread renders the same font-relative pad the commit will.
                   const pad = session.fontSize * 0.15 * view.scale;

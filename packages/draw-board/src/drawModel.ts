@@ -299,6 +299,14 @@ export const CANVAS_BG_DARK = "#1a1a1e";
 export const CONTRAST_INK = "contrast";
 /** True for a shape painted with the adaptive ink (resolved per background). */
 export const isContrastInk = (stroke: string) => stroke === CONTRAST_INK;
+/** The "no stroke" sentinel STROKE value — the shape paints only its fill
+ *  (renderers resolve it to transparent; the geometry stays selectable).
+ *  Lives in the stroke specials strip beside smart, but only on boards WITH
+ *  fills ({@link DrawFeatures.fills}) — with fills opted out a strokeless
+ *  shape could never be visible, so the option disappears with them. */
+export const NO_STROKE = "none";
+/** True for a shape with its stroke turned off (fill-only shape). */
+export const isNoStroke = (stroke: string) => stroke === NO_STROKE;
 
 /** ALL hue families the board knows — the full 12-column wheel, in display
  *  (wheel) order. How many actually show is the host's palette width — see
@@ -379,17 +387,19 @@ export const BASE_SHADE = 2;
 /** The specials column's own ramp — five neutrals, near-white → near-black.
  *  Its poles ARE the two adaptive resolutions ({@link CONTRAST_BRIGHT} /
  *  {@link CONTRAST_DARK}), so "smart" is literally the auto-pick between this
- *  ramp's ends. Per level the column's palette is `[smart, ...GRAYS]` for
- *  strokes and `[none, ...GRAYS]` for fills. */
+ *  ramp's ends. Per level the column's palette is `[smart, none, ...GRAYS]`
+ *  for strokes (none only on boards with fills) and `[none, ...GRAYS]` for
+ *  fills. */
 export const GRAYS = ["#f5f5f5", "#b8b8b8", "#7d7d7d", "#454545", "#111111"] as const;
 export const isGray = (color: string) => (GRAYS as readonly string[]).includes(color.toLowerCase());
 /** A lane column identity: a hue family, or the specials column ("gray" —
  *  home of smart / none / the neutral ramp). */
 export type LaneColumn = HueFamily | "gray";
-/** The lane column a STROKE value operates in: smart and the grays belong to
- *  the specials column; hue rungs to their family; foreign hexes to none. */
+/** The lane column a STROKE value operates in: smart, no-stroke and the grays
+ *  belong to the specials column; hue rungs to their family; foreign hexes to
+ *  none. */
 export function strokeColumnOf(color: string): LaneColumn | null {
-  return isContrastInk(color) || isGray(color) ? "gray" : familyOf(color);
+  return isContrastInk(color) || isNoStroke(color) || isGray(color) ? "gray" : familyOf(color);
 }
 /** Fill counterpart — none (null) lives in the specials column too. */
 export function fillColumnOf(color: string | null): LaneColumn | null {
@@ -649,6 +659,10 @@ export function initialDrawState(
   if (!features.fills) {
     state.fill = null;
     state.fillSpecial = null;
+    // No-stroke rides the fills feature (a strokeless shape needs a fill to be
+    // visible) — scrub it from a session saved under a fills board.
+    if (isNoStroke(state.color)) state.color = base.color;
+    if (isNoStroke(state.strokeSpecial)) state.strokeSpecial = CONTRAST_INK;
   }
   if (!features.strokeStyling) {
     state.strokeWidth = DEFAULT_STROKE_WIDTH;
@@ -2001,7 +2015,12 @@ function syncShadesFrom(s: DrawState, selectedIds: string[]): Pick<DrawState, "s
     if (f) {
       if (strokeShades[f] !== c.toLowerCase()) strokeShades = { ...strokeShades, [f]: c.toLowerCase() };
     } else if (isContrastInk(c)) strokeSpecial = CONTRAST_INK;
-    else if (isGray(c)) strokeSpecial = c.toLowerCase();
+    else if (isNoStroke(c)) {
+      // Pull only where the option exists — on a fills-off board a loaded
+      // doc's strokeless shapes stay selectable, but never re-arm the pen
+      // with an ink the board can't offer.
+      if (s.features.fills) strokeSpecial = NO_STROKE;
+    } else if (isGray(c)) strokeSpecial = c.toLowerCase();
   }
   for (const c of selectionFills(s.shapes, selectedIds)) {
     if (c === null) {
@@ -2133,19 +2152,23 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       const isStroke = a.level === "stroke";
       // Guard: the shade must belong to the column at this level (the view only
       // sends valid picks; a stray value must not corrupt the lane). The
-      // specials column accepts its grays plus the level special — smart for
-      // strokes, none for fills.
+      // specials column accepts its grays plus the level specials — smart and
+      // no-stroke (fills-boards only) for strokes, none for fills.
       if (a.family === "gray") {
-        if (a.shade === null ? isStroke : !isGray(a.shade) && !(isStroke && isContrastInk(a.shade))) return s;
+        const ok = isStroke
+          ? a.shade !== null && (isGray(a.shade) || isContrastInk(a.shade) || (isNoStroke(a.shade) && s.features.fills))
+          : a.shade === null || isGray(a.shade);
+        if (!ok) return s;
       } else if (a.shade === null || familyOf(a.shade) !== a.family) return s;
       const shade = a.shade === null ? null : a.shade.toLowerCase();
       const gray = a.family === "gray";
       // Membership: does a value operate in this column at this level? (For the
-      // specials column that's smart + grays on strokes, none + grays on fills.)
+      // specials column that's smart + no-stroke + grays on strokes, none +
+      // grays on fills.)
       const inCol = (v: string | null | undefined): boolean =>
         gray
           ? isStroke
-            ? v != null && (isContrastInk(v) || isGray(v))
+            ? v != null && (isContrastInk(v) || isNoStroke(v) || isGray(v))
             : v == null || isGray(v)
           : v != null && familyOf(v) === a.family;
       const armed = a.family === "gray" ? (isStroke ? s.strokeSpecial : s.fillSpecial) : (isStroke ? s.strokeShades : s.fillShades)[a.family];
@@ -2207,8 +2230,10 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       const col = effectiveColumn(s, a.level);
       if (!col) return s;
       if (col === "gray") {
-        // The specials strip: the level special leads, then the gray ramp.
-        const palette: readonly (string | null)[] = a.level === "stroke" ? [CONTRAST_INK, ...GRAYS] : [null, ...GRAYS];
+        // The specials strip: the level specials lead, then the gray ramp
+        // (no-stroke only where fills exist — see NO_STROKE).
+        const palette: readonly (string | null)[] =
+          a.level === "stroke" ? [CONTRAST_INK, ...(s.features.fills ? [NO_STROKE] : []), ...GRAYS] : [null, ...GRAYS];
         const armed = a.level === "stroke" ? s.strokeSpecial : s.fillSpecial;
         const cur = palette.indexOf(armed === null ? null : armed.toLowerCase());
         const next = palette[((cur < 0 ? 0 : cur) + dir + palette.length) % palette.length];

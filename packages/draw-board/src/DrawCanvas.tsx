@@ -18,6 +18,7 @@ import {
   moveClusterIds,
   paintOrder,
   isContrastInk,
+  isNoStroke,
   shapesInMarquee,
   BIND_DISTANCE,
   EDGE_TOUCH,
@@ -537,8 +538,11 @@ export function DrawCanvas({
 
   /** Solid render color for a shape: its own color, or — for the adaptive ink —
    *  white/near-black chosen to contrast the background sampled under it. Outside
-   *  the sampled raster rect there's only the dark board → bright ink. */
+   *  the sampled raster rect there's only the dark board → bright ink. No-stroke
+   *  paints transparent — Konva still strokes the HIT canvas (its colorKey, not
+   *  this color), so the geometry stays clickable. */
   const inkFor = (sh: Shape): string => {
+    if (isNoStroke(sh.stroke)) return "transparent";
     if (!isContrastInk(sh.stroke)) return sh.stroke;
     const s = bgLumRef.current;
     if (!s) return "#f5f5f5"; // dark blank canvas → bright ink

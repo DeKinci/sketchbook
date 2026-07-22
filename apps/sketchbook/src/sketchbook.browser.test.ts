@@ -1831,6 +1831,34 @@ test.describe("the paint lane — declaration, class merges, shade strips, the `
     await page.locator('button[aria-label="Fill gray shade none"]').click();
     await expect(page.locator('button[aria-label="No fill"]')).toHaveAttribute("aria-pressed", "true");
   });
+
+  test("no stroke is a stroke-specials rung: strips the selection's outline (fill stays), arms as the ambient ink, and smart walks the class home", async ({ page }) => {
+    await openSeeded(page, [rect("A", 60, 60, 80, 60, { stroke: "contrast", fill: "#f5a623" })]);
+    const shapes = async () => (await stored(page))[0].doc.shapes as { stroke: string; fill?: string }[];
+    await page.keyboard.press("ControlOrMeta+a");
+    // Right-click the adaptive half → the strip carries a none rung between
+    // smart and the gray ramp.
+    await page.locator('button[aria-label^="Adaptive ink"]').click({ button: "right" });
+    const noneRung = page.locator('button[aria-label="Stroke gray shade none"]');
+    await expect(noneRung).toBeVisible();
+    await noneRung.click();
+    // The selection lost its outline but kept its fill; the swatch reads none.
+    await expect.poll(async () => (await shapes()).map((s) => s.stroke)).toEqual(["none"]);
+    expect((await shapes())[0].fill).toBe("#f5a623");
+    const noStroke = page.locator('button[aria-label="No stroke"]');
+    await expect(noStroke).toHaveAttribute("aria-pressed", "true");
+    // The adaptive ambient was in-column → it followed: a fresh draw is born
+    // strokeless too.
+    await page.keyboard.press("Escape");
+    await expect(noStroke).toHaveAttribute("aria-pressed", "true");
+    await drawStroke(page, { x: 250, y: 200 }, { x: 340, y: 260 });
+    await expect.poll(async () => (await shapes()).map((s) => s.stroke)).toEqual(["none", "none"]);
+    // Smart is a rung of the same strip — picking it walks the class home.
+    await page.keyboard.press("ControlOrMeta+a");
+    await noStroke.click({ button: "right" });
+    await page.locator('button[aria-label="Stroke gray shade smart"]').click();
+    await expect.poll(async () => (await shapes()).map((s) => s.stroke)).toEqual(["contrast", "contrast"]);
+  });
 });
 
 test("text background highlight: amber chip behind DARK adaptive glyphs, live in the editor too", async ({ page }) => {

@@ -13,7 +13,7 @@
  * {@link SVG_META_ID}, making the file re-importable as a full board — the SVG
  * sibling of the PNG iTXt chunk.
  */
-import { boundingBox, contrastSolidOver, dashFor, fillAt, isContrastInk, isEnclosed, paintOrder, textBgBox, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
+import { boundingBox, contrastSolidOver, dashFor, fillAt, isContrastInk, isEnclosed, isNoStroke, paintOrder, textBgBox, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
 import { wrapLines } from "./textMetrics.ts";
 import { BOARD_FONT_STACK } from "./boardFont.ts";
 import { contentCropLogical } from "./exportPng.ts";
@@ -30,6 +30,7 @@ const num = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(2));
  *  images (per-pixel adaptation over a raster stays a documented
  *  approximation: an image-covered contrast stroke exports bright). */
 function inkOf(sh: Shape, shapes: Shape[]): string {
+  if (isNoStroke(sh.stroke)) return "none"; // literal SVG none — fill-only shape
   if (!isContrastInk(sh.stroke)) return sh.stroke;
   const b = boundingBox(sh);
   return contrastSolidOver(fillAt(shapes, b.x + b.width / 2, b.y + b.height / 2));

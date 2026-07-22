@@ -34,6 +34,9 @@ import {
   dashFor,
   CONTRAST_INK,
   isContrastInk,
+  NO_STROKE,
+  isNoStroke,
+  strokeColumnOf,
   INK_COLORS,
   HUE_FAMILIES,
   HUE_PRIORITY,
@@ -2196,7 +2199,7 @@ describe("the specials column — smart / none + the gray ramp", () => {
     // No-ops / invalid picks return the state untouched.
     expect(drawReducer(s2, { type: "setShade", level: "stroke", family: "gray", shade: CONTRAST_INK })).toBe(s2);
     expect(drawReducer(s0, { type: "setShade", level: "stroke", family: "gray", shade: "#e5484d" })).toBe(s0); // a hue is not a gray
-    expect(drawReducer(s0, { type: "setShade", level: "stroke", family: "gray", shade: null })).toBe(s0); // strokes can't be none
+    expect(drawReducer(s0, { type: "setShade", level: "stroke", family: "gray", shade: null })).toBe(s0); // the stroke none is the NO_STROKE sentinel, never null
     expect(drawReducer(s0, { type: "setShade", level: "fill", family: "gray", shade: CONTRAST_INK })).toBe(s0); // fills can't be smart
     expect(drawReducer(s0, { type: "setShade", level: "stroke", family: "red", shade: null })).toBe(s0); // hue rungs are never none
   });
@@ -2242,13 +2245,16 @@ describe("the specials column — smart / none + the gray ramp", () => {
     expect(s3.fillSpecial).toBeNull(); // B is unfilled — none pulls in
   });
 
-  it("cycleShade digs the specials strip: smart → grays → wrap (fill: none → grays), ambient riding along", () => {
+  it("cycleShade digs the specials strip: smart → none → grays → wrap (fill: none → grays), ambient riding along", () => {
     let st = seeded([]);
     st = drawReducer(st, { type: "cycleShade", level: "stroke" });
-    expect(st.strokeSpecial).toBe(GRAYS[0]); // smart digs into the brightest gray
+    expect(st.strokeSpecial).toBe(NO_STROKE); // smart digs into no-stroke first
+    st = drawReducer(st, { type: "cycleShade", level: "stroke" });
+    expect(st.strokeSpecial).toBe(GRAYS[0]); // then the brightest gray
     expect(st.color).toBe(GRAYS[0]);
     st = drawReducer(st, { type: "cycleShade", level: "stroke", dir: -1 });
-    expect(st.color).toBe(CONTRAST_INK); // back up to smart
+    st = drawReducer(st, { type: "cycleShade", level: "stroke", dir: -1 });
+    expect(st.color).toBe(CONTRAST_INK); // back up through none to smart
     st = drawReducer(st, { type: "cycleShade", level: "stroke", dir: -1 });
     expect(st.color).toBe(GRAYS[4]); // wraps to near-black
     st = drawReducer(st, { type: "cycleShade", level: "fill" });
@@ -2259,7 +2265,7 @@ describe("the specials column — smart / none + the gray ramp", () => {
     // An all-specials selection digs the strip even under a hue ambient…
     const s0 = sel(drawReducer(seeded([box("A", { stroke: CONTRAST_INK })]), { type: "setColor", color: "#e5484d" }), ["A"]);
     const s1 = drawReducer(s0, { type: "cycleShade", level: "stroke" });
-    expect(s1.shapes[0].stroke).toBe(GRAYS[0]);
+    expect(s1.shapes[0].stroke).toBe(NO_STROKE);
     expect(s1.color).toBe("#e5484d"); // the red pen is not in the column — stays
     // …and smart + hue is a MIXED selection now: no guessing, no-op.
     const m0 = sel(seeded([box("A", { stroke: CONTRAST_INK }), box("B", { stroke: "#e5484d" })]), ["A", "B"]);
@@ -2479,5 +2485,90 @@ describe("configurable features — palette width + the opt-outs", () => {
     const narrow = initialDrawState(undefined, { session: toSession(wide) });
     expect(narrow.features.paletteSize).toBe(4);
     expect(narrow.color).toBe(SHADES.brown[1]); // kept — it just reads as a foreign hex in the narrow lane
+  });
+});
+
+describe("no-stroke — the transparent stroke special (NO_STROKE)", () => {
+  const seededWith = (features: Partial<DrawFeatures>, shapes: Shape[] = []) =>
+    initialDrawState({ shapes, width: 400, height: 300 }, { features });
+  const sel = (s: DrawState, ids: string[]) => drawReducer(s, { type: "select", ids });
+
+  it("is a specials-column class: sentinel, column identity, no hue family", () => {
+    expect(isNoStroke(NO_STROKE)).toBe(true);
+    expect(isNoStroke(CONTRAST_INK)).toBe(false);
+    expect(strokeColumnOf(NO_STROKE)).toBe("gray");
+    expect(familyOf(NO_STROKE)).toBeNull();
+  });
+
+  it("setShade arms it; the in-column ambient follows; a selection of the column restrokes to none (one undo step)", () => {
+    const s0 = sel(seeded([box("a", { stroke: CONTRAST_INK, fill: "#f19a9d" }), box("b", { stroke: "#e5484d" })]), ["a", "b"]);
+    const s1 = drawReducer(s0, { type: "setShade", level: "stroke", family: "gray", shade: NO_STROKE });
+    expect(s1.strokeSpecial).toBe(NO_STROKE);
+    expect(s1.color).toBe(NO_STROKE); // adaptive ambient is in-column — it follows
+    expect(s1.shapes.find((sh) => sh.id === "a")!.stroke).toBe(NO_STROKE); // smart is a specials class → unified
+    expect(s1.shapes.find((sh) => sh.id === "b")!.stroke).toBe("#e5484d"); // red is another column — untouched
+    expect(s1.past).toHaveLength(1);
+    // Back to smart the same way — none is a class of the column, it unifies along.
+    const s2 = drawReducer(s1, { type: "setShade", level: "stroke", family: "gray", shade: CONTRAST_INK });
+    expect(s2.strokeSpecial).toBe(CONTRAST_INK);
+    expect(s2.shapes.find((sh) => sh.id === "a")!.stroke).toBe(CONTRAST_INK);
+  });
+
+  it("cycleShade digs the stroke specials as [smart, none, ...GRAYS] — and skips none on a fills-off board", () => {
+    const s0 = seeded([]);
+    const s1 = drawReducer(s0, { type: "cycleShade", level: "stroke" });
+    expect(s1.strokeSpecial).toBe(NO_STROKE); // smart → none
+    const s2 = drawReducer(s1, { type: "cycleShade", level: "stroke" });
+    expect(s2.strokeSpecial).toBe(GRAYS[0]); // none → the gray ramp
+    expect(drawReducer(s1, { type: "cycleShade", level: "stroke", dir: -1 }).strokeSpecial).toBe(CONTRAST_INK);
+    // Fills off: the palette omits none entirely — smart digs straight into the grays.
+    const f0 = seededWith({ fills: false });
+    expect(drawReducer(f0, { type: "cycleShade", level: "stroke" }).strokeSpecial).toBe(GRAYS[0]);
+    expect(drawReducer(f0, { type: "setShade", level: "stroke", family: "gray", shade: NO_STROKE })).toBe(f0); // rejected
+  });
+
+  it("cyclePaint's specials stop paints an armed none; setColor none strips the selection's strokes", () => {
+    const s0 = drawReducer(seeded([]), { type: "setShade", level: "stroke", family: "gray", shade: NO_STROKE });
+    // Ambient followed to none — cycle forward into red, then wrap back onto the specials stop.
+    const s1 = drawReducer(s0, { type: "cyclePaint", level: "stroke" });
+    expect(s1.color).toBe(SHADES.red[BASE_SHADE]);
+    expect(drawReducer(s1, { type: "cyclePaint", level: "stroke", dir: -1 }).color).toBe(NO_STROKE);
+    // Clicking the none-armed swatch with a selection = strip strokes (mirror of no-fill).
+    const s2 = sel(seeded([box("a", { stroke: "#e5484d", fill: "#f19a9d" })]), ["a"]);
+    const s3 = drawReducer(s2, { type: "setColor", color: NO_STROKE });
+    expect(s3.shapes[0].stroke).toBe(NO_STROKE);
+    expect(s3.past).toHaveLength(1);
+  });
+
+  it("selecting a strokeless shape pulls none into the specials slot — except on a fills-off board", () => {
+    const s = sel(seeded([box("a", { stroke: NO_STROKE })]), ["a"]);
+    expect(s.strokeSpecial).toBe(NO_STROKE);
+    // Fills-off: the shape stays selectable, but the slot never re-arms an ink the board can't offer.
+    const f = sel(seededWith({ fills: false }, [box("a", { stroke: NO_STROKE })]), ["a"]);
+    expect(f.selectedIds).toEqual(["a"]);
+    expect(f.strokeSpecial).toBe(CONTRAST_INK);
+  });
+
+  it("recolor merges the none class both ways (drag-a-swatch semantics)", () => {
+    const s0 = sel(seeded([box("a", { stroke: NO_STROKE }), box("b", { stroke: "#e5484d" })]), ["a", "b"]);
+    const toRed = drawReducer(s0, { type: "recolor", from: NO_STROKE, to: "#e5484d" });
+    expect(toRed.shapes.map((sh) => sh.stroke)).toEqual(["#e5484d", "#e5484d"]);
+    const toNone = drawReducer(s0, { type: "recolor", from: "#e5484d", to: NO_STROKE });
+    expect(toNone.shapes.map((sh) => sh.stroke)).toEqual([NO_STROKE, NO_STROKE]);
+  });
+
+  it("no-stroke rides the fills feature at init: a fills-off board scrubs it from the restored session", () => {
+    const sess = { ...toSession(initialDrawState()), color: NO_STROKE, strokeSpecial: NO_STROKE };
+    const f = initialDrawState(undefined, { features: { fills: false }, session: sess });
+    expect(f.color).toBe(CONTRAST_INK);
+    expect(f.strokeSpecial).toBe(CONTRAST_INK);
+    // On a fills board the same session restores verbatim.
+    const d = initialDrawState(undefined, { session: sess });
+    expect(d.color).toBe(NO_STROKE);
+    expect(d.strokeSpecial).toBe(NO_STROKE);
+    // And the single-color forcing still wins over everything.
+    const one = initialDrawState(undefined, { features: { paletteSize: 1 }, session: sess });
+    expect(one.color).toBe(CONTRAST_INK);
+    expect(one.strokeSpecial).toBe(CONTRAST_INK);
   });
 });

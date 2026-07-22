@@ -21,7 +21,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconButton } from "./IconButton.tsx";
-import { CONTRAST_INK, SHADES, GRAYS, familyOf, strokeColumnOf, fillColumnOf, visibleHueFamilies, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type DrawFeatures, type HueFamily, type LaneColumn, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
+import { CONTRAST_INK, NO_STROKE, SHADES, GRAYS, familyOf, strokeColumnOf, fillColumnOf, visibleHueFamilies, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type DrawFeatures, type HueFamily, type LaneColumn, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
 
 /** The two persistent tools live in a segmented "well" that slides to whichever
  *  is armed; the one-use tools (shape / connector clusters + text) follow it. */
@@ -119,8 +119,9 @@ const DRAG_HINT = " — drag onto another column to repaint just this color";
  *  dragging a highlighted half onto another column of the SAME level merges
  *  just that class. Right-click / long-press ANY column opens its shade strip
  *  — a changer-picker that retunes the column durably (the specials strip is
- *  [smart|none, ...grays]); mid-drag, hovering a column half pops the strip so
- *  merges can land on exact rungs. */
+ *  [smart, none, ...grays] for strokes — none only with fills on — and
+ *  [none, ...grays] for fills); mid-drag, hovering a column half pops the
+ *  strip so merges can land on exact rungs. */
 function PaintLane({
   families,
   showFills,
@@ -345,7 +346,8 @@ function PaintLane({
       {cols.map((f) => {
         const topValue = f === null ? strokeSpecial : strokeShades[f];
         const botValue = f === null ? (fillSpecial ?? "none") : fillShades[f];
-        const topFace = f === null ? (strokeSpecial === CONTRAST_INK ? "#f5f5f5" : strokeSpecial) : strokeShades[f];
+        const topFace =
+          f === null ? (strokeSpecial === CONTRAST_INK ? "#f5f5f5" : strokeSpecial === NO_STROKE ? "transparent" : strokeSpecial) : strokeShades[f];
         const botFace = f === null ? (fillSpecial ?? "transparent") : fillShades[f];
         const topDraggable = mergeable && isTopActive(f);
         const botDraggable = mergeable && isBotActive(f);
@@ -376,6 +378,13 @@ function PaintLane({
                 <span className="absolute left-1/2 top-[3px] h-[1.5px] w-6 -translate-x-1/2 rotate-[20deg] bg-red-400/80" />
               </span>
             )}
+            {f === null && strokeSpecial === NO_STROKE && (
+              // The no-STROKE glyph, mirrored to the top half (armed via the
+              // specials strip's none rung — fills-boards only).
+              <span aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-[10px] w-5 -translate-x-1/2 -translate-y-full overflow-hidden">
+                <span className="absolute left-1/2 top-[5px] h-[1.5px] w-6 -translate-x-1/2 rotate-[20deg] bg-red-400/80" />
+              </span>
+            )}
             <button
               type="button"
               data-lane-level="stroke"
@@ -385,13 +394,21 @@ function PaintLane({
                 f === null
                   ? strokeSpecial === CONTRAST_INK
                     ? "Adaptive ink — always contrasts the background (`)"
-                    : `Stroke gray ${strokeSpecial}`
+                    : strokeSpecial === NO_STROKE
+                      ? "No stroke"
+                      : `Stroke gray ${strokeSpecial}`
                   : `Stroke ${f} ${strokeShades[f]}`
               }
               aria-pressed={isTopActive(f)}
               title={
                 (f === null
-                  ? `${strokeSpecial === CONTRAST_INK ? "Adaptive — always contrasts what's behind it" : `Gray stroke ${strokeSpecial}`} — right-click for smart + grays (\` cycles color, ⌥\` shade)`
+                  ? `${
+                      strokeSpecial === CONTRAST_INK
+                        ? "Adaptive — always contrasts what's behind it"
+                        : strokeSpecial === NO_STROKE
+                          ? "No stroke — the shape paints only its fill"
+                          : `Gray stroke ${strokeSpecial}`
+                    } — right-click for smart${showFills ? ", none" : ""} + grays (\` cycles color, ⌥\` shade)`
                   : `${cap(f)} stroke ${strokeShades[f]} — right-click for shades (\` cycles color, ⌥\` shade)`) +
                 (topDraggable ? DRAG_HINT : "")
               }
@@ -458,10 +475,16 @@ function PaintLane({
             style={{ left: drag.x, top: drag.y }}
           >
             {drag.level === "stroke" ? (
-              <span
-                className="block h-[14px] w-[14px] rounded-full border border-ink-500"
-                style={{ backgroundColor: drag.from === CONTRAST_INK ? "#f5f5f5" : drag.from }}
-              />
+              drag.from === NO_STROKE ? (
+                <span className="relative block h-[14px] w-[14px] overflow-hidden rounded-full border border-ink-400">
+                  <span className="absolute left-1/2 top-1/2 h-[1.5px] w-5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
+                </span>
+              ) : (
+                <span
+                  className="block h-[14px] w-[14px] rounded-full border border-ink-500"
+                  style={{ backgroundColor: drag.from === CONTRAST_INK ? "#f5f5f5" : drag.from }}
+                />
+              )
             ) : drag.from === "none" ? (
               <span className="relative block h-3 w-3 overflow-hidden rounded border border-ink-400">
                 <span className="absolute left-1/2 top-1/2 h-[1.5px] w-5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
@@ -483,7 +506,14 @@ function PaintLane({
             className="fixed z-[100] flex -translate-x-1/2 flex-col gap-1 rounded-xl border border-ink-500 bg-ink-800 p-1 shadow-[0_4px_16px_rgba(0,0,0,0.5)]"
             style={{ left: strip.x, bottom: window.innerHeight - strip.y + 6 }}
           >
-            {(strip.family === "gray" ? [strip.level === "stroke" ? CONTRAST_INK : "none", ...GRAYS] : SHADES[strip.family]).map((shade) => {
+            {(strip.family === "gray"
+              ? strip.level === "stroke"
+                ? // No-stroke rides the fills feature: a strokeless shape needs
+                  // a fill to be visible at all (see NO_STROKE).
+                  [CONTRAST_INK, ...(showFills ? [NO_STROKE] : []), ...GRAYS]
+                : ["none", ...GRAYS]
+              : SHADES[strip.family]
+            ).map((shade) => {
               const armed =
                 strip.family === "gray"
                   ? strip.level === "stroke"
@@ -501,14 +531,24 @@ function PaintLane({
                   data-lane-value={shade}
                   aria-label={`${strip.level === "stroke" ? "Stroke" : "Fill"} ${strip.family} shade ${rung}`}
                   aria-pressed={current}
-                  title={rung === "smart" ? "Smart — adaptive contrast ink" : rung === "none" ? "No fill" : rung}
+                  title={
+                    rung === "smart"
+                      ? "Smart — adaptive contrast ink"
+                      : rung === "none"
+                        ? strip.level === "stroke"
+                          ? "No stroke — the shape paints only its fill"
+                          : "No fill"
+                        : rung
+                  }
                   // The strip lives in a body portal — OUTSIDE the board root.
                   // A default pointerdown would move focus there and the
                   // board would go keyboard-dead (Esc, ⌘A, the ` keys). Menus
                   // don't take focus:
                   onPointerDown={(e) => e.preventDefault()}
                   onClick={() => {
-                    onShade(strip.level, strip.family, shade === "none" ? null : shade);
+                    // Only the FILL none maps to null (fill: null = unfilled);
+                    // the stroke none IS the NO_STROKE sentinel value.
+                    onShade(strip.level, strip.family, strip.level === "fill" && shade === "none" ? null : shade);
                     setStrip(null);
                   }}
                   className={`flex h-7 w-7 items-center justify-center rounded-lg ${current ? "bg-accent-500/40 ring-[1.5px] ring-inset ring-accent-400" : ""} ${
@@ -520,7 +560,13 @@ function PaintLane({
                     // it resolves to.
                     <span className="h-[18px] w-[18px] rounded-full border border-ink-400 [background:linear-gradient(135deg,#f5f5f5_50%,#111111_50%)]" />
                   ) : rung === "none" ? (
-                    <span className="relative h-4 w-4 overflow-hidden rounded border border-ink-400">
+                    // The none chip in each level's grammar: round dot for
+                    // strokes, square chip for fills — slashed either way.
+                    <span
+                      className={`relative overflow-hidden border border-ink-400 ${
+                        strip.level === "stroke" ? "h-[18px] w-[18px] rounded-full" : "h-4 w-4 rounded"
+                      }`}
+                    >
                       <span className="absolute left-1/2 top-1/2 h-[1.5px] w-6 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
                     </span>
                   ) : strip.level === "stroke" ? (
