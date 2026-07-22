@@ -1573,8 +1573,14 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     // Konva's dblclick window is time-based and position-blind: a deselect-click
     // on empty canvas followed by a quick click on a shape used to "double-click"
     // the shape and pop its text editor mid-flow.
-    const empty = await toScreen(page, { x: 500, y: 320 });
+    const empty = await toScreen(page, { x: 450, y: 60 });
     const onText = await toScreen(page, { x: 115, y: 108 });
+    // The empty spot must hit CANVAS, not the minimap — a minimap click
+    // teleports the camera and silently invalidates every precomputed screen
+    // point after it (this exact collision once let the test pass its phantom
+    // assertion vacuously while the real dblclick missed the text).
+    const mini = (await page.getByRole("img", { name: /Board overview/ }).boundingBox())!;
+    expect(empty.x < mini.x || empty.x > mini.x + mini.width || empty.y < mini.y || empty.y > mini.y + mini.height).toBe(true);
     await page.mouse.click(empty.x, empty.y);
     await page.mouse.click(onText.x, onText.y); // back-to-back: well inside the window
     await page.waitForTimeout(300);
