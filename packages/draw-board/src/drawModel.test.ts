@@ -481,6 +481,14 @@ describe("fills — setFill / enclosure / fillAt / contrast resolve", () => {
     expect(fillAt([pen], -10, 50)).toBeNull();
   });
 
+  it("fillAt excludeId: the excluded shape's own fill is invisible — the fill beneath (or bare paper) shows", () => {
+    const under = box("under", { x: 0, y: 0, width: 200, height: 200, fill: "#f5a623" });
+    const over = box("over", { x: 50, y: 50, width: 60, height: 60, fill: "#8267c1" });
+    expect(fillAt([under, over], 80, 80, "over")).toBe("#f5a623"); // own fill skipped → the amber beneath
+    expect(fillAt([over], 80, 80, "over")).toBeNull(); // nothing beneath → bare paper
+    expect(fillAt([under, over], 80, 80, "under")).toBe("#8267c1"); // excluding a shape below changes nothing on top
+  });
+
   it("contrastSolidOver: dark ink on light fills, bright on dark fills / bare paper", () => {
     expect(contrastSolidOver("#f5a623")).toBe(CONTRAST_DARK); // amber is light
     expect(contrastSolidOver("#e5484d")).toBe(CONTRAST_BRIGHT); // red is dark enough

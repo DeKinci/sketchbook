@@ -1676,6 +1676,34 @@ test("fill flow: swatch → filled rect + filled loop, and the adaptive ink dark
   expect(isAmber(inLoop), `enclosed doodle interior should be amber, got ${JSON.stringify(inLoop)}`).toBe(true);
 });
 
+test("smart ink ignores the shape's OWN backfill: outline bright over the board, dark over a light fill BENEATH", async ({ page }) => {
+  await openSeeded(page, [
+    // A: a light-filled box alone on the dark board — its outline contrasts
+    // the SURROUNDINGS (bright), never its own amber.
+    rect("A", 100, 100, 120, 80, { stroke: "contrast", fill: "#f5a623", strokeWidth: 6 }),
+    // B beneath C: another shape's fill still counts — C's outline darkens.
+    rect("B", 300, 80, 200, 140, { fill: "#f5a623" }),
+    rect("C", 340, 110, 120, 80, { stroke: "contrast", fill: "#8267c1", strokeWidth: 6 }),
+  ]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const S = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+
+  // A's top-edge midpoint: bright ink — every channel high (its own amber and
+  // the old dark resolve both fail this).
+  const onA = await probePixel(page, S({ x: 160, y: 100 }).x, S({ x: 160, y: 100 }).y);
+  expect(onA.r > 230 && onA.g > 230 && onA.b > 230, `A's outline should be bright, got ${JSON.stringify(onA)}`).toBe(true);
+  // A's interior still paints its own amber.
+  const inA = await probePixel(page, S({ x: 160, y: 140 }).x, S({ x: 160, y: 140 }).y);
+  expect(isAmber(inA), `A's interior should be amber, got ${JSON.stringify(inA)}`).toBe(true);
+  // C sits on B's amber: the fill BENEATH decides → dark ink.
+  const onC = await probePixel(page, S({ x: 400, y: 110 }).x, S({ x: 400, y: 110 }).y);
+  expect(onC.r + onC.g + onC.b, `C's outline over amber should be dark, got ${JSON.stringify(onC)}`).toBeLessThan(220);
+});
+
 test.describe("the paint lane — declaration, class merges, shade strips, the ` keys", () => {
   const RED = "#e5484d";
   const GREEN = "#30a46c";

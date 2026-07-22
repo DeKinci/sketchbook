@@ -17,6 +17,8 @@ import {
   contentBounds,
   moveClusterIds,
   paintOrder,
+  contrastSolidOver,
+  fillAt,
   isContrastInk,
   isNoStroke,
   shapesInMarquee,
@@ -429,13 +431,14 @@ export function DrawCanvas({
     };
   }, [shapes, imgEls]);
 
-  // Downscaled luminance map of the "backdrop" the ink contrasts against — the
-  // annotated background image, any dropped image shapes, AND every painted
-  // fill (a fill is background; that's why fills offer no adaptive option) —
-  // but NEVER the strokes.
-  // Sampled over the union RECT of those (an infinite board has no canvas box
-  // to cover; everything outside the rect is the dark board). Rebuilt only when
-  // that backdrop changes (image + fill signatures), not on every pen point.
+  // Downscaled luminance map of the RASTER backdrop the ink contrasts against —
+  // the annotated background image plus any dropped image shapes; never the
+  // strokes. FILLS are not baked in: they resolve exactly in vector space
+  // (fillAt) inside inkFor — which is what lets a shape's OWN backfill be
+  // excluded from its ink; a shared raster can't un-bake one shape's fill.
+  // Sampled over the union RECT of the images (an infinite board has no canvas
+  // box to cover; everything outside the rect is the dark board). Rebuilt only
+  // when the images change, not on every pen point.
   const shapesRef = useRef(shapes);
   shapesRef.current = shapes;
   const bgLumRef = useRef<{ data: Uint8ClampedArray; w: number; h: number; rect: Box } | null>(null);
@@ -444,10 +447,11 @@ export function DrawCanvas({
     .filter((s) => s.type === "image")
     .map((s) => `${s.id}:${Math.round((s as { x: number }).x)}:${Math.round((s as { y: number }).y)}:${(s as { width: number }).width | 0}:${(s as { height: number }).height | 0}`)
     .join("|");
-  // Fills are background too (the adaptive ink contrasts against them, never
-  // against strokes) — a fill change/move re-rasters like an image move does.
-  // Open pen doodles are excluded (paintsFill), so live pen drawing never
-  // re-rasters per point; the sig flips only when the loop closes.
+  // Fills are backdrop too (resolved in vector space by inkFor, never baked
+  // into the raster) — this sig sits in the effect deps only to bump lumEpoch
+  // so cached inks resample on a fill change/move. Open pen doodles are
+  // excluded (paintsFill), so live pen drawing never resamples per point; the
+  // sig flips only when the loop closes.
   const fillSig = shapes
     .filter(paintsFill)
     .map((s) => {
@@ -458,8 +462,8 @@ export function DrawCanvas({
   useEffect(() => {
     let rect: Box | null = bgImage ? { x: 0, y: 0, width: state.width, height: state.height } : null;
     for (const sh of shapesRef.current) {
-      if (sh.type !== "image" && !paintsFill(sh)) continue;
-      const b = sh.type === "text" ? textBgBox(sh) : boundingBox(sh);
+      if (sh.type !== "image") continue;
+      const b = boundingBox(sh);
       if (b.width <= 0 || b.height <= 0) continue;
       rect = rect ? unionBox(rect, b) : b;
     }
@@ -479,10 +483,8 @@ export function DrawCanvas({
       return;
     }
     // Base: the dark board; then the annotated background image at the doc box;
-    // then every placed image shape at its rect; then every painted FILL in
-    // draw order (fills sit above images on the board — paintOrder) — all
-    // mapped into the union rect. Strokes are never painted here: they don't
-    // count as background for the adaptive ink.
+    // then every placed image shape at its rect — mapped into the union rect.
+    // Strokes are never painted here, and fills live in vector space (inkFor).
     const mx = (x: number) => ((x - rect.x) / rect.width) * w;
     const my = (y: number) => ((y - rect.y) / rect.height) * h;
     ctx.fillStyle = CANVAS_BG_DARK;
@@ -493,50 +495,6 @@ export function DrawCanvas({
       const el = imgEls[sh.id];
       if (!el) continue;
       ctx.drawImage(el, mx(sh.x), my(sh.y), (sh.width / rect.width) * w, (sh.height / rect.height) * h);
-    }
-    for (const sh of shapesRef.current) {
-      if (!paintsFill(sh)) continue;
-      switch (sh.type) {
-        case "pen": {
-          ctx.fillStyle = sh.fill!;
-          ctx.beginPath();
-          ctx.moveTo(mx(sh.points[0]), my(sh.points[1]));
-          for (let i = 2; i + 1 < sh.points.length; i += 2) ctx.lineTo(mx(sh.points[i]), my(sh.points[i + 1]));
-          ctx.closePath();
-          ctx.fill();
-          break;
-        }
-        case "ellipse": {
-          const b = boundingBox(sh);
-          ctx.fillStyle = sh.fill!;
-          ctx.beginPath();
-          ctx.ellipse(mx(b.x + b.width / 2), my(b.y + b.height / 2), (b.width / 2 / rect.width) * w, (b.height / 2 / rect.height) * h, 0, 0, Math.PI * 2);
-          ctx.fill();
-          break;
-        }
-        case "diamond": {
-          const p = diamondPoints(boundingBox(sh));
-          ctx.fillStyle = sh.fill!;
-          ctx.beginPath();
-          ctx.moveTo(mx(p[0]), my(p[1]));
-          for (let i = 2; i + 1 < p.length; i += 2) ctx.lineTo(mx(p[i]), my(p[i + 1]));
-          ctx.closePath();
-          ctx.fill();
-          break;
-        }
-        case "rect": {
-          const b = boundingBox(sh);
-          ctx.fillStyle = sh.fill!;
-          ctx.fillRect(mx(b.x), my(b.y), (b.width / rect.width) * w, (b.height / rect.height) * h);
-          break;
-        }
-        case "text": {
-          const b = textBgBox(sh);
-          ctx.fillStyle = sh.fill!;
-          ctx.fillRect(mx(b.x), my(b.y), (b.width / rect.width) * w, (b.height / rect.height) * h);
-          break;
-        }
-      }
     }
     try {
       bgLumRef.current = { data: ctx.getImageData(0, 0, w, h).data, w, h, rect };
@@ -555,11 +513,17 @@ export function DrawCanvas({
   const inkFor = (sh: Shape): string => {
     if (isNoStroke(sh.stroke)) return "transparent";
     if (!isContrastInk(sh.stroke)) return sh.stroke;
-    const s = bgLumRef.current;
-    if (!s) return "#f5f5f5"; // dark blank canvas → bright ink
     const b = boundingBox(sh);
     const cx = b.x + b.width / 2;
     const cy = b.y + b.height / 2;
+    // Fills first, exactly, in vector space — excluding the shape's OWN
+    // backfill (self, not backdrop: the outline contrasts the surroundings).
+    // Text keeps its own fill — the chip sits BEHIND the glyphs.
+    const under = fillAt(shapes, cx, cy, sh.type === "text" ? undefined : sh.id);
+    if (under) return contrastSolidOver(under);
+    // No fill beneath → the image raster decides; beyond it, the dark board.
+    const s = bgLumRef.current;
+    if (!s) return "#f5f5f5"; // dark blank canvas → bright ink
     if (cx < s.rect.x || cx > s.rect.x + s.rect.width || cy < s.rect.y || cy > s.rect.y + s.rect.height) return "#f5f5f5";
     const px = clampN(Math.round(((cx - s.rect.x) / s.rect.width) * s.w), 0, s.w - 1);
     const py = clampN(Math.round(((cy - s.rect.y) / s.rect.height) * s.h), 0, s.h - 1);

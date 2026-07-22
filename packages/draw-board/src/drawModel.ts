@@ -541,10 +541,13 @@ export function applyFill(sh: Shape, fill: string | null): Shape {
 /** The topmost fill color under a point — the backdrop the adaptive ink
  *  contrasts against there (images excluded: pure-land callers — SVG export,
  *  the edit overlay — have no pixels; the canvas's raster sampler adds them).
- *  Null = bare paper. */
-export function fillAt(shapes: Shape[], px: number, py: number): string | null {
+ *  `excludeId` skips that shape: a shape's OWN backfill is self, not backdrop,
+ *  so its adaptive outline resolves against what surrounds it (callers keep
+ *  text's own fill — the chip sits BEHIND the glyphs). Null = bare paper. */
+export function fillAt(shapes: Shape[], px: number, py: number, excludeId?: string): string | null {
   for (let i = shapes.length - 1; i >= 0; i--) {
     const sh = shapes[i];
+    if (sh.id === excludeId) continue;
     switch (sh.type) {
       case "pen":
         if (sh.fill && isEnclosed(sh.points) && pointInPolygon(px, py, sh.points)) return sh.fill;

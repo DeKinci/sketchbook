@@ -100,6 +100,25 @@ describe("exportSvg", () => {
     expect(svg).toMatch(/<rect[^>]*fill="#f19a9d"[^>]*stroke="none"/);
   });
 
+  it("smart ink ignores the shape's OWN backfill — the outline contrasts the surroundings; text keeps its chip", () => {
+    // A light-filled box alone on the dark board: ink resolves BRIGHT (the
+    // board beneath), not dark against its own amber.
+    const own = exportSvg(doc([{ ...rect("r"), stroke: "contrast", fill: "#f5a623" } as Shape]));
+    expect(own).toMatch(/<rect[^>]*fill="#f5a623"[^>]*stroke="#f5f5f5"/);
+    // The same box sitting on ANOTHER light fill: what's beneath decides → dark.
+    const over = exportSvg(
+      doc([
+        { ...rect("bg", 60, 80), width: 200, height: 120, fill: "#f5a623" } as Shape,
+        { ...rect("r"), stroke: "contrast", fill: "#8267c1" } as Shape,
+      ])
+    );
+    expect(over).toMatch(/<rect[^>]*x="100"[^>]*stroke="#111111"/);
+    // Text is the carve-out: its fill is the chip BEHIND the glyphs, so the
+    // glyphs must keep contrasting with their own chip.
+    const t = exportSvg(doc([{ id: "t", type: "text", stroke: "contrast", strokeWidth: 3, x: 5, y: 200, text: "hi", fontSize: 18, fill: "#f5a623" } as Shape]));
+    expect(t).toMatch(/<text[^>]*fill="#111111"/);
+  });
+
   it("diamond exports a polygon on the box's edge midpoints; fill/dash ride like any box", () => {
     const svg = exportSvg(
       doc([
