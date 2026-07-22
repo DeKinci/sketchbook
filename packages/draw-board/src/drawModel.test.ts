@@ -23,6 +23,7 @@ import {
   paintOrder,
   clonePastedShapes,
   toDoc,
+  toSession,
   canUndo,
   canRedo,
   stepStroke,
@@ -50,6 +51,7 @@ import {
   textBgBox,
   CONTRAST_DARK,
   CONTRAST_BRIGHT,
+  type DrawSession,
   type DrawState,
   type BoxShape,
   type TextShape,
@@ -2268,5 +2270,98 @@ describe("the specials column — smart / none + the gray ramp", () => {
     sf = drawReducer(sf, { type: "setFill", fill: SHADES.red[0] });
     sf = drawReducer(sf, { type: "cyclePaint", level: "fill", dir: -1 });
     expect(sf.fill).toBe("#b8b8b8");
+  });
+});
+
+describe("the session slice — toSession / restore across reloads", () => {
+  it("toSession → initialDrawState({session}) round-trips the whole toolbar + selection", () => {
+    const shapes = [box("a"), box("b", { x: 200 })];
+    const s: DrawState = {
+      ...seeded(shapes),
+      tool: "rect",
+      baseTool: "select",
+      shapeVariant: "ellipse",
+      lineVariant: "darrow",
+      color: SHADES.blue[3],
+      fill: SHADES.red[0],
+      strokeShades: { red: SHADES.red[4], amber: SHADES.amber[2], green: SHADES.green[2], blue: SHADES.blue[3] },
+      fillShades: { red: SHADES.red[0], amber: SHADES.amber[1], green: SHADES.green[0], blue: SHADES.blue[0] },
+      strokeSpecial: GRAYS[2],
+      fillSpecial: GRAYS[1],
+      strokeWidth: 6,
+      strokeStyle: "dashed",
+      selectedIds: ["a", "b"],
+    };
+    const restored = initialDrawState(toDoc(s), { session: toSession(s) });
+    const keys = [
+      "tool",
+      "baseTool",
+      "shapeVariant",
+      "lineVariant",
+      "color",
+      "fill",
+      "strokeShades",
+      "fillShades",
+      "strokeSpecial",
+      "fillSpecial",
+      "strokeWidth",
+      "strokeStyle",
+      "selectedIds",
+    ] as const;
+    for (const k of keys) expect(restored[k], k).toEqual(s[k]);
+    // History + in-flight gesture state stay transient by design.
+    expect(restored.past).toEqual([]);
+    expect(restored.future).toEqual([]);
+    expect(restored.draftId).toBeNull();
+    expect(restored.gestureBase).toBeNull();
+  });
+
+  it("the restored selection keeps only ids that still exist in the doc, deduped", () => {
+    const sess: DrawSession = { ...toSession(seeded([box("a")])), selectedIds: ["a", "ghost", "a"] };
+    const restored = initialDrawState({ shapes: [box("a")], width: 400, height: 300 }, { session: sess });
+    expect(restored.selectedIds).toEqual(["a"]);
+  });
+
+  it("cross-version garbage falls back field by field (valid fields still pull), never throws", () => {
+    const junk = {
+      tool: "laser",
+      baseTool: "eraser", // not a selectable tool → pen
+      shapeVariant: "blob",
+      lineVariant: 7,
+      color: "",
+      fill: 7,
+      strokeShades: { red: 5, blue: SHADES.blue[4] },
+      fillShades: "nope",
+      strokeSpecial: "",
+      fillSpecial: 3,
+      strokeWidth: -4,
+      strokeStyle: "wavy",
+      selectedIds: "a",
+    } as unknown as DrawSession;
+    const d = initialDrawState(undefined, { session: junk });
+    const dflt = initialDrawState();
+    expect(d.tool).toBe("pen"); // invalid tool falls to the (also-fallen) baseTool
+    expect(d.baseTool).toBe("pen");
+    expect(d.shapeVariant).toBe(dflt.shapeVariant);
+    expect(d.lineVariant).toBe(dflt.lineVariant);
+    expect(d.color).toBe(dflt.color);
+    expect(d.fill).toBeNull();
+    expect(d.strokeShades).toEqual({ ...dflt.strokeShades, blue: SHADES.blue[4] });
+    expect(d.fillShades).toEqual(dflt.fillShades);
+    expect(d.strokeSpecial).toBe(CONTRAST_INK);
+    expect(d.fillSpecial).toBeNull();
+    expect(d.strokeWidth).toBe(dflt.strokeWidth);
+    expect(d.strokeStyle).toBe("solid");
+    expect(d.selectedIds).toEqual([]);
+  });
+
+  it("a valid one-use tool restores as-is; a missing tool falls back to the restored baseTool", () => {
+    const base = toSession(initialDrawState());
+    expect(initialDrawState(undefined, { session: { ...base, tool: "eraser", baseTool: "select" } }).tool).toBe("eraser");
+    const noTool: Partial<DrawSession> = { ...base, baseTool: "select" };
+    delete noTool.tool;
+    const d = initialDrawState(undefined, { session: noTool as DrawSession });
+    expect(d.baseTool).toBe("select");
+    expect(d.tool).toBe("select");
   });
 });

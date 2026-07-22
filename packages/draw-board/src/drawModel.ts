@@ -11,7 +11,8 @@
 
 import { textBlockSize } from "./textMetrics.ts";
 
-export type Tool = "select" | "pen" | "rect" | "ellipse" | "line" | "arrow" | "darrow" | "text" | "eraser";
+export const TOOLS = ["select", "pen", "rect", "ellipse", "line", "arrow", "darrow", "text", "eraser"] as const;
+export type Tool = (typeof TOOLS)[number];
 
 /** Tools that place a shape by dragging (not select/text/eraser). */
 export const DRAW_TOOLS: readonly Tool[] = ["pen", "rect", "ellipse", "line", "arrow", "darrow"];
@@ -474,12 +475,53 @@ export function fillAt(shapes: Shape[], px: number, py: number): string | null {
 
 const DEFAULT_STAGE = { width: 720, height: 460 };
 
-export function initialDrawState(doc?: DrawDoc, opts?: { color?: string }): DrawState {
-  return {
+/** The SESSION slice of the state — everything the toolbar + selection hold
+ *  that isn't the document itself: tool + cluster variants, the ambient
+ *  paints, the lane's retuned shades and specials, stroke width/style, and
+ *  the selection. Hosts persist it NEXT TO their doc storage (never inside
+ *  the doc — exports/attachments must not carry UI state) so a reload or a
+ *  page switch restores the board exactly as it was left. Undo history and
+ *  in-flight gesture state stay transient by design. */
+export interface DrawSession {
+  tool: Tool;
+  baseTool: "select" | "pen";
+  shapeVariant: ShapeVariant;
+  lineVariant: LineVariant;
+  color: string;
+  fill: string | null;
+  strokeShades: Record<HueFamily, string>;
+  fillShades: Record<HueFamily, string>;
+  strokeSpecial: string;
+  fillSpecial: string | null;
+  strokeWidth: number;
+  strokeStyle: StrokeStyle;
+  selectedIds: string[];
+}
+
+/** One enum-ish field of a persisted session, validated against its allowlist
+ *  (a stored session is cross-version data, same as docs). */
+const oneOf = <T,>(v: unknown, allowed: readonly T[], dflt: T): T => (allowed.includes(v as T) ? (v as T) : dflt);
+
+/** A persisted shade record merged over the defaults, per family — a missing
+ *  or foreign-shaped record falls back field by field. */
+function mergeShades(v: unknown, dflt: Record<HueFamily, string>): Record<HueFamily, string> {
+  const out = { ...dflt };
+  if (v && typeof v === "object") {
+    for (const f of HUE_FAMILIES) {
+      const s = (v as Record<string, unknown>)[f];
+      if (typeof s === "string" && s) out[f] = s;
+    }
+  }
+  return out;
+}
+
+export function initialDrawState(doc?: DrawDoc, opts?: { color?: string; session?: DrawSession | null }): DrawState {
+  // normalizeGroups + migrateLabels: cross-version safety for every open path
+  // (localStorage, PNG/SVG board import, host-supplied docs) — see their docs.
+  const shapes = doc ? migrateLabels(normalizeGroups(doc.shapes.map(cloneShape))) : [];
+  const base: DrawState = {
     background: doc?.background,
-    // normalizeGroups + migrateLabels: cross-version safety for every open path
-    // (localStorage, PNG/SVG board import, host-supplied docs) — see their docs.
-    shapes: doc ? migrateLabels(normalizeGroups(doc.shapes.map(cloneShape))) : [],
+    shapes,
     width: doc?.width ?? DEFAULT_STAGE.width,
     height: doc?.height ?? DEFAULT_STAGE.height,
     // Always open in pen — ready to sketch immediately (cursor is one Tab away).
@@ -501,6 +543,53 @@ export function initialDrawState(doc?: DrawDoc, opts?: { color?: string }): Draw
     gestureBase: null,
     past: [],
     future: [],
+  };
+  const raw = opts?.session;
+  if (!raw || typeof raw !== "object") return base;
+  // Restore a persisted session over the defaults. Cross-version safety, like
+  // the doc paths above: every field is validated — unknown enum values fall
+  // back, shade records merge per family, and the selection keeps only ids
+  // that still exist in THIS doc (a session may be older than the doc).
+  const ids = new Set(shapes.map((sh) => sh.id));
+  const baseTool = oneOf<Tool>(raw.baseTool, SELECTABLE_TOOLS, "pen") as "select" | "pen";
+  return {
+    ...base,
+    tool: oneOf<Tool>(raw.tool, TOOLS, baseTool),
+    baseTool,
+    shapeVariant: oneOf(raw.shapeVariant, SHAPE_VARIANTS, base.shapeVariant),
+    lineVariant: oneOf(raw.lineVariant, LINE_VARIANTS, base.lineVariant),
+    color: typeof raw.color === "string" && raw.color ? raw.color : base.color,
+    fill: raw.fill === null || typeof raw.fill === "string" ? raw.fill : base.fill,
+    strokeShades: mergeShades(raw.strokeShades, base.strokeShades),
+    fillShades: mergeShades(raw.fillShades, base.fillShades),
+    strokeSpecial: typeof raw.strokeSpecial === "string" && raw.strokeSpecial ? raw.strokeSpecial : base.strokeSpecial,
+    fillSpecial: raw.fillSpecial === null || typeof raw.fillSpecial === "string" ? raw.fillSpecial : base.fillSpecial,
+    strokeWidth:
+      typeof raw.strokeWidth === "number" && Number.isFinite(raw.strokeWidth) && raw.strokeWidth > 0 ? raw.strokeWidth : base.strokeWidth,
+    strokeStyle: oneOf(raw.strokeStyle, STROKE_STYLES, base.strokeStyle),
+    selectedIds: Array.isArray(raw.selectedIds)
+      ? [...new Set(raw.selectedIds.filter((id): id is string => typeof id === "string" && ids.has(id)))]
+      : [],
+  };
+}
+
+/** The session slice of the state (what hosts persist next to the doc — see
+ *  {@link DrawSession}). */
+export function toSession(s: DrawState): DrawSession {
+  return {
+    tool: s.tool,
+    baseTool: s.baseTool,
+    shapeVariant: s.shapeVariant,
+    lineVariant: s.lineVariant,
+    color: s.color,
+    fill: s.fill,
+    strokeShades: { ...s.strokeShades },
+    fillShades: { ...s.fillShades },
+    strokeSpecial: s.strokeSpecial,
+    fillSpecial: s.fillSpecial,
+    strokeWidth: s.strokeWidth,
+    strokeStyle: s.strokeStyle,
+    selectedIds: [...s.selectedIds],
   };
 }
 

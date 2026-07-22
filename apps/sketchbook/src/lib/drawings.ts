@@ -4,13 +4,17 @@
  * fully client-side). Pure functions are exported separately so they unit-test
  * without a DOM.
  */
-import type { DrawDoc } from "@operator/draw-board";
+import type { DrawDoc, DrawSession } from "@operator/draw-board";
 
 export interface Drawing {
   id: string;
   name: string;
   doc: DrawDoc;
   createdAt: number;
+  /** Last toolbar + selection state of this page's board (see DrawSession) —
+   *  persisted next to the doc so a reload or a page switch restores the board
+   *  exactly as it was left. Absent on old records / fresh pages. */
+  session?: DrawSession;
 }
 
 const STORAGE_KEY = "sketchbook:drawings";
@@ -66,6 +70,10 @@ export function renameDrawing(list: Drawing[], id: string, name: string): Drawin
 
 export function updateDoc(list: Drawing[], id: string, doc: DrawDoc): Drawing[] {
   return list.map((d) => (d.id === id ? { ...d, doc } : d));
+}
+
+export function updateSession(list: Drawing[], id: string, session: DrawSession): Drawing[] {
+  return list.map((d) => (d.id === id ? { ...d, session } : d));
 }
 
 // ── localStorage IO (try/catch-wrapped: private mode / quota safe) ───────────

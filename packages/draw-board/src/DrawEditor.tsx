@@ -27,6 +27,7 @@ import {
   stepStroke,
   strokeForFont,
   toDoc,
+  toSession,
   unitBoundsOf,
   unitSizeStep,
   rootUnitKeyOf,
@@ -37,6 +38,7 @@ import {
   contrastSolidOver,
   fillAt,
   type DrawDoc,
+  type DrawSession,
   type ImageShape,
   type Shape,
   type TextShape,
@@ -180,6 +182,9 @@ export function DrawEditor({
   onCancel,
   onSave,
   onChange,
+  // Aliased: `session` is the text-EDIT session inside this component.
+  session: initialSession,
+  onSessionChange,
   expanded,
   onToggleExpand,
   viewport,
@@ -203,6 +208,14 @@ export function DrawEditor({
   /** Live doc changes (debounced) — the host persists them so a sketch survives
    *  closing the board and page reloads. Also flushed once on unmount. */
   onChange?: (doc: DrawDoc) => void;
+  /** Persisted toolbar + selection state (see {@link DrawSession}), applied
+   *  ONCE at mount over the defaults — later prop changes are ignored. Pair
+   *  with `onSessionChange` so the whole toolbar survives reloads. */
+  session?: DrawSession | null;
+  /** Live session changes (debounced + unmount flush) — the toolbar/selection
+   *  counterpart of `onChange`; the host stores it NEXT TO the doc, never
+   *  inside it (exports must not carry UI state). */
+  onSessionChange?: (s: DrawSession) => void;
   /** True when hosted as the full-screen modal (vs the inline dock). Drives the
    *  expand/collapse toggle glyph; absent `onToggleExpand` hides the toggle. */
   expanded?: boolean;
@@ -242,7 +255,7 @@ export function DrawEditor({
   // sampled under each shape (paper, images, and fills — never strokes).
   const bgColor = bgImage ? "transparent" : CANVAS_BG_DARK;
 
-  const { state, dispatch } = useDrawing(doc, CONTRAST_INK);
+  const { state, dispatch } = useDrawing(doc, CONTRAST_INK, initialSession);
   // The stage may not mount before the board face is registered: a Konva
   // context that measures text pre-registration keeps a stale font binding,
   // and committed text would forever disagree with the edit textarea.
@@ -295,8 +308,41 @@ export function DrawEditor({
     const id = setTimeout(() => onChange(toDoc(stateRef.current)), 400);
     return () => clearTimeout(id);
   }, [state.shapes, state.background, state.width, state.height, onChange]);
+
+  // ── Persist the live SESSION the same way (toolbar + selection) ─────────────
+  // Everything the toolbar holds — tool/variants, paints, retuned shades +
+  // specials, width/style — plus the selection; stored next to the doc so a
+  // reload restores the board exactly as it was left (see DrawSession).
+  const onSessionChangeRef = useRef(onSessionChange);
+  onSessionChangeRef.current = onSessionChange;
   useEffect(() => {
-    return () => onChangeRef.current?.(toDoc(stateRef.current));
+    if (!onSessionChange) return;
+    const id = setTimeout(() => onSessionChange(toSession(stateRef.current)), 400);
+    return () => clearTimeout(id);
+  }, [
+    state.tool,
+    state.baseTool,
+    state.shapeVariant,
+    state.lineVariant,
+    state.color,
+    state.fill,
+    state.strokeShades,
+    state.fillShades,
+    state.strokeSpecial,
+    state.fillSpecial,
+    state.strokeWidth,
+    state.strokeStyle,
+    state.selectedIds,
+    onSessionChange,
+  ]);
+
+  // One unmount flush for both — a close inside the debounce window must not
+  // drop the last stroke, nor the last toolbar/selection change.
+  useEffect(() => {
+    return () => {
+      onChangeRef.current?.(toDoc(stateRef.current));
+      onSessionChangeRef.current?.(toSession(stateRef.current));
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

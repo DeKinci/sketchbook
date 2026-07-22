@@ -10,6 +10,7 @@ import {
   renameDrawing,
   saveDrawings,
   updateDoc,
+  updateSession,
   type Drawing,
 } from "./lib/drawings.ts";
 
@@ -163,8 +164,9 @@ function DrawingRow({
 /**
  * Sketchbook: a drawings list on the left (create with +, double-click to
  * rename), the infinite drawing board on the right. Everything persists to
- * localStorage — the board's debounced onChange (plus its unmount flush)
- * writes through per drawing; there is no save button.
+ * localStorage — the board's debounced onChange/onSessionChange (plus their
+ * unmount flush) write through per drawing (the doc AND the toolbar +
+ * selection session); there is no save button.
  */
 export default function App() {
   const [drawings, setDrawings] = useState<Drawing[]>(() => {
@@ -316,6 +318,8 @@ export default function App() {
             bgImage={bgImage}
             name={active.name}
             onChange={(doc) => mutate((list) => updateDoc(list, active.id, doc))}
+            session={active.session}
+            onSessionChange={(s) => mutate((list) => updateSession(list, active.id, s))}
             onNotify={notify}
             minimap
             boardRef={boardRef}

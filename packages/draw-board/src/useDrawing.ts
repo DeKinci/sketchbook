@@ -1,5 +1,5 @@
 import { useReducer, useCallback } from "react";
-import { drawReducer, initialDrawState, type DrawDoc, type DrawState, type DrawAction } from "./drawModel.ts";
+import { drawReducer, initialDrawState, type DrawDoc, type DrawSession, type DrawState, type DrawAction } from "./drawModel.ts";
 
 /** A stable unique id for a shape. `crypto.randomUUID` is available in every
  *  browser we target; ids are minted in the view (not the reducer) so the
@@ -14,12 +14,16 @@ export function newShapeId(): string {
  */
 export function useDrawing(
   initial: DrawDoc | undefined,
-  defaultColor: string
+  defaultColor: string,
+  /** Persisted toolbar + selection state restored ONCE at mount (see
+   *  {@link DrawSession}); later prop changes are ignored — the live reducer
+   *  state is the truth after that. */
+  session?: DrawSession | null
 ): {
   state: DrawState;
   dispatch: (a: DrawAction) => void;
 } {
-  const [state, dispatch] = useReducer(drawReducer, initial, (doc) => initialDrawState(doc, { color: defaultColor }));
+  const [state, dispatch] = useReducer(drawReducer, initial, (doc) => initialDrawState(doc, { color: defaultColor, session }));
   const stable = useCallback((a: DrawAction) => dispatch(a), []);
   return { state, dispatch: stable };
 }

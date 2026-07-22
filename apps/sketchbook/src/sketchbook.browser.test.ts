@@ -93,6 +93,9 @@ const rect = (id: string, x: number, y: number, width = 80, height = 60, over: S
  *  fragile mouse-drawing for glue/scale assertions). */
 async function openSeeded(page: Page, shapes: SeedShape[]) {
   await page.addInitScript((list: SeedShape[]) => {
+    // Init scripts re-run on EVERY navigation (including page.reload()) — only
+    // seed a virgin store, so reload tests keep what the app wrote since.
+    if (window.localStorage.getItem("sketchbook:drawings") !== null) return;
     window.localStorage.setItem(
       "sketchbook:drawings",
       JSON.stringify([{ id: "seeded", name: "Seeded", doc: { shapes: list, width: 800, height: 600 }, createdAt: 1 }])
@@ -1897,4 +1900,56 @@ test("export menu stacks ABOVE the minimap (hit-test in the overlap)", async ({ 
     [(x0 + x1) / 2, (y0 + y1) / 2] as const
   );
   expect(topHit).toMatchObject({ inMenu: true, inMini: false }); // menu wins the stack
+});
+
+test.describe("session persistence — the toolbar + selection survive a reload", () => {
+  /** Logical→screen through the live camera (the board may open fitted). */
+  async function toScreen(page: Page, pt: { x: number; y: number }) {
+    const cam = await page.evaluate(() => {
+      const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+      return { x: s.x(), y: s.y(), scale: s.scaleX() };
+    });
+    const box = (await page.locator(".konvajs-content canvas").first().boundingBox())!;
+    return { x: box.x + pt.x * cam.scale + cam.x, y: box.y + pt.y * cam.scale + cam.y };
+  }
+
+  test("tool, width, style, retuned colors, and the selection all come back", async ({ page }) => {
+    await openSeeded(page, [rect("a", 100, 100), rect("b", 260, 100)]);
+    // openSeeded left the board on the Cursor tool (default is pen — so a
+    // restored cursor after the reload proves the tool came back, not reset).
+
+    // Select shape a, then style up the toolbar: retune red to a dark rung
+    // (repaints a — it wears the red base), width 6, dashed.
+    const on = await toScreen(page, { x: 140, y: 130 });
+    await page.mouse.click(on.x, on.y);
+    await page.getByRole("button", { name: "Stroke red #e5484d" }).click({ button: "right" });
+    await page.getByRole("button", { name: "Stroke red shade #b02f35" }).click();
+    await page.getByRole("button", { name: "Stroke 6px" }).click();
+    await page.getByRole("button", { name: "Dashed stroke (4)" }).click();
+
+    // The debounced session write-through lands in localStorage…
+    await expect
+      .poll(async () => {
+        const [d] = (await stored(page)) as unknown as { session?: { strokeWidth: number; strokeStyle: string; selectedIds: string[]; strokeShades: { red: string }; tool: string } }[];
+        return d.session
+          ? { w: d.session.strokeWidth, st: d.session.strokeStyle, sel: d.session.selectedIds, red: d.session.strokeShades.red, tool: d.session.tool }
+          : null;
+      })
+      .toEqual({ w: 6, st: "dashed", sel: ["a"], red: "#b02f35", tool: "select" });
+
+    // …and a full reload restores the whole toolbar from it.
+    await page.reload();
+    await page.waitForSelector(".konvajs-content canvas");
+    await expect(page.getByRole("button", { name: "Cursor — select / move (Tab)" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "Stroke 6px" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "Dashed stroke (4)" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "Stroke red #b02f35" })).toBeVisible(); // the retune held
+
+    // The selection is restored LIVE: the board is keyboard-focused on mount,
+    // so Backspace deletes the still-selected shape a (and only a).
+    await page.keyboard.press("Backspace");
+    await expect
+      .poll(async () => (await stored(page))[0].doc.shapes.map((sh) => (sh as { id: string }).id))
+      .toEqual(["b"]);
+  });
 });
