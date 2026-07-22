@@ -314,11 +314,13 @@ function PaintLane({
         const botSource = !!drag && drag.level === "fill" && drag.from.toLowerCase() === botFrom(f).toLowerCase();
         return (
           <div key={f ?? "specials"} className="relative flex w-[30px] flex-col">
-            {/* The two-level face: top hemisphere = armed stroke shade, bottom
-                = armed fill shade (specials: adaptive ink over no-fill). */}
+            {/* The two-level face: round top half = armed stroke shade (stroke
+                is a dot), squarish bottom half = armed fill shade (fill is a
+                chip — matches the drag ghost / strip rung grammar; specials:
+                adaptive ink over no-fill). */}
             <span
               aria-hidden
-              className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-ink-500"
+              className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-t-full rounded-b border border-ink-500"
               style={{
                 background: `linear-gradient(to bottom, ${f === null ? "#f5f5f5" : strokeShades[f]} 0%, ${f === null ? "#f5f5f5" : strokeShades[f]} 50%, ${
                   f === null ? "transparent" : fillShades[f]
