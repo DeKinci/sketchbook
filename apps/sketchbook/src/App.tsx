@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Plus } from "lucide-react";
-import { DrawEditor, parseBoardFile, renderDocThumbnail, type BoardHandle, type DrawDoc } from "@operator/draw-board";
+import { DrawEditor, parseBoardFile, renderDocThumbnail, type BoardHandle, type DrawDoc, type DrawFeatures } from "@operator/draw-board";
 import { ExportCluster } from "./ExportCluster.tsx";
 import {
   createDrawing,
@@ -161,6 +161,26 @@ function DrawingRow({
   );
 }
 
+/** Board feature config from the URL — a dev/test harness, no UI: ?palette=1..12
+ *  widens/narrows the color lane, &fills=0 / &styling=0 / &grouping=0 opt those
+ *  out (see {@link DrawFeatures}). Absent params → the full default board.
+ *  Read once at load; the board freezes its config at mount anyway. */
+function featuresFromUrl(): Partial<DrawFeatures> | undefined {
+  const q = new URLSearchParams(window.location.search);
+  const out: Partial<DrawFeatures> = {};
+  const palette = q.get("palette");
+  if (palette !== null) out.paletteSize = Number(palette);
+  const flag = (param: string, key: "fills" | "strokeStyling" | "grouping") => {
+    const v = q.get(param);
+    if (v !== null) out[key] = v !== "0" && v !== "false";
+  };
+  flag("fills", "fills");
+  flag("styling", "strokeStyling");
+  flag("grouping", "grouping");
+  return Object.keys(out).length ? out : undefined;
+}
+const URL_FEATURES = featuresFromUrl();
+
 /**
  * Sketchbook: a drawings list on the left (create with +, double-click to
  * rename), the infinite drawing board on the right. Everything persists to
@@ -320,6 +340,7 @@ export default function App() {
             onChange={(doc) => mutate((list) => updateDoc(list, active.id, doc))}
             session={active.session}
             onSessionChange={(s) => mutate((list) => updateSession(list, active.id, s))}
+            features={URL_FEATURES}
             onNotify={notify}
             minimap
             boardRef={boardRef}

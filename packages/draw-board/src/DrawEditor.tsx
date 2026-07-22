@@ -26,6 +26,7 @@ import {
   slotTargetStep,
   stepStroke,
   strokeForFont,
+  resolveFeatures,
   toDoc,
   toSession,
   unitBoundsOf,
@@ -38,6 +39,7 @@ import {
   contrastSolidOver,
   fillAt,
   type DrawDoc,
+  type DrawFeatures,
   type DrawSession,
   type ImageShape,
   type Shape,
@@ -185,6 +187,8 @@ export function DrawEditor({
   // Aliased: `session` is the text-EDIT session inside this component.
   session: initialSession,
   onSessionChange,
+  features: featuresProp,
+  defaultColor = CONTRAST_INK,
   expanded,
   onToggleExpand,
   viewport,
@@ -216,6 +220,14 @@ export function DrawEditor({
    *  counterpart of `onChange`; the host stores it NEXT TO the doc, never
    *  inside it (exports must not carry UI state). */
   onSessionChange?: (s: DrawSession) => void;
+  /** Board capability config (see {@link DrawFeatures}): palette width 1..12
+   *  (1 = single-color, no color UI at all) and opt-outs for fills, stroke
+   *  styling, grouping. Frozen at mount like `session` — key the editor to
+   *  change it. Omit for the full default board. */
+  features?: Partial<DrawFeatures> | null;
+  /** The initial/armed ink (and, at `paletteSize` 1, THE single drawing
+   *  color). Defaults to the adaptive contrast ink. */
+  defaultColor?: string;
   /** True when hosted as the full-screen modal (vs the inline dock). Drives the
    *  expand/collapse toggle glyph; absent `onToggleExpand` hides the toggle. */
   expanded?: boolean;
@@ -255,7 +267,10 @@ export function DrawEditor({
   // sampled under each shape (paper, images, and fills — never strokes).
   const bgColor = bgImage ? "transparent" : CANVAS_BG_DARK;
 
-  const { state, dispatch } = useDrawing(doc, CONTRAST_INK, initialSession);
+  // Resolved ONCE at mount (like the session): a mixed live/frozen read of the
+  // config would let render gating and reducer gating disagree mid-flight.
+  const [features] = useState(() => resolveFeatures(featuresProp));
+  const { state, dispatch } = useDrawing(doc, defaultColor, initialSession, features);
   // The stage may not mount before the board face is registered: a Konva
   // context that measures text pre-registration keeps a stale font binding,
   // and committed text would forever disagree with the edit textarea.
@@ -968,9 +983,12 @@ export function DrawEditor({
         applySizeStep(target, unitSizeStep(s.shapes, target) + dir);
         return;
       }
+      // Width styling opted out → only the scale half above remains (a group/
+      // image still resizes; that's object manipulation, not stroke styling).
+      if (!features.strokeStyling) return;
       dispatch({ type: "setStrokeWidth", width: stepStroke(strokeBase(s), dir) });
     },
-    [applySizeStep, dispatch]
+    [applySizeStep, dispatch, features]
   );
   /** A visible size dot was clicked. Scale mode (group/image selected): the
    *  slotTargetStep model on the unit's remembered step. Stroke mode: the same
@@ -985,6 +1003,7 @@ export function DrawEditor({
         applySizeStep(target, slotTargetStep(unitSizeStep(s.shapes, target), slot));
         return;
       }
+      if (!features.strokeStyling) return; // dots only render for scale targets then
       const w = strokeBase(s);
       const width =
         slot === 1
@@ -998,7 +1017,7 @@ export function DrawEditor({
               : STROKE_WIDTHS[0];
       dispatch({ type: "setStrokeWidth", width });
     },
-    [applySizeStep, dispatch]
+    [applySizeStep, dispatch, features]
   );
 
   // ── Export ──────────────────────────────────────────────────────────────────
@@ -1114,6 +1133,7 @@ export function DrawEditor({
           // re-guards). Inert while the camera-gesture bitmap cache is live —
           // the N-identity restamp would force a full recache hitch mid-pan.
           e.preventDefault();
+          if (!features.grouping) return; // grouping opted out — swallow, don't group
           if (camBusyRef.current) return;
           const action = groupActionFor(stateRef.current.shapes, stateRef.current.selectedIds);
           if (action === "group") dispatch({ type: "groupSelection", gid: newShapeId() });
@@ -1140,6 +1160,8 @@ export function DrawEditor({
       if (e.code === "Backquote" || e.key === "`" || e.key === "~") {
         e.preventDefault();
         if (e.repeat) return;
+        // The reducer re-guards these per the feature config (single-color
+        // board / fills opted out) — dispatch unconditionally.
         const level = e.shiftKey ? ("fill" as const) : ("stroke" as const);
         dispatch(e.altKey ? { type: "cycleShade", level } : { type: "cyclePaint", level });
         return;
@@ -1212,6 +1234,7 @@ export function DrawEditor({
       // draft guard like -/=/`: mid-draw it live-restyles the draft.
       if (e.key === "4") {
         e.preventDefault();
+        if (!features.strokeStyling) return;
         const cur = stateRef.current.strokeStyle;
         dispatch({ type: "setStrokeStyle", style: STROKE_STYLES[(STROKE_STYLES.indexOf(cur) + 1) % STROKE_STYLES.length] });
         return;
@@ -1229,7 +1252,7 @@ export function DrawEditor({
         dispatch({ type: "setTool", tool: "text" });
       }
     },
-    [session, croppingId, dispatch, copy, onEraser, onTilde, stepSize, policy, zoomStep, fitContent, onSpaceKey]
+    [session, croppingId, dispatch, copy, onEraser, onTilde, stepSize, policy, zoomStep, fitContent, onSpaceKey, features]
   );
 
   // Space release ends pan-mode; losing focus does too (a keyup can land elsewhere).
@@ -1262,6 +1285,7 @@ export function DrawEditor({
       strokeSpecial={state.strokeSpecial}
       fillSpecial={state.fillSpecial}
       hasSelection={state.selectedIds.length > 0}
+      features={features}
       groupAction={groupActionFor(state.shapes, state.selectedIds)}
       onGroup={() => {
         if (camBusyRef.current) return;

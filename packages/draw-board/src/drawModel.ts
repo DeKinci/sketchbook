@@ -212,6 +212,9 @@ export interface DrawState extends DrawDoc {
   fillSpecial: string | null;
   strokeWidth: number;
   strokeStyle: StrokeStyle;
+  /** The host's board config (see {@link DrawFeatures}) — frozen at init.
+   *  Config, not user state: never part of the doc OR the session. */
+  features: DrawFeatures;
   /** Currently selected shapes (move/resize/delete/copy), in no particular order. */
   selectedIds: string[];
   /** The shape being drawn/edited during an active gesture, or none. */
@@ -267,12 +270,22 @@ export function sizeSlotOf(w: number): 0 | 1 | 2 {
 }
 /** The classic content inks (user's drawing colors — NOT UI chrome; the
  *  design-token rule governs chrome, these are pixels the user paints). Each is
- *  the BASE rung of its hue family's ramp — see {@link SHADES}. */
+ *  the BASE rung of its hue family's ramp — see {@link SHADES} — in wheel
+ *  order. A default-width lane shows only the classic four (red/amber/green/
+ *  blue); the rest arrive as the host widens the palette. */
 export const INK_COLORS = [
   "#e5484d", // red
+  "#f97316", // orange
   "#f5a623", // amber
+  "#84cc16", // lime
   "#30a46c", // green
+  "#14b8a6", // teal
+  "#06b6d4", // cyan
   "#3b82f6", // blue
+  "#6366f1", // indigo
+  "#a855f7", // purple
+  "#ec4899", // pink
+  "#ad7f58", // brown
 ] as const;
 
 /** Operator is dark-only — a blank sketch canvas is this dark surface. */
@@ -287,11 +300,62 @@ export const CONTRAST_INK = "contrast";
 /** True for a shape painted with the adaptive ink (resolved per background). */
 export const isContrastInk = (stroke: string) => stroke === CONTRAST_INK;
 
-/** The lane's hue families — the toolbar columns past the specials column.
- *  A family is a COLUMN identity; which of its shades the column currently
- *  paints (per level) lives in {@link DrawState.strokeShades}/`fillShades`. */
-export const HUE_FAMILIES = ["red", "amber", "green", "blue"] as const;
+/** ALL hue families the board knows — the full 12-column wheel, in display
+ *  (wheel) order. How many actually show is the host's palette width — see
+ *  {@link visibleHueFamilies} / {@link DrawFeatures.paletteSize}; the default
+ *  four are the classic red/amber/green/blue. A family is a COLUMN identity;
+ *  which of its shades the column currently paints (per level) lives in
+ *  {@link DrawState.strokeShades}/`fillShades`. */
+export const HUE_FAMILIES = ["red", "orange", "amber", "lime", "green", "teal", "cyan", "blue", "indigo", "purple", "pink", "brown"] as const;
 export type HueFamily = (typeof HUE_FAMILIES)[number];
+/** Widening order: growing the palette adds families by DISTINCTNESS — the
+ *  classic four first, then the most-separated next hue at each step — not by
+ *  wheel position (width 5 adds purple, not orange). */
+export const HUE_PRIORITY: readonly HueFamily[] = ["red", "amber", "green", "blue", "purple", "orange", "teal", "pink", "cyan", "lime", "indigo", "brown"];
+/** The hue columns a palette of `size` shows: the first `size` families by
+ *  {@link HUE_PRIORITY}, displayed in wheel order. Size 1 still resolves (to
+ *  [red]) for uniformity, but a 1-wide board never renders a lane at all. */
+export function visibleHueFamilies(size: number): HueFamily[] {
+  const take = new Set(HUE_PRIORITY.slice(0, Math.max(1, Math.min(HUE_FAMILIES.length, Math.round(size)))));
+  return HUE_FAMILIES.filter((f) => take.has(f));
+}
+
+/** Host-configurable board capabilities — how much of the board a host mounts
+ *  (DrawEditor's `features` prop, frozen at editor mount).
+ *  - `paletteSize`: hue columns in the paint lane, 1..{@link MAX_PALETTE}.
+ *    1 = a single-color board: the whole color UI (specials included) is gone
+ *    and everything draws in the editor's default ink.
+ *  - `fills`: the fill level. Off: lane swatches are stroke-only dots, fill
+ *    strips/keys are inert, and new shapes never fill.
+ *  - `strokeStyling`: the size dots + solid/dashed/dotted cluster (and their
+ *    keys). Off: everything draws the default width, solid.
+ *  - `grouping`: the group/ungroup control + ⌘G. Existing groups in a loaded
+ *    doc still select/move as units (the data stays portable); only
+ *    making/dissolving groups is removed. */
+export interface DrawFeatures {
+  paletteSize: number;
+  fills: boolean;
+  strokeStyling: boolean;
+  grouping: boolean;
+}
+export const MAX_PALETTE = HUE_FAMILIES.length;
+export const DEFAULT_FEATURES: DrawFeatures = { paletteSize: 4, fills: true, strokeStyling: true, grouping: true };
+/** Resolve a host's partial config: clamp the palette to 1..MAX_PALETTE,
+ *  default everything else on. Size 1 implies fills off (no lane → nothing
+ *  can arm a fill), so downstream checks read one flag each. */
+export function resolveFeatures(f?: Partial<DrawFeatures> | null): DrawFeatures {
+  const size =
+    typeof f?.paletteSize === "number" && Number.isFinite(f.paletteSize)
+      ? Math.max(1, Math.min(MAX_PALETTE, Math.round(f.paletteSize)))
+      : DEFAULT_FEATURES.paletteSize;
+  return {
+    paletteSize: size,
+    fills: size > 1 && (f?.fills ?? DEFAULT_FEATURES.fills),
+    strokeStyling: f?.strokeStyling ?? DEFAULT_FEATURES.strokeStyling,
+    grouping: f?.grouping ?? DEFAULT_FEATURES.grouping,
+  };
+}
+
 /** Each family's ramp: two tints, the classic base ink (index
  *  {@link BASE_SHADE} — the INK_COLORS hex), two darks. Hand-tuned for
  *  perceptual evenness; all lowercase (familyOf compares lowercased). The
@@ -299,9 +363,17 @@ export type HueFamily = (typeof HUE_FAMILIES)[number];
  *  white (tint ceiling ~0.8 lum; the unit suite pins it). */
 export const SHADES: Record<HueFamily, readonly string[]> = {
   red: ["#f19a9d", "#eb7074", "#e5484d", "#b02f35", "#7a1e22"],
+  orange: ["#fdba74", "#fb923c", "#f97316", "#c2410c", "#7c2d12"],
   amber: ["#f8c165", "#f6b344", "#f5a623", "#c07c14", "#8a570c"],
+  lime: ["#a3e635", "#94d925", "#84cc16", "#4d7c0f", "#365314"],
   green: ["#7fc7a4", "#57b588", "#30a46c", "#1f7a4e", "#125033"],
+  teal: ["#5eead4", "#2dd4bf", "#14b8a6", "#0f766e", "#134e4a"],
+  cyan: ["#4ee1f4", "#22d3ee", "#06b6d4", "#0e7490", "#164e63"],
   blue: ["#86b2f9", "#609af8", "#3b82f6", "#2563c4", "#174a94"],
+  indigo: ["#a5b4fc", "#818cf8", "#6366f1", "#4338ca", "#312e81"],
+  purple: ["#d8b4fe", "#c084fc", "#a855f7", "#7e22ce", "#581c87"],
+  pink: ["#f9a8d4", "#f472b6", "#ec4899", "#be185d", "#831843"],
+  brown: ["#cbb096", "#bd9776", "#ad7f58", "#8a6444", "#5f4632"],
 };
 export const BASE_SHADE = 2;
 /** The specials column's own ramp — five neutrals, near-white → near-black.
@@ -338,22 +410,12 @@ export function shadeIndexOf(color: string): number {
 }
 /** A fresh per-family shade map — every column on its classic base ink. */
 export function baseShades(): Record<HueFamily, string> {
-  return {
-    red: SHADES.red[BASE_SHADE],
-    amber: SHADES.amber[BASE_SHADE],
-    green: SHADES.green[BASE_SHADE],
-    blue: SHADES.blue[BASE_SHADE],
-  };
+  return Object.fromEntries(HUE_FAMILIES.map((f) => [f, SHADES[f][BASE_SHADE]])) as Record<HueFamily, string>;
 }
 /** The pastel pole of every ramp (rung 0) — what the FILL level arms out of
  *  the box: default fills read softer than their strokes, on the same ramps. */
 export function pastelShades(): Record<HueFamily, string> {
-  return {
-    red: SHADES.red[0],
-    amber: SHADES.amber[0],
-    green: SHADES.green[0],
-    blue: SHADES.blue[0],
-  };
+  return Object.fromEntries(HUE_FAMILIES.map((f) => [f, SHADES[f][0]])) as Record<HueFamily, string>;
 }
 
 /** The two solid resolutions of the adaptive ink. */
@@ -515,10 +577,14 @@ function mergeShades(v: unknown, dflt: Record<HueFamily, string>): Record<HueFam
   return out;
 }
 
-export function initialDrawState(doc?: DrawDoc, opts?: { color?: string; session?: DrawSession | null }): DrawState {
+export function initialDrawState(
+  doc?: DrawDoc,
+  opts?: { color?: string; session?: DrawSession | null; features?: Partial<DrawFeatures> | null }
+): DrawState {
   // normalizeGroups + migrateLabels: cross-version safety for every open path
   // (localStorage, PNG/SVG board import, host-supplied docs) — see their docs.
   const shapes = doc ? migrateLabels(normalizeGroups(doc.shapes.map(cloneShape))) : [];
+  const features = resolveFeatures(opts?.features);
   const base: DrawState = {
     background: doc?.background,
     shapes,
@@ -538,6 +604,7 @@ export function initialDrawState(doc?: DrawDoc, opts?: { color?: string; session
     fillSpecial: null,
     strokeWidth: DEFAULT_STROKE_WIDTH,
     strokeStyle: "solid",
+    features,
     selectedIds: [],
     draftId: null,
     gestureBase: null,
@@ -545,32 +612,53 @@ export function initialDrawState(doc?: DrawDoc, opts?: { color?: string; session
     future: [],
   };
   const raw = opts?.session;
-  if (!raw || typeof raw !== "object") return base;
   // Restore a persisted session over the defaults. Cross-version safety, like
   // the doc paths above: every field is validated — unknown enum values fall
   // back, shade records merge per family, and the selection keeps only ids
   // that still exist in THIS doc (a session may be older than the doc).
   const ids = new Set(shapes.map((sh) => sh.id));
-  const baseTool = oneOf<Tool>(raw.baseTool, SELECTABLE_TOOLS, "pen") as "select" | "pen";
-  return {
-    ...base,
-    tool: oneOf<Tool>(raw.tool, TOOLS, baseTool),
-    baseTool,
-    shapeVariant: oneOf(raw.shapeVariant, SHAPE_VARIANTS, base.shapeVariant),
-    lineVariant: oneOf(raw.lineVariant, LINE_VARIANTS, base.lineVariant),
-    color: typeof raw.color === "string" && raw.color ? raw.color : base.color,
-    fill: raw.fill === null || typeof raw.fill === "string" ? raw.fill : base.fill,
-    strokeShades: mergeShades(raw.strokeShades, base.strokeShades),
-    fillShades: mergeShades(raw.fillShades, base.fillShades),
-    strokeSpecial: typeof raw.strokeSpecial === "string" && raw.strokeSpecial ? raw.strokeSpecial : base.strokeSpecial,
-    fillSpecial: raw.fillSpecial === null || typeof raw.fillSpecial === "string" ? raw.fillSpecial : base.fillSpecial,
-    strokeWidth:
-      typeof raw.strokeWidth === "number" && Number.isFinite(raw.strokeWidth) && raw.strokeWidth > 0 ? raw.strokeWidth : base.strokeWidth,
-    strokeStyle: oneOf(raw.strokeStyle, STROKE_STYLES, base.strokeStyle),
-    selectedIds: Array.isArray(raw.selectedIds)
-      ? [...new Set(raw.selectedIds.filter((id): id is string => typeof id === "string" && ids.has(id)))]
-      : [],
-  };
+  const baseTool = raw ? (oneOf<Tool>(raw.baseTool, SELECTABLE_TOOLS, "pen") as "select" | "pen") : base.baseTool;
+  const state: DrawState =
+    !raw || typeof raw !== "object"
+      ? base
+      : {
+          ...base,
+          tool: oneOf<Tool>(raw.tool, TOOLS, baseTool),
+          baseTool,
+          shapeVariant: oneOf(raw.shapeVariant, SHAPE_VARIANTS, base.shapeVariant),
+          lineVariant: oneOf(raw.lineVariant, LINE_VARIANTS, base.lineVariant),
+          color: typeof raw.color === "string" && raw.color ? raw.color : base.color,
+          fill: raw.fill === null || typeof raw.fill === "string" ? raw.fill : base.fill,
+          strokeShades: mergeShades(raw.strokeShades, base.strokeShades),
+          fillShades: mergeShades(raw.fillShades, base.fillShades),
+          strokeSpecial: typeof raw.strokeSpecial === "string" && raw.strokeSpecial ? raw.strokeSpecial : base.strokeSpecial,
+          fillSpecial: raw.fillSpecial === null || typeof raw.fillSpecial === "string" ? raw.fillSpecial : base.fillSpecial,
+          strokeWidth:
+            typeof raw.strokeWidth === "number" && Number.isFinite(raw.strokeWidth) && raw.strokeWidth > 0
+              ? raw.strokeWidth
+              : base.strokeWidth,
+          strokeStyle: oneOf(raw.strokeStyle, STROKE_STYLES, base.strokeStyle),
+          selectedIds: Array.isArray(raw.selectedIds)
+            ? [...new Set(raw.selectedIds.filter((id): id is string => typeof id === "string" && ids.has(id)))]
+            : [],
+        };
+  // Feature forcing — an opted-out control must leave NO hidden state behind:
+  // a restored fill/width/color whose UI is gone would silently style new
+  // shapes with no way to see or change it. (Sessions saved under a wider
+  // config restore cleanly under a narrower one, and vice versa.)
+  if (!features.fills) {
+    state.fill = null;
+    state.fillSpecial = null;
+  }
+  if (!features.strokeStyling) {
+    state.strokeWidth = DEFAULT_STROKE_WIDTH;
+    state.strokeStyle = "solid";
+  }
+  if (features.paletteSize === 1) {
+    state.color = base.color; // the editor's default ink IS the single color
+    state.strokeSpecial = CONTRAST_INK;
+  }
+  return state;
 }
 
 /** The session slice of the state (what hosts persist next to the doc — see
@@ -2094,20 +2182,27 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       return laneChanged || follows ? base : s;
     }
     case "cyclePaint": {
+      if (s.features.paletteSize === 1) return s; // single-color board — no lane to cycle
+      if (a.level === "fill" && !s.features.fills) return s; // fills opted out — ⇧` is inert
       const dir = a.dir ?? 1;
-      const n = HUE_FAMILIES.length + 1; // the specials column + the families
+      const fams = visibleHueFamilies(s.features.paletteSize);
+      const n = fams.length + 1; // the specials column + the VISIBLE families
       if (a.level === "stroke") {
         const col = strokeColumnOf(s.color);
-        const idx = col === null || col === "gray" ? 0 : 1 + HUE_FAMILIES.indexOf(col);
+        const fi = col === null || col === "gray" ? -1 : fams.indexOf(col);
+        const idx = fi < 0 ? 0 : 1 + fi; // a hidden family's color cycles like any foreign hex
         const next = (idx + dir + n) % n;
-        return drawReducer(s, { type: "setColor", color: next === 0 ? s.strokeSpecial : s.strokeShades[HUE_FAMILIES[next - 1]] });
+        return drawReducer(s, { type: "setColor", color: next === 0 ? s.strokeSpecial : s.strokeShades[fams[next - 1]] });
       }
       const col = fillColumnOf(s.fill);
-      const idx = col === null || col === "gray" ? 0 : 1 + HUE_FAMILIES.indexOf(col);
+      const fi = col === null || col === "gray" ? -1 : fams.indexOf(col);
+      const idx = fi < 0 ? 0 : 1 + fi;
       const next = (idx + dir + n) % n;
-      return drawReducer(s, { type: "setFill", fill: next === 0 ? s.fillSpecial : s.fillShades[HUE_FAMILIES[next - 1]] });
+      return drawReducer(s, { type: "setFill", fill: next === 0 ? s.fillSpecial : s.fillShades[fams[next - 1]] });
     }
     case "cycleShade": {
+      if (s.features.paletteSize === 1) return s; // no lane → no shade strips either
+      if (a.level === "fill" && !s.features.fills) return s;
       const dir = a.dir ?? 1;
       const col = effectiveColumn(s, a.level);
       if (!col) return s;

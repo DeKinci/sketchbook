@@ -59,8 +59,8 @@ test.afterAll(async () => {
   await server?.close();
 });
 
-async function open(page: Page) {
-  await page.goto(`http://127.0.0.1:${PORT}/`);
+async function open(page: Page, query = "") {
+  await page.goto(`http://127.0.0.1:${PORT}/${query}`);
   await page.waitForSelector(".konvajs-content canvas");
 }
 
@@ -90,8 +90,9 @@ const rect = (id: string, x: number, y: number, width = 80, height = 60, over: S
 });
 
 /** Boot the app on a seeded single-drawing store (precise geometry beats
- *  fragile mouse-drawing for glue/scale assertions). */
-async function openSeeded(page: Page, shapes: SeedShape[]) {
+ *  fragile mouse-drawing for glue/scale assertions). `query` reaches the
+ *  board-features URL harness (e.g. "?palette=12"). */
+async function openSeeded(page: Page, shapes: SeedShape[], query = "") {
   await page.addInitScript((list: SeedShape[]) => {
     // Init scripts re-run on EVERY navigation (including page.reload()) — only
     // seed a virgin store, so reload tests keep what the app wrote since.
@@ -101,7 +102,7 @@ async function openSeeded(page: Page, shapes: SeedShape[]) {
       JSON.stringify([{ id: "seeded", name: "Seeded", doc: { shapes: list, width: 800, height: 600 }, createdAt: 1 }])
     );
   }, shapes);
-  await open(page);
+  await open(page, query);
   // Select tool (the board opens in pen — a stray drag must not ink).
   await page.getByRole("button", { name: "Cursor — select / move (Tab)" }).click();
 }
@@ -1951,5 +1952,80 @@ test.describe("session persistence — the toolbar + selection survive a reload"
     await expect
       .poll(async () => (await stored(page))[0].doc.shapes.map((sh) => (sh as { id: string }).id))
       .toEqual(["b"]);
+  });
+});
+
+test.describe("configurable board features (the ?palette / &fills / &styling / &grouping URL harness)", () => {
+  /** Logical→screen through the live camera (the board may open fitted). */
+  async function toScreen(page: Page, pt: { x: number; y: number }) {
+    const cam = await page.evaluate(() => {
+      const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+      return { x: s.x(), y: s.y(), scale: s.scaleX() };
+    });
+    const box = (await page.locator(".konvajs-content canvas").first().boundingBox())!;
+    return { x: box.x + pt.x * cam.scale + cam.x, y: box.y + pt.y * cam.scale + cam.y };
+  }
+
+  test("?palette=12 mounts the full wheel — every family a real, armable column", async ({ page }) => {
+    await openSeeded(page, [rect("a", 100, 100)], "?palette=12");
+    // 12 hue columns + the specials column, stroke level.
+    await expect(page.locator('[data-lane-level="stroke"]')).toHaveCount(13);
+    await expect(page.getByRole("button", { name: "Stroke brown #ad7f58" })).toBeVisible();
+    const purple = page.getByRole("button", { name: "Stroke purple #a855f7" });
+    await purple.click(); // nothing selected → arms the ambient ink
+    await expect(purple).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("?palette=1 is a single-color board: no color UI, everything draws the default ink", async ({ page }) => {
+    await open(page, "?palette=1");
+    await expect(page.getByRole("button", { name: "Cursor — select / move (Tab)" })).toBeVisible(); // toolbar is up
+    await expect(page.locator("[data-lane-level]")).toHaveCount(0); // no lane at all
+    await drawStroke(page, { x: 200, y: 200 }, { x: 300, y: 260 });
+    await expect.poll(async () => (await stored(page))[0].doc.shapes.length).toBe(1);
+    const sh = (await stored(page))[0].doc.shapes[0] as { type: string; stroke: string };
+    expect(sh.type).toBe("pen");
+    expect(sh.stroke).toBe("contrast"); // the adaptive default ink
+  });
+
+  test("?fills=0 renders stroke-only swatches — no fill halves; stroke shade strips still open", async ({ page }) => {
+    await openSeeded(page, [rect("a", 100, 100)], "?fills=0");
+    await expect(page.locator('[data-lane-level="stroke"]')).toHaveCount(5); // specials + the classic four
+    await expect(page.locator('[data-lane-level="fill"]')).toHaveCount(0);
+    await page.getByRole("button", { name: "Stroke red #e5484d" }).click({ button: "right" });
+    await expect(page.getByRole("button", { name: "Stroke red shade #b02f35" })).toBeVisible();
+  });
+
+  test("?styling=0 drops the width/style clusters and disarms their keys", async ({ page }) => {
+    await open(page, "?styling=0");
+    await expect(page.getByRole("button", { name: "Cursor — select / move (Tab)" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Stroke \d+px/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Solid stroke (4)" })).toHaveCount(0);
+    await drawStroke(page, { x: 200, y: 200 }, { x: 300, y: 260 });
+    await page.keyboard.press("="); // width step — gated
+    await page.keyboard.press("4"); // style cycle — gated
+    await drawStroke(page, { x: 200, y: 300 }, { x: 300, y: 360 });
+    await expect.poll(async () => (await stored(page))[0].doc.shapes.length).toBe(2);
+    for (const sh of (await stored(page))[0].doc.shapes as { strokeWidth: number; strokeStyle?: string }[]) {
+      expect(sh.strokeWidth).toBe(3); // "=" was inert
+      expect(sh.strokeStyle ?? "solid").toBe("solid"); // "4" was inert
+    }
+  });
+
+  test("?grouping=0 hides the group control and disarms ⌘G", async ({ page }) => {
+    await openSeeded(page, [rect("r1", 100, 100), rect("r2", 220, 100)], "?grouping=0");
+    await expect(page.getByRole("button", { name: /Group selection|Ungroup/ })).toHaveCount(0);
+    // Marquee both, then ⌘G — must NOT group.
+    const a = await toScreen(page, { x: 60, y: 60 });
+    const b = await toScreen(page, { x: 340, y: 200 });
+    await page.mouse.move(a.x, a.y);
+    await page.mouse.down();
+    await page.mouse.move(b.x, b.y, { steps: 8 });
+    await page.mouse.up();
+    await page.keyboard.press("Control+g");
+    await page.waitForTimeout(700); // outlast the persistence debounce — a real group WOULD have landed by now
+    for (const sh of (await stored(page))[0].doc.shapes as { groupPath?: string[] }[]) expect(sh.groupPath).toBeUndefined();
+    // Liveness proof: the selection + keyboard path were real — Backspace deletes both.
+    await page.keyboard.press("Backspace");
+    await expect.poll(async () => (await stored(page))[0].doc.shapes.length).toBe(0);
   });
 });

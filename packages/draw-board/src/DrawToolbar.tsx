@@ -21,7 +21,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconButton } from "./IconButton.tsx";
-import { CONTRAST_INK, HUE_FAMILIES, SHADES, GRAYS, familyOf, strokeColumnOf, fillColumnOf, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type HueFamily, type LaneColumn, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
+import { CONTRAST_INK, SHADES, GRAYS, familyOf, strokeColumnOf, fillColumnOf, visibleHueFamilies, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type DrawFeatures, type HueFamily, type LaneColumn, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
 
 /** The two persistent tools live in a segmented "well" that slides to whichever
  *  is armed; the one-use tools (shape / connector clusters + text) follow it. */
@@ -122,6 +122,8 @@ const DRAG_HINT = " — drag onto another column to repaint just this color";
  *  [smart|none, ...grays]); mid-drag, hovering a column half pops the strip so
  *  merges can land on exact rungs. */
 function PaintLane({
+  families,
+  showFills,
   strokeShades,
   fillShades,
   strokeSpecial,
@@ -135,6 +137,11 @@ function PaintLane({
   onRecolor,
   onRefill,
 }: {
+  /** The VISIBLE hue columns (the host's palette width, in wheel order). */
+  families: readonly HueFamily[];
+  /** Render the fill level. Off: single-level round stroke swatches — no fill
+   *  halves, wells, slash, or strips. */
+  showFills: boolean;
   strokeShades: Record<HueFamily, string>;
   fillShades: Record<HueFamily, string>;
   /** The specials column's armed values (see DrawState.strokeSpecial). */
@@ -166,8 +173,8 @@ function PaintLane({
   const [drag, setDrag] = useState<{ level: PaintLevel; from: string; x: number; y: number; over: string | null } | null>(null);
   const [strip, setStrip] = useState<{ level: PaintLevel; family: LaneColumn; x: number; y: number } | null>(null);
 
-  // Column 0 = the specials (smart/none + the gray ramp); then the families.
-  const cols: (HueFamily | null)[] = [null, ...HUE_FAMILIES];
+  // Column 0 = the specials (smart/none + the gray ramp); then the VISIBLE families.
+  const cols: (HueFamily | null)[] = [null, ...families];
   const isTopActive = (f: HueFamily | null) =>
     f === null ? strokeActive.some((c) => strokeColumnOf(c) === "gray") : strokeActive.some((c) => familyOf(c) === f);
   const isBotActive = (f: HueFamily | null) =>
@@ -301,25 +308,33 @@ function PaintLane({
   };
 
   const halfClass = (level: PaintLevel, value: string, draggable: boolean, isSource: boolean) =>
-    `relative z-20 h-[19px] w-[30px] touch-none ${level === "stroke" ? "rounded-t-[14px] rounded-b-[4px]" : "rounded-b-[14px] rounded-t-[4px]"} ${
+    `relative z-20 w-[30px] touch-none ${
+      level === "stroke"
+        ? showFills
+          ? "h-[19px] rounded-t-[14px] rounded-b-[4px]"
+          : "h-[38px] rounded-[14px]" // fills off: the stroke button IS the whole column
+        : "h-[19px] rounded-b-[14px] rounded-t-[4px]"
+    } ${
       draggable ? "cursor-grab" : ""
     } ${drag && drag.over === `${level}:${value}` ? "ring-2 ring-accent-400" : ""} ${drag && isSource ? "opacity-40" : ""}`;
   // The declaration LENS — deliberately louder than the tool wells (it carries
   // meaning: which classes the selection uses), so a solid ring + a stronger
   // wash.
   const wellBase =
-    "pointer-events-none absolute left-0.5 h-[19px] w-[30px] bg-accent-500/40 ring-[1.5px] ring-inset ring-accent-400 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]";
+    "pointer-events-none absolute left-0.5 w-[30px] bg-accent-500/40 ring-[1.5px] ring-inset ring-accent-400 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]";
   const cap = (f: HueFamily) => f[0].toUpperCase() + f.slice(1);
 
   return (
     <div ref={pillRef} className="relative flex items-stretch rounded-[16px] border border-ink-600 bg-ink-800 p-0.5">
       {/* Declaration wells, per level: exactly one highlight keeps the
           signature slide; a multi-class declaration renders static wells. */}
-      {(
-        [
-          { idxs: topIdxs, pos: "top-0.5", round: "rounded-t-[14px] rounded-b-[4px]" },
-          { idxs: botIdxs, pos: "bottom-0.5", round: "rounded-b-[14px] rounded-t-[4px]" },
-        ] as const
+      {(showFills
+        ? ([
+            { idxs: topIdxs, pos: "top-0.5 h-[19px]", round: "rounded-t-[14px] rounded-b-[4px]" },
+            { idxs: botIdxs, pos: "bottom-0.5 h-[19px]", round: "rounded-b-[14px] rounded-t-[4px]" },
+          ] as const)
+        : // Fills off → one full-height well per active stroke column.
+          ([{ idxs: topIdxs, pos: "top-0.5 h-[38px]", round: "rounded-[14px]" }] as const)
       ).map(({ idxs, pos, round }, lvl) =>
         idxs.length === 1 ? (
           <span key={lvl} aria-hidden className={`${wellBase} ${pos} ${round}`} style={{ transform: `translateX(${idxs[0] * 100}%)` }} />
@@ -341,15 +356,20 @@ function PaintLane({
             {/* The two-level face: round top half = armed stroke shade (stroke
                 is a dot), squarish bottom half = armed fill shade (fill is a
                 chip — matches the drag ghost / strip rung grammar; specials:
-                the armed special — adaptive ink / a gray over no-fill / a gray). */}
+                the armed special — adaptive ink / a gray over no-fill / a gray).
+                Fills off: just the stroke dot. */}
             <span
               aria-hidden
-              className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-t-full rounded-b border border-ink-500"
-              style={{
-                background: `linear-gradient(to bottom, ${topFace} 0%, ${topFace} 50%, ${botFace} 50%, ${botFace} 100%)`,
-              }}
+              className={`pointer-events-none absolute left-1/2 top-1/2 z-10 h-5 w-5 -translate-x-1/2 -translate-y-1/2 border border-ink-500 ${
+                showFills ? "rounded-t-full rounded-b" : "rounded-full"
+              }`}
+              style={
+                showFills
+                  ? { background: `linear-gradient(to bottom, ${topFace} 0%, ${topFace} 50%, ${botFace} 50%, ${botFace} 100%)` }
+                  : { backgroundColor: topFace }
+              }
             />
-            {f === null && fillSpecial === null && (
+            {showFills && f === null && fillSpecial === null && (
               // The no-fill glyph: a slash across the bottom half only — gone
               // once a gray is armed there.
               <span aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-[10px] w-5 -translate-x-1/2 overflow-hidden">
@@ -392,36 +412,38 @@ function PaintLane({
               }}
               className={halfClass("stroke", topValue, topDraggable, topSource)}
             />
-            <button
-              type="button"
-              data-lane-level="fill"
-              data-lane-value={botValue}
-              data-lane-family={f ?? "gray"}
-              aria-label={f === null ? (fillSpecial === null ? "No fill" : `Fill gray ${fillSpecial}`) : `Fill ${f} ${fillShades[f]}`}
-              aria-pressed={isBotActive(f)}
-              title={
-                (f === null
-                  ? `${fillSpecial === null ? "No fill" : `Gray fill ${fillSpecial}`} — right-click for none + grays (⇧\` cycles fill, ⌥⇧\` shade)`
-                  : `${cap(f)} fill ${fillShades[f]} — right-click for shades (⇧\` cycles fill, ⌥⇧\` shade)`) +
-                (botDraggable ? DRAG_HINT : "")
-              }
-              onPointerDown={(e) => onHalfDown(e, "fill", f, botFrom(f), botDraggable)}
-              onPointerMove={onHalfMove}
-              onPointerUp={onHalfUp}
-              onPointerCancel={onHalfCancel}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                openStrip("fill", f ?? "gray", e.currentTarget);
-              }}
-              onClick={() => {
-                if (suppressClickRef.current) {
-                  suppressClickRef.current = false;
-                  return;
+            {showFills && (
+              <button
+                type="button"
+                data-lane-level="fill"
+                data-lane-value={botValue}
+                data-lane-family={f ?? "gray"}
+                aria-label={f === null ? (fillSpecial === null ? "No fill" : `Fill gray ${fillSpecial}`) : `Fill ${f} ${fillShades[f]}`}
+                aria-pressed={isBotActive(f)}
+                title={
+                  (f === null
+                    ? `${fillSpecial === null ? "No fill" : `Gray fill ${fillSpecial}`} — right-click for none + grays (⇧\` cycles fill, ⌥⇧\` shade)`
+                    : `${cap(f)} fill ${fillShades[f]} — right-click for shades (⇧\` cycles fill, ⌥⇧\` shade)`) +
+                  (botDraggable ? DRAG_HINT : "")
                 }
-                onFillPick(botValue === "none" ? null : botValue);
-              }}
-              className={halfClass("fill", botValue, botDraggable, botSource)}
-            />
+                onPointerDown={(e) => onHalfDown(e, "fill", f, botFrom(f), botDraggable)}
+                onPointerMove={onHalfMove}
+                onPointerUp={onHalfUp}
+                onPointerCancel={onHalfCancel}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  openStrip("fill", f ?? "gray", e.currentTarget);
+                }}
+                onClick={() => {
+                  if (suppressClickRef.current) {
+                    suppressClickRef.current = false;
+                    return;
+                  }
+                  onFillPick(botValue === "none" ? null : botValue);
+                }}
+                className={halfClass("fill", botValue, botDraggable, botSource)}
+              />
+            )}
           </div>
         );
       })}
@@ -537,6 +559,7 @@ export function DrawToolbar({
   strokeStyle,
   sizeStep = null,
   hasSelection,
+  features,
   groupAction,
   onGroup,
   canUndo,
@@ -585,6 +608,10 @@ export function DrawToolbar({
    *  position — mid resets, extremes step — instead of stroke widths. */
   sizeStep?: number | null;
   hasSelection: boolean;
+  /** The host's board config — which controls this toolbar mounts at all:
+   *  lane width (1 = no color UI), fills, stroke styling, grouping. Resolved
+   *  by the editor (see {@link DrawFeatures}). */
+  features: DrawFeatures;
   /** What ⌘G would do to the current selection (drives the group button's icon
    *  + disabled state): 'group', 'ungroup', or null (nothing groupable). */
   groupAction: "group" | "ungroup" | null;
@@ -751,36 +778,44 @@ export function DrawToolbar({
 
       {/* Group/ungroup toggle — mirrors ⌘G (groupAction decides which). An
           action on the selection, not an armable tool, so it sits outside the
-          one-use cluster. */}
-      <IconButton
-        label={groupAction === "ungroup" ? "Ungroup (⌘G)" : "Group selection (⌘G)"}
-        disabled={groupAction === null}
-        onClick={onGroup}
-        className="!text-ink-200 disabled:opacity-30"
-      >
-        {groupAction === "ungroup" ? <Ungroup size={20} strokeWidth={2.25} /> : <Group size={20} strokeWidth={2.25} />}
-      </IconButton>
+          one-use cluster. Absent entirely when the host opts out of grouping. */}
+      {features.grouping && (
+        <IconButton
+          label={groupAction === "ungroup" ? "Ungroup (⌘G)" : "Group selection (⌘G)"}
+          disabled={groupAction === null}
+          onClick={onGroup}
+          className="!text-ink-200 disabled:opacity-30"
+        >
+          {groupAction === "ungroup" ? <Ungroup size={20} strokeWidth={2.25} /> : <Group size={20} strokeWidth={2.25} />}
+        </IconButton>
+      )}
       </div>
 
       {/* Style cluster (color + size) — on mobile this is the top row. */}
       <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 max-md:order-1 max-md:basis-full">
       {/* The paint lane — ONE shared palette for stroke + fill: hue-family
           columns with the stroke level on top and the fill level below, the
-          specials (adaptive ink / no fill) sharing column 0. See PaintLane. */}
-      <PaintLane
-        strokeShades={strokeShades}
-        fillShades={fillShades}
-        strokeSpecial={strokeSpecial}
-        fillSpecial={fillSpecial}
-        strokeActive={colors}
-        fillActive={fills}
-        mergeable={hasSelection}
-        onStroke={onColor}
-        onFillPick={onFill}
-        onShade={onShade}
-        onRecolor={onRecolor}
-        onRefill={onRefill}
-      />
+          specials (adaptive ink / no fill) sharing column 0. See PaintLane.
+          Width comes from the host config; a 1-wide palette means a
+          single-color board — no color UI at all. */}
+      {features.paletteSize > 1 && (
+        <PaintLane
+          families={visibleHueFamilies(features.paletteSize)}
+          showFills={features.fills}
+          strokeShades={strokeShades}
+          fillShades={fillShades}
+          strokeSpecial={strokeSpecial}
+          fillSpecial={fillSpecial}
+          strokeActive={colors}
+          fillActive={fills}
+          mergeable={hasSelection}
+          onStroke={onColor}
+          onFillPick={onFill}
+          onShade={onShade}
+          onRecolor={onRecolor}
+          onRefill={onRefill}
+        />
+      )}
 
 {/* Stroke / text size — same sliding accent well. Three dots, more sizes: the
     extremes keep stepping when re-pressed (secret levels past the visible
@@ -788,6 +823,10 @@ export function DrawToolbar({
     group or image selected the dots read ITS remembered scale step instead
     (mid = natural size), same stepping model. In the extended zone the
     opposite extreme renders as −/+ — it walks one step back, not absolute. */}
+      {/* With stroke styling opted out the dots still render for a SCALE
+          target (group/image resize is object manipulation, not styling) —
+          just never in stroke-width mode. */}
+      {(features.strokeStyling || scaleMode) && (
       <div className="relative flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5">
         <span
           aria-hidden
@@ -841,10 +880,12 @@ export function DrawToolbar({
           );
         })}
       </div>
+      )}
 
       {/* Stroke style — solid / dashed / dotted, same sliding well; 4 cycles.
           Swatches are literal line previews (an icon set has no honest glyphs
           for these). */}
+      {features.strokeStyling && (
       <div className="relative flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5">
         <span
           aria-hidden
@@ -879,6 +920,7 @@ export function DrawToolbar({
           );
         })}
       </div>
+      )}
       </div>
 
       {/* History + apply/cancel — absolutely pinned right when the CONTAINER

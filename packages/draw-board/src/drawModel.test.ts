@@ -36,6 +36,12 @@ import {
   isContrastInk,
   INK_COLORS,
   HUE_FAMILIES,
+  HUE_PRIORITY,
+  visibleHueFamilies,
+  resolveFeatures,
+  MAX_PALETTE,
+  baseShades,
+  pastelShades,
   SHADES,
   BASE_SHADE,
   GRAYS,
@@ -51,6 +57,7 @@ import {
   textBgBox,
   CONTRAST_DARK,
   CONTRAST_BRIGHT,
+  type DrawFeatures,
   type DrawSession,
   type DrawState,
   type BoxShape,
@@ -2284,8 +2291,8 @@ describe("the session slice — toSession / restore across reloads", () => {
       lineVariant: "darrow",
       color: SHADES.blue[3],
       fill: SHADES.red[0],
-      strokeShades: { red: SHADES.red[4], amber: SHADES.amber[2], green: SHADES.green[2], blue: SHADES.blue[3] },
-      fillShades: { red: SHADES.red[0], amber: SHADES.amber[1], green: SHADES.green[0], blue: SHADES.blue[0] },
+      strokeShades: { ...baseShades(), red: SHADES.red[4], blue: SHADES.blue[3] },
+      fillShades: { ...pastelShades(), amber: SHADES.amber[1] },
       strokeSpecial: GRAYS[2],
       fillSpecial: GRAYS[1],
       strokeWidth: 6,
@@ -2363,5 +2370,114 @@ describe("the session slice — toSession / restore across reloads", () => {
     const d = initialDrawState(undefined, { session: noTool as DrawSession });
     expect(d.baseTool).toBe("select");
     expect(d.tool).toBe("select");
+  });
+});
+
+describe("configurable features — palette width + the opt-outs", () => {
+  const seededWith = (features: Partial<DrawFeatures>, shapes: Shape[] = []) =>
+    initialDrawState({ shapes, width: 400, height: 300 }, { features });
+
+  it("resolveFeatures: defaults, clamping, and the single-color collapse", () => {
+    expect(resolveFeatures()).toEqual({ paletteSize: 4, fills: true, strokeStyling: true, grouping: true });
+    expect(resolveFeatures(null)).toEqual(resolveFeatures());
+    expect(resolveFeatures({ paletteSize: 0 }).paletteSize).toBe(1);
+    expect(resolveFeatures({ paletteSize: 99 }).paletteSize).toBe(MAX_PALETTE);
+    expect(resolveFeatures({ paletteSize: 7.6 }).paletteSize).toBe(8);
+    expect(resolveFeatures({ paletteSize: Number.NaN }).paletteSize).toBe(4);
+    // A 1-wide palette has no lane at all — nothing can arm a fill, so fills resolve off.
+    expect(resolveFeatures({ paletteSize: 1, fills: true }).fills).toBe(false);
+    expect(resolveFeatures({ fills: false, strokeStyling: false, grouping: false })).toEqual({
+      paletteSize: 4,
+      fills: false,
+      strokeStyling: false,
+      grouping: false,
+    });
+  });
+
+  it("visibleHueFamilies: wheel-ordered prefixes of the priority list; 4 = exactly the classic lane", () => {
+    expect(visibleHueFamilies(4)).toEqual(["red", "amber", "green", "blue"]); // the locked classic default
+    expect(visibleHueFamilies(5)).toEqual(["red", "amber", "green", "blue", "purple"]);
+    expect(visibleHueFamilies(6)).toEqual(["red", "orange", "amber", "green", "blue", "purple"]);
+    expect(visibleHueFamilies(MAX_PALETTE)).toEqual([...HUE_FAMILIES]); // the full wheel, wheel order
+    expect(visibleHueFamilies(1)).toEqual(["red"]);
+    // Every width shows the priority prefix — just re-sorted to wheel order.
+    for (let n = 1; n <= MAX_PALETTE; n++) {
+      expect(new Set(visibleHueFamilies(n))).toEqual(new Set(HUE_PRIORITY.slice(0, n)));
+    }
+  });
+
+  it("the 12-wide maps: globally unique rungs (familyOf stays unambiguous), base/pastel per family", () => {
+    expect(HUE_FAMILIES).toHaveLength(12);
+    const all = HUE_FAMILIES.flatMap((f) => [...SHADES[f]]);
+    expect(new Set(all).size).toBe(all.length);
+    for (const f of HUE_FAMILIES) {
+      expect(baseShades()[f]).toBe(SHADES[f][BASE_SHADE]);
+      expect(pastelShades()[f]).toBe(SHADES[f][0]);
+    }
+  });
+
+  it("cyclePaint cycles exactly the visible columns (specials + N)", () => {
+    let s = seededWith({ paletteSize: 2 });
+    s = drawReducer(s, { type: "cyclePaint", level: "stroke" }); // specials → red
+    expect(s.color).toBe(SHADES.red[BASE_SHADE]);
+    s = drawReducer(s, { type: "cyclePaint", level: "stroke" }); // red → amber
+    expect(s.color).toBe(SHADES.amber[BASE_SHADE]);
+    s = drawReducer(s, { type: "cyclePaint", level: "stroke" }); // amber → wraps to specials
+    expect(s.color).toBe(CONTRAST_INK);
+    // At full width the NEW families are real cycle stops (wheel neighbors pink → brown → wrap).
+    let w = seededWith({ paletteSize: 12 });
+    w = drawReducer(w, { type: "setColor", color: SHADES.pink[BASE_SHADE] });
+    w = drawReducer(w, { type: "cyclePaint", level: "stroke" });
+    expect(w.color).toBe(SHADES.brown[BASE_SHADE]);
+    w = drawReducer(w, { type: "cyclePaint", level: "stroke" });
+    expect(w.color).toBe(CONTRAST_INK);
+    // A hidden family's color (e.g. restored from a wider session) cycles like any foreign hex.
+    let h = seededWith({ paletteSize: 4 });
+    h = drawReducer(h, { type: "setColor", color: SHADES.purple[BASE_SHADE] });
+    h = drawReducer(h, { type: "cyclePaint", level: "stroke" });
+    expect(h.color).toBe(SHADES.red[BASE_SHADE]); // enters the lane at the first visible family
+  });
+
+  it("paletteSize 1 = a single-color board: the default ink pins, cycles are inert", () => {
+    const s0 = initialDrawState(undefined, {
+      color: "#123456",
+      features: { paletteSize: 1 },
+      session: { ...toSession(initialDrawState()), color: SHADES.red[2], strokeSpecial: GRAYS[0], fill: SHADES.blue[0], strokeWidth: 9 },
+    });
+    expect(s0.color).toBe("#123456"); // the session's color loses to the pinned single ink
+    expect(s0.strokeSpecial).toBe(CONTRAST_INK);
+    expect(s0.fill).toBeNull(); // size 1 implies fills off
+    expect(s0.features.fills).toBe(false);
+    expect(s0.strokeWidth).toBe(9); // styling is its own flag — untouched here
+    expect(drawReducer(s0, { type: "cyclePaint", level: "stroke" })).toBe(s0);
+    expect(drawReducer(s0, { type: "cycleShade", level: "stroke" })).toBe(s0);
+  });
+
+  it("fills off: no ambient fill survives a session restore; fill cycling is inert", () => {
+    const sess = { ...toSession(initialDrawState()), fill: SHADES.red[0], fillSpecial: GRAYS[1] };
+    const s0 = initialDrawState(undefined, { features: { fills: false }, session: sess });
+    expect(s0.fill).toBeNull();
+    expect(s0.fillSpecial).toBeNull();
+    expect(drawReducer(s0, { type: "cyclePaint", level: "fill" })).toBe(s0);
+    expect(drawReducer(s0, { type: "cycleShade", level: "fill" })).toBe(s0);
+    expect(drawReducer(s0, { type: "cyclePaint", level: "stroke" }).color).toBe(SHADES.red[BASE_SHADE]); // stroke unaffected
+  });
+
+  it("strokeStyling off: width/style pin to the defaults across a session restore", () => {
+    const sess = { ...toSession(initialDrawState()), strokeWidth: 10, strokeStyle: "dotted" as const };
+    const s0 = initialDrawState(undefined, { features: { strokeStyling: false }, session: sess });
+    expect(s0.strokeWidth).toBe(3);
+    expect(s0.strokeStyle).toBe("solid");
+  });
+
+  it("features are config, not user state — never in the session or the doc", () => {
+    const s = seededWith({ paletteSize: 12, grouping: false });
+    expect("features" in toSession(s)).toBe(false);
+    expect("features" in toDoc(s)).toBe(false);
+    // A session saved under a wide palette restores cleanly under the default one.
+    const wide = drawReducer(s, { type: "setColor", color: SHADES.brown[1] });
+    const narrow = initialDrawState(undefined, { session: toSession(wide) });
+    expect(narrow.features.paletteSize).toBe(4);
+    expect(narrow.color).toBe(SHADES.brown[1]); // kept — it just reads as a foreign hex in the narrow lane
   });
 });
