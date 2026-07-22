@@ -18,3 +18,13 @@ body {
     sans-serif;
   overscroll-behavior: none;
 }
+
+/* No focus frames anywhere — same rule as the Operator web host (its index.css),
+   so the embedded board looks identical in both. The UA focus ring is visually
+   noisy on a dark UI (it frames every clicked toolbar button). Kept at ZERO
+   specificity (`:where`) so any component that opts into its OWN focus
+   affordance (box-shadow/border, not `outline`) still wins. */
+:where(*):focus,
+:where(*):focus-visible {
+  outline: none;
+}

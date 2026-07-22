@@ -116,7 +116,8 @@ const DRAG_HINT = " — drag onto another column to repaint just this color";
 /** THE paint lane — one shared palette for both paint properties. Each column
  *  is a hue family with two LEVELS: the top half paints the family's armed
  *  STROKE shade, the bottom half its armed FILL shade (independent rungs; the
- *  disc face shows both). Column 0 is the SPECIALS column, armed the same way:
+ *  swatch shows both — its RING is the stroke, its CORE the fill, a miniature
+ *  of the shape it paints). Column 0 is the SPECIALS column, armed the same way:
  *  smart (adaptive ink) or a gray up top, none or a gray below. The halves are
  *  the selection's editable declaration (round-28 grammar, per level): every
  *  class present highlights, clicking a half repaints the whole selection,
@@ -323,7 +324,7 @@ function PaintLane({
   };
 
   const halfClass = (level: PaintLevel, value: string, draggable: boolean, isSource: boolean) =>
-    `relative z-20 w-[30px] touch-none ${
+    `relative z-20 w-[30px] touch-none ${level === "stroke" ? "peer/stroke" : "peer/fill"} ${
       level === "stroke"
         ? showFills
           ? "h-[19px] rounded-t-[14px] rounded-b-[4px]"
@@ -332,29 +333,37 @@ function PaintLane({
     } ${
       draggable ? "cursor-grab" : ""
     } ${drag && drag.over === `${level}:${value}` ? "ring-2 ring-accent-400" : ""} ${drag && isSource ? "opacity-40" : ""}`;
-  // The declaration LENS — deliberately louder than the tool wells (it carries
-  // meaning: which classes the selection uses), so a solid ring + a stronger
-  // wash.
+  // The declaration LENS — an accent ARC hugging the active half of the swatch
+  // (top arc = a stroke class, bottom = a fill class; fills off: the full
+  // halo). Quieter than the old wash-well but the same meaning — which classes
+  // the selection uses — and the same signature slide.
   const wellBase =
-    "pointer-events-none absolute left-0.5 w-[30px] bg-accent-500/40 ring-[1.5px] ring-inset ring-accent-400 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]";
+    "pointer-events-none absolute left-0.5 top-0.5 h-[38px] w-[30px] [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]";
+  const arcBase = "absolute left-1/2 top-1/2 h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] border-accent-400";
   const cap = (f: HueFamily) => f[0].toUpperCase() + f.slice(1);
 
   return (
     <div ref={pillRef} className="relative flex items-stretch rounded-[16px] border border-ink-600 bg-ink-800 p-0.5">
-      {/* Declaration wells, per level: exactly one highlight keeps the
-          signature slide; a multi-class declaration renders static wells. */}
+      {/* Declaration arcs, per level: exactly one highlight keeps the
+          signature slide; a multi-class declaration renders static arcs. */}
       {(showFills
         ? ([
-            { idxs: topIdxs, pos: "top-0.5 h-[19px]", round: "rounded-t-[14px] rounded-b-[4px]" },
-            { idxs: botIdxs, pos: "bottom-0.5 h-[19px]", round: "rounded-b-[14px] rounded-t-[4px]" },
+            { idxs: topIdxs, clip: "[clip-path:inset(0_0_55%_0)]" },
+            { idxs: botIdxs, clip: "[clip-path:inset(55%_0_0_0)]" },
           ] as const)
-        : // Fills off → one full-height well per active stroke column.
-          ([{ idxs: topIdxs, pos: "top-0.5 h-[38px]", round: "rounded-[14px]" }] as const)
-      ).map(({ idxs, pos, round }, lvl) =>
+        : // Fills off → one full-circle halo per active stroke column.
+          ([{ idxs: topIdxs, clip: "" }] as const)
+      ).map(({ idxs, clip }, lvl) =>
         idxs.length === 1 ? (
-          <span key={lvl} aria-hidden className={`${wellBase} ${pos} ${round}`} style={{ transform: `translateX(${idxs[0] * 100}%)` }} />
+          <span key={lvl} aria-hidden className={wellBase} style={{ transform: `translateX(${idxs[0] * 100}%)` }}>
+            <span className={`${arcBase} ${clip}`} />
+          </span>
         ) : (
-          idxs.map((i) => <span key={`${lvl}:${i}`} aria-hidden className={`${wellBase} ${pos} ${round}`} style={{ transform: `translateX(${i * 100}%)` }} />)
+          idxs.map((i) => (
+            <span key={`${lvl}:${i}`} aria-hidden className={wellBase} style={{ transform: `translateX(${i * 100}%)` }}>
+              <span className={`${arcBase} ${clip}`} />
+            </span>
+          ))
         )
       )}
       {cols.map((f) => {
@@ -369,28 +378,21 @@ function PaintLane({
         const botSource = !!drag && drag.level === "fill" && drag.from.toLowerCase() === (botFrom(f) ?? "none").toLowerCase();
         return (
           <div key={f ?? "specials"} className="relative flex w-[30px] flex-col">
-            {/* The two-level face: round top half = armed stroke shade (stroke
-                is a dot), squarish bottom half = armed fill shade (fill is a
-                chip — matches the drag ghost / strip rung grammar; specials:
-                the armed special — adaptive ink / a gray over no-fill / a gray).
-                Fills off: just the stroke dot. */}
+            {/* The swatch face — a miniature of the shape it paints: the RING
+                is the armed stroke shade (stroke-scale thick), the CORE the
+                armed fill shade (matches the drag ghost / strip rung grammar;
+                specials: the armed special — adaptive-ink ring over a no-fill /
+                gray core). Fills off: just the hollow ring. The hairline keeps
+                the darkest rungs silhouetted against the pill. */}
             <span
               aria-hidden
-              className={`pointer-events-none absolute left-1/2 top-1/2 z-10 h-5 w-5 -translate-x-1/2 -translate-y-1/2 border border-ink-500 ${
-                showFills ? "rounded-t-full rounded-b" : "rounded-full"
-              }`}
-              style={
-                showFills
-                  ? { background: `linear-gradient(to bottom, ${topFace} 0%, ${topFace} 50%, ${botFace} 50%, ${botFace} 100%)` }
-                  : { backgroundColor: topFace }
-              }
+              className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-[22px] w-[22px] -translate-x-1/2 -translate-y-1/2 rounded-full border-[3.5px] ring-1 ring-ink-500"
+              style={{ borderColor: topFace, backgroundColor: showFills ? botFace : "transparent" }}
             />
             {showFills && f === null && fillSpecial === null && (
-              // The no-fill glyph: a slash across the bottom half only — gone
-              // once a gray is armed there.
-              <span aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-[10px] w-5 -translate-x-1/2 overflow-hidden">
-                <span className="absolute left-1/2 top-[3px] h-[1.5px] w-6 -translate-x-1/2 rotate-[20deg] bg-red-400/80" />
-              </span>
+              // The no-fill glyph: a slash across the CORE (the core IS the
+              // fill) — gone once a gray is armed there.
+              <span aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-[1.5px] w-[13px] -translate-x-1/2 -translate-y-1/2 -rotate-[20deg] bg-red-400/80" />
             )}
             {f === null && strokeSpecial === NO_STROKE && (
               // The no-STROKE glyph, mirrored to the top half (armed via the
@@ -475,6 +477,21 @@ function PaintLane({
                 className={halfClass("fill", botValue, botDraggable, botSource)}
               />
             )}
+            {/* Hover preview — the half under the pointer shows its arc
+                faintly (the same lens a selection earns), teaching the two
+                zones without a label. */}
+            <span
+              aria-hidden
+              className={`pointer-events-none absolute left-1/2 top-1/2 z-10 h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] border-accent-400/50 opacity-0 transition-opacity peer-hover/stroke:opacity-100 ${
+                showFills ? "[clip-path:inset(0_0_55%_0)]" : ""
+              }`}
+            />
+            {showFills && (
+              <span
+                aria-hidden
+                className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] border-accent-400/50 opacity-0 transition-opacity peer-hover/fill:opacity-100 [clip-path:inset(55%_0_0_0)]"
+              />
+            )}
           </div>
         );
       })}
@@ -512,23 +529,25 @@ function PaintLane({
             className="pointer-events-none fixed z-[100] -translate-x-1/2 -translate-y-1/2 scale-125 drop-shadow-[0_2px_6px_rgba(0,0,0,0.6)]"
             style={{ left: drag.x, top: drag.y }}
           >
+            {/* The lane grammar rides along: a stroke class travels as a RING,
+                a fill class as a DISC — slashed for either level's none. */}
             {drag.level === "stroke" ? (
               drag.from === NO_STROKE ? (
-                <span className="relative block h-[14px] w-[14px] overflow-hidden rounded-full border border-ink-400">
-                  <span className="absolute left-1/2 top-1/2 h-[1.5px] w-5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
+                <span className="relative block h-[18px] w-[18px] overflow-hidden rounded-full border border-ink-400">
+                  <span className="absolute left-1/2 top-1/2 h-[1.5px] w-6 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
                 </span>
               ) : (
                 <span
-                  className="block h-[14px] w-[14px] rounded-full border border-ink-500"
-                  style={{ backgroundColor: drag.from === CONTRAST_INK ? "#f5f5f5" : drag.from }}
+                  className="block h-[18px] w-[18px] rounded-full border-4 ring-1 ring-ink-500"
+                  style={{ borderColor: drag.from === CONTRAST_INK ? "#f5f5f5" : drag.from }}
                 />
               )
             ) : drag.from === "none" ? (
-              <span className="relative block h-3 w-3 overflow-hidden rounded border border-ink-400">
-                <span className="absolute left-1/2 top-1/2 h-[1.5px] w-5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
+              <span className="relative block h-4 w-4 overflow-hidden rounded-full border border-ink-400">
+                <span className="absolute left-1/2 top-1/2 h-[1.5px] w-6 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
               </span>
             ) : (
-              <span className="block h-3 w-3 rounded border border-ink-500" style={{ backgroundColor: drag.from }} />
+              <span className="block h-4 w-4 rounded-full border border-ink-500" style={{ backgroundColor: drag.from }} />
             )}
           </span>,
           document.body
@@ -598,19 +617,21 @@ function PaintLane({
                     // it resolves to.
                     <span className="h-[18px] w-[18px] rounded-full border border-ink-400 [background:linear-gradient(135deg,#f5f5f5_50%,#111111_50%)]" />
                   ) : rung === "none" ? (
-                    // The none chip in each level's grammar: round dot for
-                    // strokes, square chip for fills — slashed either way.
+                    // The none rung in each level's grammar: a hollow ring for
+                    // strokes, a disc outline for fills — slashed either way.
                     <span
-                      className={`relative overflow-hidden border border-ink-400 ${
-                        strip.level === "stroke" ? "h-[18px] w-[18px] rounded-full" : "h-4 w-4 rounded"
+                      className={`relative overflow-hidden rounded-full border border-ink-400 ${
+                        strip.level === "stroke" ? "h-[18px] w-[18px]" : "h-4 w-4"
                       }`}
                     >
                       <span className="absolute left-1/2 top-1/2 h-[1.5px] w-6 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-red-400/80" />
                     </span>
                   ) : strip.level === "stroke" ? (
-                    <span className="h-[18px] w-[18px] rounded-full border border-ink-500" style={{ backgroundColor: shade }} />
+                    // A stroke rung is a RING of its shade (the lane grammar)…
+                    <span className="h-[18px] w-[18px] rounded-full border-4 ring-1 ring-ink-500" style={{ borderColor: shade }} />
                   ) : (
-                    <span className="h-4 w-4 rounded border border-ink-500" style={{ backgroundColor: shade }} />
+                    // …a fill rung a filled DISC.
+                    <span className="h-4 w-4 rounded-full border border-ink-500" style={{ backgroundColor: shade }} />
                   )}
                 </button>
               );
