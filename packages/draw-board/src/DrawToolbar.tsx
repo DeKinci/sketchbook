@@ -371,7 +371,10 @@ function PaintLane({
         const botValue = f === null ? (fillSpecial ?? "none") : fillShades[f];
         const topFace =
           f === null ? (strokeSpecial === CONTRAST_INK ? "#f5f5f5" : strokeSpecial === NO_STROKE ? "transparent" : strokeSpecial) : strokeShades[f];
-        const botFace = f === null ? (fillSpecial ?? "transparent") : fillShades[f];
+        // No-fill is the classic none-chip (solid light plate + red slash, the
+        // Figma/Sketch idiom) — NOT a transparent core, which reads as an empty
+        // hole next to the solid family miniatures.
+        const botFace = f === null ? (fillSpecial ?? "#f5f5f5") : fillShades[f];
         const topDraggable = mergeable && isTopActive(f);
         const botDraggable = mergeable && isBotActive(f);
         const topSource = !!drag && drag.level === "stroke" && drag.from.toLowerCase() === topFrom(f).toLowerCase();
@@ -381,9 +384,9 @@ function PaintLane({
             {/* The swatch face — a miniature of the shape it paints: the RING
                 is the armed stroke shade (stroke-scale thick), the CORE the
                 armed fill shade (matches the drag ghost / strip rung grammar;
-                specials: the armed special — adaptive-ink ring over a no-fill /
-                gray core). Fills off: just the hollow ring. The hairline keeps
-                the darkest rungs silhouetted against the pill. */}
+                specials: adaptive-ink ring over the none-chip / gray core).
+                Fills off: just the hollow ring. The hairline keeps the darkest
+                rungs silhouetted against the pill. */}
             <span
               aria-hidden
               className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-[22px] w-[22px] -translate-x-1/2 -translate-y-1/2 rounded-full border-[3.5px] ring-1 ring-ink-500"
