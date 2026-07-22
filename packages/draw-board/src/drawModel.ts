@@ -220,8 +220,10 @@ export interface DrawState extends DrawDoc {
   fillSpecial: string | null;
   strokeWidth: number;
   strokeStyle: StrokeStyle;
-  /** The host's board config (see {@link DrawFeatures}) — frozen at init.
-   *  Config, not user state: never part of the doc OR the session. */
+  /** The host's board config (see {@link DrawFeatures}) — frozen at init,
+   *  with ONE exception: `paletteSize` moves at runtime via the lane's resize
+   *  handle (setPaletteSize) and round-trips through the session as a scalar
+   *  pref. Everything else is config, never part of the doc OR the session. */
   features: DrawFeatures;
   /** Currently selected shapes (move/resize/delete/copy), in no particular order. */
   selectedIds: string[];
@@ -345,6 +347,9 @@ export function visibleHueFamilies(size: number): HueFamily[] {
  *    strips/keys are inert, and new shapes never fill.
  *  - `strokeStyling`: the size dots + solid/dashed/dotted cluster (and their
  *    keys). Off: everything draws the default width, solid.
+ *  - `paletteResize`: the drag handle at the lane's end that retunes the
+ *    visible palette width live (2..MAX_PALETTE, persisted as a session pref —
+ *    see setPaletteSize). Off: the lane is exactly `paletteSize` wide, always.
  *  - `grouping`: the group/ungroup control + ⌘G. Existing groups in a loaded
  *    doc still select/move as units (the data stays portable); only
  *    making/dissolving groups is removed.
@@ -356,13 +361,14 @@ export function visibleHueFamilies(size: number): HueFamily[] {
  *    tools at all (view/prune-only). */
 export interface DrawFeatures {
   paletteSize: number;
+  paletteResize: boolean;
   fills: boolean;
   strokeStyling: boolean;
   grouping: boolean;
   shapes: readonly ShapeTool[];
 }
 export const MAX_PALETTE = HUE_FAMILIES.length;
-export const DEFAULT_FEATURES: DrawFeatures = { paletteSize: 4, fills: true, strokeStyling: true, grouping: true, shapes: SHAPE_TOOLS };
+export const DEFAULT_FEATURES: DrawFeatures = { paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, shapes: SHAPE_TOOLS };
 /** Resolve a host's partial config: clamp the palette to 1..MAX_PALETTE,
  *  default everything else on. Size 1 implies fills off (no lane → nothing
  *  can arm a fill), so downstream checks read one flag each. `shapes` is
@@ -380,6 +386,7 @@ export function resolveFeatures(f?: Partial<DrawFeatures> | null): DrawFeatures 
     rawShapes === null || (known.size === 0 && rawShapes.length > 0) ? SHAPE_TOOLS : SHAPE_TOOLS.filter((t) => known.has(t));
   return {
     paletteSize: size,
+    paletteResize: f?.paletteResize ?? DEFAULT_FEATURES.paletteResize,
     fills: size > 1 && (f?.fills ?? DEFAULT_FEATURES.fills),
     strokeStyling: f?.strokeStyling ?? DEFAULT_FEATURES.strokeStyling,
     grouping: f?.grouping ?? DEFAULT_FEATURES.grouping,
@@ -603,6 +610,10 @@ export interface DrawSession {
   strokeWidth: number;
   strokeStyle: StrokeStyle;
   selectedIds: string[];
+  /** The lane width as the user last dragged it (the resize handle) — the one
+   *  features field that's a session pref. Absent in legacy sessions; applied
+   *  on restore only where the board is resizable at all. */
+  paletteSize?: number;
 }
 
 /** One enum-ish field of a persisted session, validated against its allowlist
@@ -687,6 +698,13 @@ export function initialDrawState(
             ? [...new Set(raw.selectedIds.filter((id): id is string => typeof id === "string" && ids.has(id)))]
             : [],
         };
+  // The lane width is the ONE feature the user can change (the resize handle) —
+  // restore it like any toolbar pref, but only where the handle exists at all:
+  // a fixed-width (paletteResize off) or single-color board keeps the host's
+  // exact config.
+  if (features.paletteResize && features.paletteSize > 1 && raw && typeof raw.paletteSize === "number" && Number.isFinite(raw.paletteSize)) {
+    state.features = { ...features, paletteSize: Math.max(2, Math.min(MAX_PALETTE, Math.round(raw.paletteSize))) };
+  }
   // Feature forcing — an opted-out control must leave NO hidden state behind:
   // a restored fill/width/color whose UI is gone would silently style new
   // shapes with no way to see or change it. (Sessions saved under a wider
@@ -736,6 +754,7 @@ export function toSession(s: DrawState): DrawSession {
     strokeWidth: s.strokeWidth,
     strokeStyle: s.strokeStyle,
     selectedIds: [...s.selectedIds],
+    paletteSize: s.features.paletteSize,
   };
 }
 
@@ -1822,6 +1841,10 @@ export type DrawAction =
   | { type: "cycleShade"; level: "stroke" | "fill"; dir?: 1 | -1 }
   | { type: "setStrokeWidth"; width: number }
   | { type: "setStrokeStyle"; style: StrokeStyle }
+  // The lane's end drag-handle: retune the visible palette width live
+  // (features.paletteResize boards only). A pref like an unselected
+  // setStrokeWidth — never history.
+  | { type: "setPaletteSize"; size: number }
   // Select shapes. Non-deep selects NORMALIZE: every id expands to its full root
   // unit (click + marquee + select-all all funnel here). `deep: true` (⌘-click on
   // a member) passes ids through raw — the deep-select context (a proper subset
@@ -2349,6 +2372,17 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         return { ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), styled)), strokeStyle: a.style };
       }
       return { ...s, strokeStyle: a.style };
+    }
+    case "setPaletteSize": {
+      // No-op where the handle can't exist: a fixed-width (paletteResize off)
+      // or single-color board keeps the host's exact config. Floor 2, not 1:
+      // width 1 unmounts the whole lane — the handle included — a trap the
+      // drag must never reach (single-color stays a host-only config).
+      if (!s.features.paletteResize || s.features.paletteSize === 1) return s;
+      if (typeof a.size !== "number" || !Number.isFinite(a.size)) return s;
+      const size = Math.max(2, Math.min(MAX_PALETTE, Math.round(a.size)));
+      if (size === s.features.paletteSize) return s;
+      return { ...s, features: { ...s.features, paletteSize: size } };
     }
     case "resizeCanvas":
       return { ...s, width: a.width, height: a.height };

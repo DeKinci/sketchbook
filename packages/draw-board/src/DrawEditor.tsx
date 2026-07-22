@@ -1231,6 +1231,14 @@ export function DrawEditor({
         stepSize(1);
         return;
       }
+      // 0 → size reset to the middle slot, exactly the mid dot (⌘0 above stays
+      // fit-content). Falls through the draft guard like -/=: mid-draw it
+      // live-resizes the draft back to medium.
+      if (e.key === "0" || e.code === "Digit0") {
+        e.preventDefault();
+        onSizeSlot(1);
+        return;
+      }
       // 4 → cycle the stroke style (solid → dashed → dotted). Falls through the
       // draft guard like -/=/`: mid-draw it live-restyles the draft.
       if (e.key === "4") {
@@ -1253,7 +1261,7 @@ export function DrawEditor({
         dispatch({ type: "setTool", tool: "text" });
       }
     },
-    [session, croppingId, dispatch, copy, onEraser, onTilde, stepSize, policy, zoomStep, fitContent, onSpaceKey, features]
+    [session, croppingId, dispatch, copy, onEraser, onTilde, stepSize, onSizeSlot, policy, zoomStep, fitContent, onSpaceKey, features]
   );
 
   // Space release ends pan-mode; losing focus does too (a keyup can land elsewhere).
@@ -1286,7 +1294,9 @@ export function DrawEditor({
       strokeSpecial={state.strokeSpecial}
       fillSpecial={state.fillSpecial}
       hasSelection={state.selectedIds.length > 0}
-      features={features}
+      // state.features, not the mount-frozen copy: paletteSize is the one
+      // field that moves at runtime (the lane's resize handle).
+      features={state.features}
       groupAction={groupActionFor(state.shapes, state.selectedIds)}
       onGroup={() => {
         if (camBusyRef.current) return;
@@ -1303,6 +1313,7 @@ export function DrawEditor({
       onShade={(level, family, shade) => dispatch({ type: "setShade", level, family, shade })}
       onRecolor={(from, to) => dispatch({ type: "recolor", from, to })}
       onRefill={(from, to) => dispatch({ type: "refill", from, to })}
+      onPaletteResize={(size) => dispatch({ type: "setPaletteSize", size })}
       onStrokeStyle={(style) => dispatch({ type: "setStrokeStyle", style })}
       onSizeSlot={onSizeSlot}
       onUndo={() => dispatch({ type: "undo" })}

@@ -943,9 +943,13 @@ export function DrawCanvas({
         const caption = captions.reduce((best, s) => (d2(s) < d2(best) ? s : best));
         dispatch({ type: "select", ids: [caption.id] });
         onEditText(caption.id);
-      } else if (state.features.shapes.includes("text")) {
+      } else if (!hit.groupPath && state.features.shapes.includes("text")) {
         // Spawning a fresh caption IS text creation — gated with the text tool.
         // (Editing an existing caption above stays: loaded docs are portable.)
+        // A GROUPED container never spawns one either: dblclick on a group
+        // aims at the unit — engage a caption it HAS (the branch above), but
+        // minting a surprise text on a member is never what was meant. No
+        // caption found → just ignore (mirrors the grouped-image crop guard).
         // The pair's first click selected the container — clear it so no
         // Transformer frames a shape under the typing overlay.
         dispatch({ type: "select", ids: [] });

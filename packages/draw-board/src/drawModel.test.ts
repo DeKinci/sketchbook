@@ -2402,7 +2402,7 @@ describe("configurable features — palette width + the opt-outs", () => {
     initialDrawState({ shapes, width: 400, height: 300 }, { features });
 
   it("resolveFeatures: defaults, clamping, and the single-color collapse", () => {
-    expect(resolveFeatures()).toEqual({ paletteSize: 4, fills: true, strokeStyling: true, grouping: true, shapes: SHAPE_TOOLS });
+    expect(resolveFeatures()).toEqual({ paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, shapes: SHAPE_TOOLS });
     expect(resolveFeatures(null)).toEqual(resolveFeatures());
     expect(resolveFeatures({ paletteSize: 0 }).paletteSize).toBe(1);
     expect(resolveFeatures({ paletteSize: 99 }).paletteSize).toBe(MAX_PALETTE);
@@ -2412,6 +2412,7 @@ describe("configurable features — palette width + the opt-outs", () => {
     expect(resolveFeatures({ paletteSize: 1, fills: true }).fills).toBe(false);
     expect(resolveFeatures({ fills: false, strokeStyling: false, grouping: false })).toEqual({
       paletteSize: 4,
+      paletteResize: true,
       fills: false,
       strokeStyling: false,
       grouping: false,
@@ -2504,15 +2505,61 @@ describe("configurable features — palette width + the opt-outs", () => {
     expect(s0.strokeStyle).toBe("solid");
   });
 
-  it("features are config, not user state — never in the session or the doc", () => {
+  it("features are config, not user state — never in the session or the doc (the lane WIDTH alone rides the session, being handle-resizable)", () => {
     const s = seededWith({ paletteSize: 12, grouping: false });
     expect("features" in toSession(s)).toBe(false);
     expect("features" in toDoc(s)).toBe(false);
-    // A session saved under a wide palette restores cleanly under the default one.
+    // The width round-trips as a scalar pref (the resize handle's persistence):
+    // a session saved under a wide lane restores that width on a resizable
+    // board; the color survives outright.
     const wide = drawReducer(s, { type: "setColor", color: SHADES.brown[1] });
-    const narrow = initialDrawState(undefined, { session: toSession(wide) });
-    expect(narrow.features.paletteSize).toBe(4);
-    expect(narrow.color).toBe(SHADES.brown[1]); // kept — it just reads as a foreign hex in the narrow lane
+    const restored = initialDrawState(undefined, { session: toSession(wide) });
+    expect(restored.features.paletteSize).toBe(12);
+    expect(restored.color).toBe(SHADES.brown[1]);
+    // Every OTHER feature stays config-only: grouping off in the saving state
+    // leaves no trace in its session.
+    expect(initialDrawState(undefined, { session: toSession(s) }).features.grouping).toBe(true);
+  });
+});
+
+describe("palette resize — the lane's end handle (setPaletteSize / features.paletteResize)", () => {
+  it("resolveFeatures: paletteResize defaults on, false honored", () => {
+    expect(resolveFeatures().paletteResize).toBe(true);
+    expect(resolveFeatures({ paletteResize: false }).paletteResize).toBe(false);
+  });
+
+  it("setPaletteSize: a PREF (no history), clamped 2..MAX_PALETTE, rounded", () => {
+    let s = initialDrawState();
+    s = drawReducer(s, { type: "setPaletteSize", size: 7 });
+    expect(s.features.paletteSize).toBe(7);
+    expect(canUndo(s)).toBe(false); // lane width is a pref, not content
+    expect(drawReducer(s, { type: "setPaletteSize", size: 99 }).features.paletteSize).toBe(MAX_PALETTE);
+    // Floor 2, not 1: width 1 unmounts the whole lane — the handle with it — a
+    // trap a drag must never reach (single-color stays a host-only config).
+    expect(drawReducer(s, { type: "setPaletteSize", size: -5 }).features.paletteSize).toBe(2);
+    expect(drawReducer(s, { type: "setPaletteSize", size: 5.4 }).features.paletteSize).toBe(5);
+    expect(drawReducer(s, { type: "setPaletteSize", size: Number.NaN })).toBe(s); // garbage → no-op
+    expect(drawReducer(s, { type: "setPaletteSize", size: 7 })).toBe(s); // unchanged → same state (no re-render)
+  });
+
+  it("setPaletteSize no-ops where the handle can't exist: paletteResize off / a single-color board", () => {
+    const fixed = initialDrawState(undefined, { features: { paletteResize: false } });
+    expect(drawReducer(fixed, { type: "setPaletteSize", size: 8 })).toBe(fixed);
+    const single = initialDrawState(undefined, { features: { paletteSize: 1 } });
+    expect(drawReducer(single, { type: "setPaletteSize", size: 8 })).toBe(single);
+  });
+
+  it("round-trips through the session — except where the board isn't resizable", () => {
+    const s = drawReducer(initialDrawState(), { type: "setPaletteSize", size: 6 });
+    expect(toSession(s).paletteSize).toBe(6);
+    expect(initialDrawState(undefined, { session: toSession(s) }).features.paletteSize).toBe(6);
+    // Non-resizable host: the config pins the width; the session's is ignored.
+    const fixed = initialDrawState(undefined, { session: toSession(s), features: { paletteSize: 5, paletteResize: false } });
+    expect(fixed.features.paletteSize).toBe(5);
+    // Single-color host: no lane at all — ditto.
+    expect(initialDrawState(undefined, { session: toSession(s), features: { paletteSize: 1 } }).features.paletteSize).toBe(1);
+    // A legacy session (no width stored) keeps the host's config.
+    expect(initialDrawState(undefined, { session: { ...toSession(initialDrawState()), paletteSize: undefined } }).features.paletteSize).toBe(4);
   });
 });
 

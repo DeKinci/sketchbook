@@ -162,23 +162,24 @@ function DrawingRow({
 }
 
 /** Board feature config from the URL — a dev/test harness, no UI: ?palette=1..12
- *  widens/narrows the color lane, &fills=0 / &styling=0 / &grouping=0 opt those
- *  out, &shapes=pen,rect,text mounts only the listed shape tools (see
- *  {@link DrawFeatures} — unknown names are dropped by resolveFeatures).
- *  Absent params → the full default board. Read once at load; the board
- *  freezes its config at mount anyway. */
+ *  widens/narrows the color lane, &fills=0 / &styling=0 / &grouping=0 /
+ *  &paletteResize=0 opt those out, &shapes=pen,rect,text mounts only the
+ *  listed shape tools (see {@link DrawFeatures} — unknown names are dropped by
+ *  resolveFeatures). Absent params → the full default board. Read once at
+ *  load; the board freezes its config at mount anyway. */
 function featuresFromUrl(): Partial<DrawFeatures> | undefined {
   const q = new URLSearchParams(window.location.search);
   const out: Partial<DrawFeatures> = {};
   const palette = q.get("palette");
   if (palette !== null) out.paletteSize = Number(palette);
-  const flag = (param: string, key: "fills" | "strokeStyling" | "grouping") => {
+  const flag = (param: string, key: "fills" | "strokeStyling" | "grouping" | "paletteResize") => {
     const v = q.get(param);
     if (v !== null) out[key] = v !== "0" && v !== "false";
   };
   flag("fills", "fills");
   flag("styling", "strokeStyling");
   flag("grouping", "grouping");
+  flag("paletteResize", "paletteResize");
   const shapes = q.get("shapes");
   if (shapes !== null && shapes.trim() !== "") {
     out.shapes = shapes.split(",").map((s) => s.trim()) as DrawFeatures["shapes"];

@@ -11,6 +11,7 @@ import {
   Type,
   Eraser,
   Group,
+  GripVertical,
   Ungroup,
   Undo2,
   Redo2,
@@ -140,6 +141,7 @@ function PaintLane({
   onShade,
   onRecolor,
   onRefill,
+  onResize,
 }: {
   /** The VISIBLE hue columns (the host's palette width, in wheel order). */
   families: readonly HueFamily[];
@@ -163,9 +165,18 @@ function PaintLane({
   onShade: (level: PaintLevel, family: LaneColumn, shade: string | null) => void;
   onRecolor: (from: string, to: string) => void;
   onRefill: (from: string | null, to: string | null) => void;
+  /** Mounts the end drag-handle; called live during its drag with the target
+   *  width (raw — the reducer clamps 2..MAX). Absent = fixed-width board. */
+  onResize?: (n: number) => void;
 }) {
   const pillRef = useRef<HTMLDivElement>(null);
   const stripRef = useRef<HTMLDivElement>(null);
+  // The end-handle's live drag: anchored at the press (clientX + width then),
+  // so the pill re-centering as columns mount can't skew the target.
+  const resizeRef = useRef<{ x: number; size: number } | null>(null);
+  /** One lane column's rendered width (the w-[30px] halves) — the resize
+   *  drag's step unit. */
+  const COL_W = 30;
   // The press being watched: promoted to a drag past 5px (when draggable),
   // promoted to the shade strip when HELD still for 500ms (family halves).
   const pressRef = useRef<{ level: PaintLevel; from: string; x: number; y: number; started: boolean; draggable: boolean } | null>(null);
@@ -467,6 +478,30 @@ function PaintLane({
           </div>
         );
       })}
+      {/* The width handle: drag right/left to widen/narrow the visible palette,
+          one column per COL_W of travel — live, the reducer clamps (2..MAX).
+          Only on paletteResize boards (the host prop decides). */}
+      {onResize && (
+        <button
+          type="button"
+          aria-label="Palette width — drag for more or fewer colors"
+          title="Drag for more or fewer colors"
+          onPointerDown={(e) => {
+            if (e.button !== 0) return;
+            e.currentTarget.setPointerCapture(e.pointerId);
+            resizeRef.current = { x: e.clientX, size: families.length };
+          }}
+          onPointerMove={(e) => {
+            const r = resizeRef.current;
+            if (r) onResize(r.size + Math.round((e.clientX - r.x) / COL_W));
+          }}
+          onPointerUp={() => (resizeRef.current = null)}
+          onPointerCancel={() => (resizeRef.current = null)}
+          className="flex w-[13px] shrink-0 cursor-ew-resize touch-none items-center justify-center rounded-r-[14px] text-ink-500 hover:text-ink-200"
+        >
+          <GripVertical size={13} strokeWidth={2} />
+        </button>
+      )}
       {/* The carried class rides the pointer — portaled to body so the
           toolbar's container-type (layout containment = it would become this
           fixed element's containing block) can't trap it. */}
@@ -620,6 +655,7 @@ export function DrawToolbar({
   onShade,
   onRecolor,
   onRefill,
+  onPaletteResize,
   onStrokeStyle,
   onSizeSlot,
   onUndo,
@@ -683,6 +719,9 @@ export function DrawToolbar({
   onRecolor: (from: string, to: string) => void;
   /** Fill counterpart of onRecolor (null = the none class). */
   onRefill: (from: string | null, to: string | null) => void;
+  /** The lane's end-handle drag reports its live target width here (see
+   *  setPaletteSize). The handle mounts only when features.paletteResize. */
+  onPaletteResize: (n: number) => void;
   /** A stroke-style swatch was pressed (also restyles the selection). */
   onStrokeStyle: (s: StrokeStyle) => void;
   /** A size dot was pressed (0 small · 1 mid · 2 large). The EDITOR owns the
@@ -837,21 +876,22 @@ export function DrawToolbar({
             <Type size={20} strokeWidth={2.25} />
           </IconButton>
         )}
+        {/* Group/ungroup toggle — mirrors ⌘G (groupAction decides which). An
+            action on the selection rather than an armable tool, but it LIVES
+            in the same cluster as the tools — set apart it reads as a
+            different kind of control, and it isn't. Absent entirely when the
+            host opts out of grouping. */}
+        {features.grouping && (
+          <IconButton
+            label={groupAction === "ungroup" ? "Ungroup (⌘G)" : "Group selection (⌘G)"}
+            disabled={groupAction === null}
+            onClick={onGroup}
+            className="!text-ink-200 disabled:opacity-30"
+          >
+            {groupAction === "ungroup" ? <Ungroup size={20} strokeWidth={2.25} /> : <Group size={20} strokeWidth={2.25} />}
+          </IconButton>
+        )}
       </div>
-
-      {/* Group/ungroup toggle — mirrors ⌘G (groupAction decides which). An
-          action on the selection, not an armable tool, so it sits outside the
-          one-use cluster. Absent entirely when the host opts out of grouping. */}
-      {features.grouping && (
-        <IconButton
-          label={groupAction === "ungroup" ? "Ungroup (⌘G)" : "Group selection (⌘G)"}
-          disabled={groupAction === null}
-          onClick={onGroup}
-          className="!text-ink-200 disabled:opacity-30"
-        >
-          {groupAction === "ungroup" ? <Ungroup size={20} strokeWidth={2.25} /> : <Group size={20} strokeWidth={2.25} />}
-        </IconButton>
-      )}
       </div>
 
       {/* Style cluster (color + size) — on mobile this is the top row. */}
@@ -877,6 +917,7 @@ export function DrawToolbar({
           onShade={onShade}
           onRecolor={onRecolor}
           onRefill={onRefill}
+          onResize={features.paletteResize ? onPaletteResize : undefined}
         />
       )}
 
@@ -922,8 +963,8 @@ export function DrawToolbar({
               title={
                 i === 1
                   ? scaleMode
-                    ? "Size normal — resets the scale (-/=)"
-                    : "Size medium — resets (-/=)"
+                    ? "Size normal — resets the scale (0)"
+                    : "Size medium — resets (0)"
                   : BackIcon
                     ? `One step back ${i === 0 ? "down" : "up"} (-/=)`
                     : `Size ${i === 0 ? "small" : "large"} (-/=) — press again for ${i === 0 ? "smaller" : "larger"}`

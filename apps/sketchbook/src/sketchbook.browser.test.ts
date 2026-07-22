@@ -2149,3 +2149,83 @@ test.describe("configurable board features (the ?palette / &fills / &styling / &
       .toEqual(["rect", "rect"]);
   });
 });
+
+test.describe("toolbar ergonomics — group button placement, the 0 size key, grouped dblclick, palette resize", () => {
+  test("the group button sits WITH the one-use tools — same cluster container, not floated apart", async ({ page }) => {
+    await open(page);
+    expect(
+      await page.evaluate(() => {
+        const group = document.querySelector('[aria-label^="Group selection"]');
+        const text = document.querySelector('[aria-label="Text (3)"]');
+        return !!group && !!text && group.parentElement === text.parentElement;
+      })
+    ).toBe(true);
+  });
+
+  test("0 resets the size to medium — the keyboard twin of the middle dot", async ({ page }) => {
+    await open(page); // pen armed, default width 3
+    const widths = async () => (await stored(page))[0].doc.shapes.map((s) => (s as { strokeWidth: number }).strokeWidth);
+    await drawStroke(page, { x: 200, y: 120 }, { x: 300, y: 120 }); // also plants keyboard focus on the board
+    await page.keyboard.press("=");
+    await page.keyboard.press("="); // 3 → 6 → 10
+    await drawStroke(page, { x: 200, y: 180 }, { x: 300, y: 180 });
+    await expect.poll(widths).toEqual([3, 10]);
+    await page.keyboard.press("0"); // ← the middle-size hotkey (reset, like the mid dot)
+    await drawStroke(page, { x: 200, y: 240 }, { x: 300, y: 240 });
+    await expect.poll(widths).toEqual([3, 10, 6]);
+  });
+
+  test("dblclick on a GROUPED shape spawns nothing — no caption to engage means ignore", async ({ page }) => {
+    await openSeeded(page, [
+      rect("a", 100, 100, 140, 100, { groupPath: ["g1"] }),
+      rect("b", 300, 100, 140, 100, { groupPath: ["g1"] }),
+    ]);
+    const box = (await page.locator(".konvajs-content").boundingBox())!;
+    const cam = await page.evaluate(() => {
+      const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+      return { x: s.x(), y: s.y(), scale: s.scaleX() };
+    });
+    // Dblclick inside member "a" (no caption anywhere in the group).
+    await page.mouse.dblclick(box.x + cam.x + 170 * cam.scale, box.y + cam.y + 150 * cam.scale);
+    await page.waitForTimeout(400);
+    await expect(page.locator(".draw-text-input")).toHaveCount(0); // no editor opened
+    expect((await stored(page))[0].doc.shapes.length).toBe(2); // and no caption minted
+  });
+
+  test("the palette end-handle resizes the lane live, clamps at 2, persists, and ?paletteResize=0 removes it", async ({ page }) => {
+    await open(page);
+    // Lane columns at the stroke level: the specials + N hue families.
+    const cols = () => page.locator('[data-lane-level="stroke"][data-lane-family]').count();
+    await expect.poll(cols).toBe(5); // the classic 4-wide default
+    const handle = page.locator('[aria-label="Palette width — drag for more or fewer colors"]');
+    const grip = async () => {
+      const b = (await handle.boundingBox())!;
+      return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    };
+    // Drag right ~3 column widths → 3 more hue columns.
+    let g = await grip();
+    await page.mouse.move(g.x, g.y);
+    await page.mouse.down();
+    await page.mouse.move(g.x + 92, g.y, { steps: 6 });
+    await page.mouse.up();
+    await expect.poll(cols).toBe(8); // paletteSize 7
+    // Drag far left — clamps at the floor of 2 (the lane must keep existing).
+    g = await grip();
+    await page.mouse.move(g.x, g.y);
+    await page.mouse.down();
+    await page.mouse.move(g.x - 400, g.y, { steps: 8 });
+    await page.mouse.up();
+    await expect.poll(cols).toBe(3); // specials + 2
+    // Persists: the width rides the session into localStorage and a reload.
+    await expect
+      .poll(() => page.evaluate(() => window.localStorage.getItem("sketchbook:drawings") ?? ""))
+      .toContain('"paletteSize":2');
+    await page.reload();
+    await page.waitForSelector(".konvajs-content canvas");
+    await expect.poll(cols).toBe(3);
+    // Host opt-out: no handle, and the session's width is IGNORED (config pins 4).
+    await open(page, "?paletteResize=0");
+    await expect(handle).toHaveCount(0);
+    await expect.poll(cols).toBe(5);
+  });
+});

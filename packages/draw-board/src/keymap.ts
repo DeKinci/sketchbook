@@ -34,6 +34,7 @@ export const DRAW_KEYMAP: DrawShortcut[] = [
   { keys: ["tab"], description: "Toggle primary tool" },
   { keys: ["backspace", "delete"], description: "Delete selection / eraser" },
   { keys: ["-", "="], description: "Size down / up (keeps stepping past the 3 shown; scales a selected group or image)" },
+  { keys: ["0"], description: "Size medium / natural — reset (the middle dot)" },
   { keys: ["`", "shift+`"], description: "Cycle color (⇧ backwards)" },
   { keys: ["space"], description: "Hold to pan" },
   { keys: ["mod+=", "mod+-"], description: "Zoom in / out (infinite canvas)" },
