@@ -339,7 +339,7 @@ function PaintLane({
   // the selection uses — and the same signature slide.
   const wellBase =
     "pointer-events-none absolute left-0.5 top-0.5 h-[38px] w-[30px] [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]";
-  const arcBase = "absolute left-1/2 top-1/2 h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] border-accent-400";
+  const arcBase = "absolute left-1/2 top-1/2 h-[30px] w-[30px] -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-accent-300";
   const cap = (f: HueFamily) => f[0].toUpperCase() + f.slice(1);
 
   return (
@@ -348,8 +348,8 @@ function PaintLane({
           signature slide; a multi-class declaration renders static arcs. */}
       {(showFills
         ? ([
-            { idxs: topIdxs, clip: "[clip-path:inset(0_0_55%_0)]" },
-            { idxs: botIdxs, clip: "[clip-path:inset(55%_0_0_0)]" },
+            { idxs: topIdxs, clip: "[clip-path:inset(0_0_50%_0)]" },
+            { idxs: botIdxs, clip: "[clip-path:inset(50%_0_0_0)]" },
           ] as const)
         : // Fills off → one full-circle halo per active stroke column.
           ([{ idxs: topIdxs, clip: "" }] as const)
@@ -485,14 +485,14 @@ function PaintLane({
                 zones without a label. */}
             <span
               aria-hidden
-              className={`pointer-events-none absolute left-1/2 top-1/2 z-10 h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] border-accent-400/50 opacity-0 transition-opacity peer-hover/stroke:opacity-100 ${
-                showFills ? "[clip-path:inset(0_0_55%_0)]" : ""
+              className={`pointer-events-none absolute left-1/2 top-1/2 z-10 h-[30px] w-[30px] -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-accent-300/50 opacity-0 transition-opacity peer-hover/stroke:opacity-100 ${
+                showFills ? "[clip-path:inset(0_0_50%_0)]" : ""
               }`}
             />
             {showFills && (
               <span
                 aria-hidden
-                className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] border-accent-400/50 opacity-0 transition-opacity peer-hover/fill:opacity-100 [clip-path:inset(55%_0_0_0)]"
+                className="pointer-events-none absolute left-1/2 top-1/2 z-10 h-[30px] w-[30px] -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-accent-300/50 opacity-0 transition-opacity peer-hover/fill:opacity-100 [clip-path:inset(50%_0_0_0)]"
               />
             )}
           </div>
