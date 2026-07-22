@@ -490,7 +490,9 @@ export function DrawCanvas({
     ctx.fillStyle = CANVAS_BG_DARK;
     ctx.fillRect(0, 0, w, h);
     if (bgImage) ctx.drawImage(bgImage, mx(0), my(0), (state.width / rect.width) * w, (state.height / rect.height) * h);
-    for (const sh of shapesRef.current) {
+    // paintOrder, not model order — the board stacks images by size (larger
+    // below), and the sampled backdrop must match what's actually visible.
+    for (const sh of paintOrder(shapesRef.current)) {
       if (sh.type !== "image") continue;
       const el = imgEls[sh.id];
       if (!el) continue;
@@ -516,10 +518,11 @@ export function DrawCanvas({
     const b = boundingBox(sh);
     const cx = b.x + b.width / 2;
     const cy = b.y + b.height / 2;
-    // Fills first, exactly, in vector space — excluding the shape's OWN
-    // backfill (self, not backdrop: the outline contrasts the surroundings).
-    // Text keeps its own fill — the chip sits BEHIND the glyphs.
-    const under = fillAt(shapes, cx, cy, sh.type === "text" ? undefined : sh.id);
+    // Fills first, exactly, in vector space — only fills BELOW the shape
+    // count: its own backfill and fills covering it from above are foreground,
+    // not the ground the stroke is read against. Text keeps its own fill —
+    // the chip sits BEHIND the glyphs.
+    const under = sh.type === "text" && sh.fill ? sh.fill : fillAt(shapes, cx, cy, sh.id);
     if (under) return contrastSolidOver(under);
     // No fill beneath → the image raster decides; beyond it, the dark board.
     const s = bgLumRef.current;
@@ -1231,9 +1234,13 @@ export function DrawCanvas({
   const baseSet = useMemo(() => new Set<Shape>(state.gestureBase ?? []), [state.gestureBase]);
   const splitRef = useRef<{ stat: Shape[]; dyn: Shape[] }>({ stat: [], dyn: [] });
   const { stat: staticShapes, dyn: dynamicShapes } = useMemo(() => {
-    // Selected shapes always ride the dynamic layer (see splitGestureLayers) so
-    // the Transformer's target never jumps layers when a resize gesture begins.
-    const { stat, dyn } = splitGestureLayers(renderShapes, { contentGesture, baseSet, selected });
+    // Split the GLOBAL paint order into a static prefix + dynamic tail (see
+    // splitGestureLayers): the dynamic layer paints above the static one, so
+    // only a contiguous tail keeps cross-layer stacking equal to paint order —
+    // selection/gestures never change what covers what. Selected shapes always
+    // ride the dynamic tail so the Transformer's target never jumps layers
+    // when a resize gesture begins.
+    const { stat, dyn } = splitGestureLayers(paintOrder(renderShapes), { contentGesture, baseSet, selected });
     // STABLE identities: renderShapes is a fresh array every edit frame, but the
     // static membership rarely changes mid-gesture — returning the previous
     // arrays keeps the static layer's children (and its bitmap cache) untouched.
@@ -1480,8 +1487,10 @@ export function DrawCanvas({
           }
   };
   const nodesFor = (list: Shape[]) => {
+    // The lists arrive ALREADY paint-ordered (the layer split runs on the
+    // global paint order) — re-sorting a sublist here could disagree with it.
     const cache = shapeElCache.current;
-    return paintOrder(list).map((sh) => {
+    return list.map((sh) => {
       if (cache.has(sh)) return cache.get(sh)!;
       const el = buildShapeEl(sh);
       cache.set(sh, el);

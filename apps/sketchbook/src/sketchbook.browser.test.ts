@@ -1704,6 +1704,36 @@ test("smart ink ignores the shape's OWN backfill: outline bright over the board,
   expect(onC.r + onC.g + onC.b, `C's outline over amber should be dark, got ${JSON.stringify(onC)}`).toBeLessThan(220);
 });
 
+test("selection/drag must not raise a filled shape above the smaller ones resting on it", async ({ page }) => {
+  const isViolet = (p: { r: number; g: number; b: number }) => p.b > 160 && p.r < 170 && p.g < 140;
+  await openSeeded(page, [
+    rect("big", 100, 100, 240, 160, { fill: "#f5a623" }),
+    rect("small", 160, 140, 60, 40, { fill: "#8267c1", stroke: "#3b82f6" }),
+  ]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const S = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+  const probe = () => probePixel(page, S({ x: 190, y: 160 }).x, S({ x: 190, y: 160 }).y);
+
+  // Seeded: the small violet box paints above the big amber one it rests on.
+  expect(isViolet(await probe()), "seeded: small above big").toBe(true);
+  // Selecting the BIG one (cursor click inside big, outside small) must not
+  // raise it — the selection used to jump to a layer above everything.
+  const grab = S({ x: 130, y: 240 });
+  await page.mouse.click(grab.x, grab.y);
+  expect(isViolet(await probe()), "selected: small still above").toBe(true);
+  // Nor may DRAGGING it — mid-gesture stacking holds too.
+  await page.mouse.move(grab.x, grab.y);
+  await page.mouse.down();
+  await page.mouse.move(grab.x + 20 * cam.scale, grab.y + 20 * cam.scale, { steps: 4 });
+  expect(isViolet(await probe()), "mid-drag: small still above").toBe(true);
+  await page.mouse.up();
+  expect(isViolet(await probe()), "after drop: small still above").toBe(true);
+});
+
 test.describe("the paint lane — declaration, class merges, shade strips, the ` keys", () => {
   const RED = "#e5484d";
   const GREEN = "#30a46c";

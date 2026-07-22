@@ -541,13 +541,19 @@ export function applyFill(sh: Shape, fill: string | null): Shape {
 /** The topmost fill color under a point — the backdrop the adaptive ink
  *  contrasts against there (images excluded: pure-land callers — SVG export,
  *  the edit overlay — have no pixels; the canvas's raster sampler adds them).
- *  `excludeId` skips that shape: a shape's OWN backfill is self, not backdrop,
- *  so its adaptive outline resolves against what surrounds it (callers keep
- *  text's own fill — the chip sits BEHIND the glyphs). Null = bare paper. */
-export function fillAt(shapes: Shape[], px: number, py: number, excludeId?: string): string | null {
-  for (let i = shapes.length - 1; i >= 0; i--) {
+ *  `limit` bounds the walk to shapes STRICTLY BELOW that id in paint order:
+ *  a shape's own backfill is self, and a fill covering it from above hides
+ *  its stroke — both are foreground there, not the ground the ink is read
+ *  against (callers keep text's own fill — the chip sits BEHIND the glyphs).
+ *  An absent id means no bound (a draft floats on top). Null = bare paper. */
+export function fillAt(shapes: Shape[], px: number, py: number, limit?: string): string | null {
+  let top = shapes.length;
+  if (limit !== undefined) {
+    const at = shapes.findIndex((s) => s.id === limit);
+    if (at !== -1) top = at;
+  }
+  for (let i = top - 1; i >= 0; i--) {
     const sh = shapes[i];
-    if (sh.id === excludeId) continue;
     switch (sh.type) {
       case "pen":
         if (sh.fill && isEnclosed(sh.points) && pointInPolygon(px, py, sh.points)) return sh.fill;
@@ -1304,7 +1310,7 @@ export function toClusterVariant(sh: Shape, target: ShapeVariant | LineVariant):
  *  order and are NOT size-sorted among themselves. Stable + pure: the model array is
  *  untouched (undo/paste/hit-testing rely on its order); only the painted copy is
  *  reordered, so z tracks image size live as images resize. */
-export function paintOrder(shapes: Shape[]): Shape[] {
+export function paintOrder(shapes: readonly Shape[]): Shape[] {
   const images = shapes.filter((s) => s.type === "image").sort((a, b) => clusterWeight(b) - clusterWeight(a));
   const rest = shapes.filter((s) => s.type !== "image");
   return [...images, ...rest];

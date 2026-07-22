@@ -113,6 +113,15 @@ describe("exportSvg", () => {
       ])
     );
     expect(over).toMatch(/<rect[^>]*x="100"[^>]*stroke="#111111"/);
+    // A fill painted ABOVE the shape covers its stroke — foreground, not
+    // backdrop: ink still resolves against what's BENEATH (the board → bright).
+    const covered = exportSvg(
+      doc([
+        { ...rect("r"), stroke: "contrast" } as Shape,
+        { ...rect("lid", 60, 80), width: 200, height: 120, fill: "#f5a623" } as Shape,
+      ])
+    );
+    expect(covered).toMatch(/<rect[^>]*x="100"[^>]*stroke="#f5f5f5"/);
     // Text is the carve-out: its fill is the chip BEHIND the glyphs, so the
     // glyphs must keep contrasting with their own chip.
     const t = exportSvg(doc([{ id: "t", type: "text", stroke: "contrast", strokeWidth: 3, x: 5, y: 200, text: "hi", fontSize: 18, fill: "#f5a623" } as Shape]));

@@ -25,18 +25,19 @@ const esc = (s: string) =>
 
 const num = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(2));
 
-/** Adaptive ink resolves against the topmost FILL under the shape's center
- *  (else the dark ground → bright) — matching the board's sampler, minus
- *  images (per-pixel adaptation over a raster stays a documented
+/** Adaptive ink resolves against the topmost FILL BELOW the shape at its
+ *  center (else the dark ground → bright) — matching the board's sampler,
+ *  minus images (per-pixel adaptation over a raster stays a documented
  *  approximation: an image-covered contrast stroke exports bright). The
- *  shape's OWN backfill doesn't count — the outline contrasts with its
- *  surroundings, not itself — except text, whose fill is the chip BEHIND
- *  the glyphs. */
+ *  shape's OWN backfill and fills painted ABOVE it don't count — those are
+ *  foreground, not the ground the stroke is read against — except text,
+ *  whose fill is the chip BEHIND the glyphs. */
 function inkOf(sh: Shape, shapes: Shape[]): string {
   if (isNoStroke(sh.stroke)) return "none"; // literal SVG none — fill-only shape
   if (!isContrastInk(sh.stroke)) return sh.stroke;
+  if (sh.type === "text" && sh.fill) return contrastSolidOver(sh.fill);
   const b = boundingBox(sh);
-  return contrastSolidOver(fillAt(shapes, b.x + b.width / 2, b.y + b.height / 2, sh.type === "text" ? undefined : sh.id));
+  return contrastSolidOver(fillAt(shapes, b.x + b.width / 2, b.y + b.height / 2, sh.id));
 }
 
 /** Midpoint-quadratic smoothing — visually close to the board's tension spline. */

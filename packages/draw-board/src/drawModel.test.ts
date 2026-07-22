@@ -481,12 +481,14 @@ describe("fills — setFill / enclosure / fillAt / contrast resolve", () => {
     expect(fillAt([pen], -10, 50)).toBeNull();
   });
 
-  it("fillAt excludeId: the excluded shape's own fill is invisible — the fill beneath (or bare paper) shows", () => {
+  it("fillAt limit: only fills BELOW the reference shape count — its own fill and any covering it from above are foreground, not backdrop", () => {
     const under = box("under", { x: 0, y: 0, width: 200, height: 200, fill: "#f5a623" });
-    const over = box("over", { x: 50, y: 50, width: 60, height: 60, fill: "#8267c1" });
-    expect(fillAt([under, over], 80, 80, "over")).toBe("#f5a623"); // own fill skipped → the amber beneath
-    expect(fillAt([over], 80, 80, "over")).toBeNull(); // nothing beneath → bare paper
-    expect(fillAt([under, over], 80, 80, "under")).toBe("#8267c1"); // excluding a shape below changes nothing on top
+    const mid = box("mid", { x: 50, y: 50, width: 60, height: 60, fill: "#8267c1" });
+    const above = box("above", { x: 40, y: 40, width: 100, height: 100, fill: "#30a46c" });
+    expect(fillAt([under, mid, above], 80, 80)).toBe("#30a46c"); // no limit → topmost anywhere
+    expect(fillAt([under, mid, above], 80, 80, "mid")).toBe("#f5a623"); // own AND the green above are skipped
+    expect(fillAt([under, mid, above], 80, 80, "under")).toBeNull(); // bottom shape → bare paper
+    expect(fillAt([under, mid], 80, 80, "unknown-id")).toBe("#8267c1"); // absent id → whole list (a draft floats on top)
   });
 
   it("contrastSolidOver: dark ink on light fills, bright on dark fills / bare paper", () => {
