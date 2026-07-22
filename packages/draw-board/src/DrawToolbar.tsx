@@ -198,15 +198,26 @@ export function DrawToolbar({
   // the control itself, not just in behavior.
   const extended = scaleMode ? Math.abs(sizeStep) >= 2 : strokeWidth > STROKE_WIDTHS[2] || strokeWidth < STROKE_WIDTHS[0];
   return (
-    <div className="relative flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-t border-ink-600 px-2 py-1.5 max-md:[zoom:1.04]">
-      {/* Upload image — pinned left on desktop (the mobile copy lives in the
-          actions row before Cancel). */}
+    // Pinning is CONTAINER-query driven (@container ≥72rem), not viewport
+    // (md:) — the board panel is routinely narrower than the viewport
+    // (sketchbook's sidebar, Operator's chat dock), and viewport-based pinning
+    // let the centered pills slide UNDER the absolute history cluster there
+    // (the undo button ate the style pill's clicks). 72rem = the measured
+    // center row (754px) + 2× the widest pinned side (178px) + slack; below
+    // it the pinned pieces fall in flow and flex-wrap stacks rows — overlap
+    // is impossible by construction. z-30: container-type implies layout
+    // containment, which makes this a stacking context — without an explicit
+    // z the export menu inside (z-50, now LOCAL) would trap below the
+    // canvas overlays (minimap z-10).
+    <div className="relative z-30 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-t border-ink-600 px-2 py-1.5 [container-type:inline-size] max-md:[zoom:1.04]">
+      {/* Upload image — pinned left when the toolbar is wide enough (the
+          in-row copy in the actions cluster covers narrow layouts). */}
       <button
         type="button"
         onClick={onUpload}
         aria-label="Upload image"
         title="Upload image"
-        className="hidden h-8 w-8 items-center justify-center rounded-full border border-ink-500 bg-ink-700 text-ink-300 transition-colors hover:bg-ink-600 hover:text-white md:absolute md:left-3 md:top-1/2 md:flex md:-translate-y-1/2"
+        className="hidden h-8 w-8 items-center justify-center rounded-full border border-ink-500 bg-ink-700 text-ink-300 transition-colors hover:bg-ink-600 hover:text-white [@container(min-width:72rem)]:absolute [@container(min-width:72rem)]:left-3 [@container(min-width:72rem)]:top-1/2 [@container(min-width:72rem)]:flex [@container(min-width:72rem)]:-translate-y-1/2"
       >
         <ImagePlus size={16} />
       </button>
@@ -469,12 +480,12 @@ export function DrawToolbar({
       </div>
       </div>
 
-      {/* History + apply/cancel — absolutely pinned right on desktop (so the tool
-          groups stay centered); own row on mobile with history left, actions right. */}
-      {/* z-30: the centering -translate-y creates a stacking context; without an
-          explicit z it sits at auto and any host popover inside (the export
-          menu) gets trapped BELOW the board's z-10 overlays (minimap). */}
-      <div className="z-30 flex items-center gap-2 max-md:order-3 max-md:basis-full max-md:justify-between md:absolute md:right-3 md:top-1/2 md:-translate-y-1/2">
+      {/* History + apply/cancel — absolutely pinned right when the CONTAINER
+          fits center row + both pinned sides (so the tool groups stay truly
+          centered); otherwise its own full row, history left / actions right
+          (the flow classes are unconditional — they're ignored while out of
+          flow). z-30 keeps the export menu above the root's local layers. */}
+      <div className="z-30 order-3 flex basis-full items-center justify-between gap-2 [@container(min-width:72rem)]:absolute [@container(min-width:72rem)]:right-3 [@container(min-width:72rem)]:top-1/2 [@container(min-width:72rem)]:-translate-y-1/2">
         <div className="flex items-center gap-0.5">
           <IconButton label="Undo (⌘Z)" disabled={!canUndo} onClick={onUndo} className="disabled:opacity-30">
             <Undo2 size={16} />
@@ -484,13 +495,13 @@ export function DrawToolbar({
           </IconButton>
         </div>
         <div className="flex items-center gap-2">
-          {/* Mobile upload (before Cancel); the desktop copy is pinned left. */}
+          {/* Narrow-layout upload (before Cancel); the wide copy is pinned left. */}
           <button
             type="button"
             onClick={onUpload}
             aria-label="Upload image"
             title="Upload image"
-            className="flex h-8 w-8 items-center justify-center rounded-full border border-ink-500 bg-ink-700 text-ink-300 transition-colors hover:bg-ink-600 hover:text-white md:hidden"
+            className="flex h-8 w-8 items-center justify-center rounded-full border border-ink-500 bg-ink-700 text-ink-300 transition-colors hover:bg-ink-600 hover:text-white [@container(min-width:72rem)]:hidden"
           >
             <ImagePlus size={16} />
           </button>
