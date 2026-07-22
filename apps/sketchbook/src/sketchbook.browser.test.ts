@@ -1848,9 +1848,10 @@ test.describe("the paint lane — declaration, class merges, shade strips, the `
     const noStroke = page.locator('button[aria-label="No stroke"]');
     await expect(noStroke).toHaveAttribute("aria-pressed", "true");
     // The adaptive ambient was in-column → it followed: a fresh draw is born
-    // strokeless too.
+    // strokeless too. (openSeeded parks on the cursor — arm the pen to ink.)
     await page.keyboard.press("Escape");
     await expect(noStroke).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "Pen — draw freehand (Tab)" }).click();
     await drawStroke(page, { x: 250, y: 200 }, { x: 340, y: 260 });
     await expect.poll(async () => (await shapes()).map((s) => s.stroke)).toEqual(["none", "none"]);
     // Smart is a rung of the same strip — picking it walks the class home.
