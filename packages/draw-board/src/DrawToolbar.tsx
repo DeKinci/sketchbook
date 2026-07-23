@@ -20,7 +20,7 @@ import {
   ImagePlus,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconButton } from "./IconButton.tsx";
 import { CONTRAST_INK, NO_STROKE, SHADES, GRAYS, familyOf, strokeColumnOf, fillColumnOf, visibleHueFamilies, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type DrawFeatures, type HueFamily, type LaneColumn, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
@@ -784,35 +784,56 @@ export function DrawToolbar({
   // slotTargetStep) — it renders as −/+ so the changed meaning is visible on
   // the control itself, not just in behavior.
   const extended = scaleMode ? Math.abs(sizeStep) >= 2 : strokeWidth > STROKE_WIDTHS[2] || strokeWidth < STROKE_WIDTHS[0];
+
+  // ── Side-pinning by MEASUREMENT ─────────────────────────────────────────────
+  // History/actions pin beside the centered tool row exactly when both flanks
+  // fit them; otherwise they fall in flow and flex-wrap stacks a second row
+  // (overlap impossible by construction). A fixed breakpoint lies for some
+  // capability config — the full board's row needs ~72rem, the reduced
+  // Operator dock ~54rem, so the constant tuned to one wraps the other into a
+  // needless second row. Viewport (md:) breakpoints are wrong the same way:
+  // the board panel is routinely narrower than the viewport (sketchbook's
+  // sidebar, Operator's chat dock), and viewport-keyed pinning let the
+  // centered pills slide UNDER the absolute history cluster (the undo button
+  // ate the style pill's clicks).
+  const rootRef = useRef<HTMLDivElement>(null);
+  const toolsRef = useRef<HTMLDivElement>(null);
+  const styleRef = useRef<HTMLDivElement>(null);
+  const historyRef = useRef<HTMLDivElement>(null);
+  const actionsRef = useRef<HTMLDivElement>(null);
+  const [pinned, setPinned] = useState(false);
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const GAP = 8; // gap-x-2 between flex items / inside the side row
+    const EDGE = 12; // right-3 — the pinned cluster's offset from the padding box
+    const measure = () => {
+      const center = (toolsRef.current?.offsetWidth ?? 0) + GAP + (styleRef.current?.offsetWidth ?? 0);
+      // The side row's CONTENT (its two clusters) — never the row box itself:
+      // unpinned it's basis-full, so its own width would read as "never fits"
+      // and latch the layout permanently stacked. The clusters render the same
+      // content in both states, so this measurement can't oscillate.
+      const side = (historyRef.current?.offsetWidth ?? 0) + GAP + (actionsRef.current?.offsetWidth ?? 0);
+      // True centering: the tools center on the root's midline, so the side
+      // cluster needs width + edge + one gap of clearance on BOTH flanks.
+      setPinned(center + 2 * (side + EDGE + GAP) <= root.clientWidth);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    for (const el of [root, toolsRef.current, styleRef.current, historyRef.current, actionsRef.current]) if (el) ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   return (
-    // Pinning is CONTAINER-query driven (@container ≥72rem), not viewport
-    // (md:) — the board panel is routinely narrower than the viewport
-    // (sketchbook's sidebar, Operator's chat dock), and viewport-based pinning
-    // let the centered pills slide UNDER the absolute history cluster there
-    // (the undo button ate the style pill's clicks). 72rem = the measured
-    // center row (754px) + 2× the widest pinned side (178px) + slack; below
-    // it the pinned pieces fall in flow and flex-wrap stacks rows — overlap
-    // is impossible by construction. z-30: container-type implies layout
-    // containment, which makes this a stacking context — without an explicit
-    // z the export menu inside (z-50, now LOCAL) would trap below the
-    // canvas overlays (minimap z-10).
-    <div className="relative z-30 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-t border-ink-600 px-2 py-1.5 [container-type:inline-size] max-md:[zoom:1.04]">
-      {/* Upload image — pinned left when the toolbar is wide enough (the
-          in-row copy in the actions cluster covers narrow layouts). */}
-      <button
-        type="button"
-        onClick={onUpload}
-        aria-label="Upload image"
-        title="Upload image"
-        className="hidden h-8 w-8 items-center justify-center rounded-full border border-ink-500 bg-ink-700 text-ink-300 transition-colors hover:bg-ink-600 hover:text-white [@container(min-width:72rem)]:absolute [@container(min-width:72rem)]:left-3 [@container(min-width:72rem)]:top-1/2 [@container(min-width:72rem)]:flex [@container(min-width:72rem)]:-translate-y-1/2"
-      >
-        <ImagePlus size={16} />
-      </button>
+    // z-30: container-type implies layout containment, which makes this a
+    // stacking context — without an explicit z the export menu inside (z-50,
+    // now LOCAL) would trap below the canvas overlays (minimap z-10).
+    <div ref={rootRef} className="relative z-30 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-t border-ink-600 px-2 py-1.5 [container-type:inline-size] max-md:[zoom:1.04]">
 
       {/* Tools cluster — on mobile it drops below the color cluster (its own row)
           and the buttons run ~18% larger than the rest of the toolbar (fat-finger
           targets for the primary drawing tools). */}
-      <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 max-md:order-2 max-md:basis-full max-md:[zoom:1.18]">
+      <div ref={toolsRef} className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 max-md:order-2 max-md:basis-full max-md:[zoom:1.18]">
       {/* Eraser: deletes the selection, or arms the erase tool when nothing is
           selected. (Clear all = ⌘A then ⌫.) */}
       <IconButton
@@ -919,7 +940,7 @@ export function DrawToolbar({
       </div>
 
       {/* Style cluster (color + size) — on mobile this is the top row. */}
-      <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 max-md:order-1 max-md:basis-full">
+      <div ref={styleRef} className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 max-md:order-1 max-md:basis-full">
       {/* The paint lane — ONE shared palette for stroke + fill: hue-family
           columns with the stroke level on top and the fill level below, the
           specials (adaptive ink / no fill) sharing column 0. See PaintLane.
@@ -1051,13 +1072,13 @@ export function DrawToolbar({
       )}
       </div>
 
-      {/* History + apply/cancel — absolutely pinned right when the CONTAINER
-          fits center row + both pinned sides (so the tool groups stay truly
-          centered); otherwise its own full row, history left / actions right
-          (the flow classes are unconditional — they're ignored while out of
-          flow). z-30 keeps the export menu above the root's local layers. */}
-      <div className="z-30 order-3 flex basis-full items-center justify-between gap-2 [@container(min-width:72rem)]:absolute [@container(min-width:72rem)]:right-3 [@container(min-width:72rem)]:top-1/2 [@container(min-width:72rem)]:-translate-y-1/2">
-        <div className="flex items-center gap-0.5">
+      {/* History + apply/cancel — absolutely pinned right when the MEASURED
+          center row + both pinned sides fit the container (so the tool groups
+          stay truly centered); otherwise its own full row, history left /
+          actions right. z-30 keeps the export menu above the root's local
+          layers. */}
+      <div className={`z-30 order-3 flex items-center gap-2 ${pinned ? "absolute right-3 top-1/2 -translate-y-1/2" : "basis-full justify-between"}`}>
+        <div ref={historyRef} className="flex items-center gap-0.5">
           <IconButton label="Undo (⌘Z)" disabled={!canUndo} onClick={onUndo} className="disabled:opacity-30">
             <Undo2 size={16} />
           </IconButton>
@@ -1065,14 +1086,16 @@ export function DrawToolbar({
             <Redo2 size={16} />
           </IconButton>
         </div>
-        <div className="flex items-center gap-2">
-          {/* Narrow-layout upload (before Cancel); the wide copy is pinned left. */}
+        <div ref={actionsRef} className="flex items-center gap-2">
+          {/* Upload rides with the actions in EVERY layout — one copy, so both
+              layout states hold identical content and the pin measurement
+              can't oscillate. */}
           <button
             type="button"
             onClick={onUpload}
             aria-label="Upload image"
             title="Upload image"
-            className="flex h-8 w-8 items-center justify-center rounded-full border border-ink-500 bg-ink-700 text-ink-300 transition-colors hover:bg-ink-600 hover:text-white [@container(min-width:72rem)]:hidden"
+            className="flex h-8 w-8 items-center justify-center rounded-full border border-ink-500 bg-ink-700 text-ink-300 transition-colors hover:bg-ink-600 hover:text-white"
           >
             <ImagePlus size={16} />
           </button>
