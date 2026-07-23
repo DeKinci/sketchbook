@@ -507,6 +507,10 @@ export function DrawCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bgImage, imgEls, imgSig, fillSig, state.width, state.height]);
 
+  // fillAt reads "below" in PAINT order (filled units z-sort by footprint) —
+  // feed it the sorted view, not the insertion array.
+  const inkOrder = useMemo(() => paintOrder(shapes), [shapes]);
+
   /** Solid render color for a shape: its own color, or — for the adaptive ink —
    *  white/near-black chosen to contrast the background sampled under it. Outside
    *  the sampled raster rect there's only the dark board → bright ink. No-stroke
@@ -522,7 +526,7 @@ export function DrawCanvas({
     // count: its own backfill and fills covering it from above are foreground,
     // not the ground the stroke is read against. Text keeps its own fill —
     // the chip sits BEHIND the glyphs.
-    const under = sh.type === "text" && sh.fill ? sh.fill : fillAt(shapes, cx, cy, sh.id);
+    const under = sh.type === "text" && sh.fill ? sh.fill : fillAt(inkOrder, cx, cy, sh.id);
     if (under) return contrastSolidOver(under);
     // No fill beneath → the image raster decides; beyond it, the dark board.
     const s = bgLumRef.current;
@@ -1224,6 +1228,15 @@ export function DrawCanvas({
     // array's INSERTION order (paintOrder's z-rules depend on it).
     const inWindow = new Set(index.query(cullWindow));
     if (inWindow.size === shapes.length) return shapes;
+    // Units cull WHOLE: paintOrder weighs a group by its filled members' union
+    // footprint, so a half-culled group would change z as you pan. Any visible
+    // member pulls in the rest (offscreen members are cheap — Konva clips them).
+    let keys: Set<string> | null = null;
+    for (const sh of shapes) if (sh.groupPath && inWindow.has(sh)) (keys ??= new Set()).add(sh.groupPath[0]);
+    if (keys) {
+      const want = keys;
+      for (const sh of shapes) if (sh.groupPath && !inWindow.has(sh) && want.has(sh.groupPath[0])) inWindow.add(sh);
+    }
     return shapes.filter((sh) => inWindow.has(sh));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shapes, cullKey]);

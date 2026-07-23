@@ -39,6 +39,7 @@ import {
   isNoStroke,
   contrastSolidOver,
   fillAt,
+  paintOrder,
   type DrawDoc,
   type DrawFeatures,
   type DrawSession,
@@ -1416,7 +1417,7 @@ export function DrawEditor({
                   // the same resolve the committed glyphs will get.
                   const ink =
                     session.color === CONTRAST_INK
-                      ? contrastSolidOver(session.fill ?? fillAt(state.shapes, session.anchorX + 1, session.anchorY + 1))
+                      ? contrastSolidOver(session.fill ?? fillAt(paintOrder(state.shapes), session.anchorX + 1, session.anchorY + 1))
                       : isNoStroke(session.color)
                         ? "transparent" // WYSIWYG: committed glyphs paint nothing too
                         : session.color;

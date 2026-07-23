@@ -227,6 +227,43 @@ test("a pen TAP (no drag) leaves a visible dot: committed, persisted, inked in t
   expect(px.corner).toBeLessThan(60); // board background, not ink
 });
 
+test("z law: a big filled diamond drawn LAST sinks beneath a small filled badge (nothing disappears)", async ({ page }) => {
+  // Badge drawn FIRST (insertion-bottom), then a big filled diamond fully
+  // covering it. paintOrder sorts filled units big→small, so the badge must
+  // still be visible ON TOP — while the model array keeps insertion order.
+  await openSeeded(page, [
+    rect("badge", 200, 150, 60, 40, { fill: "#f5a623" }),
+    { id: "dia", type: "diamond", stroke: "#e5484d", strokeWidth: 3, x: 100, y: 60, width: 400, height: 300, fill: "#30a46c" },
+  ]);
+  const sample = (lx: number, ly: number) =>
+    page.evaluate(
+      ([x0, y0]) => {
+        const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+        const cvs = [...document.querySelectorAll<HTMLCanvasElement>(".konvajs-content canvas")];
+        const c = document.createElement("canvas");
+        c.width = cvs[0].width;
+        c.height = cvs[0].height;
+        const ctx = c.getContext("2d")!;
+        for (const cv of cvs) ctx.drawImage(cv, 0, 0); // composite the layers in z order
+        const dpr = cvs[0].width / cvs[0].clientWidth;
+        const d = ctx.getImageData(Math.round((x0 * s.scaleX() + s.x()) * dpr), Math.round((y0 * s.scaleX() + s.y()) * dpr), 1, 1).data;
+        return [d[0], d[1], d[2]];
+      },
+      [lx, ly] as [number, number]
+    );
+  // Badge center: amber (#f5a623), NOT the diamond's green — the badge won the stack.
+  const [br, bg2, bb] = await sample(230, 170);
+  expect(br).toBeGreaterThan(200);
+  expect(bb).toBeLessThan(120);
+  expect(bg2).toBeGreaterThan(120);
+  // Beside the badge, still inside the rhombus: the diamond's green fill.
+  const [dr, dg] = await sample(300, 260);
+  expect(dr).toBeLessThan(120);
+  expect(dg).toBeGreaterThan(120);
+  // The MODEL keeps insertion order — only the painted copy reorders.
+  expect((await stored(page))[0].doc.shapes.map((sh) => (sh as { id: string }).id)).toEqual(["badge", "dia"]);
+});
+
 test("typography: text typed in a shape wraps at its edge (stored as a box), center-anchors, and rides the parent's resize", async ({ page }) => {
   await openSeeded(page, [rect("r1", 100, 100, 360, 220)]); // right edge 460, bottom 320
   const box = (await page.locator(".konvajs-content").boundingBox())!;

@@ -1438,18 +1438,74 @@ describe("paintOrder — images beneath, vector shapes on top", () => {
     expect(ids([big, img])).toEqual(["img", "big"]);
   });
 
-  it("non-image shapes keep DRAW order (not size-sorted among themselves)", () => {
+  it("UNFILLED shapes keep DRAW order (not size-sorted among themselves)", () => {
     const big = box("big", { width: 200, height: 200 });
     const small = box("small", { width: 30, height: 30 });
     expect(ids([big, small])).toEqual(["big", "small"]); // drawn big→small: small on top
     expect(ids([small, big])).toEqual(["small", "big"]); // drawn small→big: big on top
   });
 
-  it("a stroke keeps draw order relative to other shapes (no forced top)", () => {
+  it("a stroke keeps draw order relative to other unfilled shapes (no forced top)", () => {
     const scribble: Shape = { id: "sc", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0, 500, 500] };
     const rect = box("rect", { width: 100, height: 100 });
     expect(ids([scribble, rect])).toEqual(["sc", "rect"]); // scribble drawn first → below
     expect(ids([rect, scribble])).toEqual(["rect", "sc"]);
+  });
+
+  it("FILLED shapes size-sort: the bigger occluder sinks, whatever insertion order", () => {
+    const card = box("card", { width: 300, height: 200, fill: "#fdba74" });
+    const badge = box("badge", { width: 40, height: 30, fill: "#f5a623" });
+    expect(ids([badge, card])).toEqual(["card", "badge"]); // badge drawn FIRST still on top
+    expect(ids([card, badge])).toEqual(["card", "badge"]);
+  });
+
+  it("a fill never swallows a stroke: unfilled marks paint above every filled unit", () => {
+    const outline = box("outline", { width: 60, height: 60 }); // drawn first, no fill
+    const scribble: Shape = { id: "sc", type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0, 50, 50] };
+    const card = box("card", { width: 400, height: 300, fill: "#fdba74" }); // drawn last, covers both
+    expect(ids([outline, scribble, card])).toEqual(["card", "outline", "sc"]);
+  });
+
+  it("equal footprints keep insertion order (stable)", () => {
+    const a = box("a", { width: 100, height: 100, fill: "#111" });
+    const b = box("b", { x: 200, width: 100, height: 100, fill: "#222" });
+    expect(ids([a, b])).toEqual(["a", "b"]);
+    expect(ids([b, a])).toEqual(["b", "a"]);
+  });
+
+  it("a group stacks as ONE atom weighed by its FILLED members' union footprint", () => {
+    const gid = "g1";
+    // Group: a small filled chip + a giant unfilled outline (the outline must
+    // not sink the group — footprint counts filled members only).
+    const chip = box("chip", { width: 40, height: 30, fill: "#f5a623", groupPath: [gid] });
+    const frame = box("frame", { width: 500, height: 400, groupPath: [gid] });
+    const card = box("card", { width: 300, height: 200, fill: "#fdba74" }); // loose, bigger fill
+    // Group members stay contiguous (insertion order within), above the card.
+    expect(ids([chip, card, frame])).toEqual(["card", "chip", "frame"]);
+    expect(ids([card, chip, frame])).toEqual(["card", "chip", "frame"]);
+  });
+
+  it("a fully unfilled group rides the top tier as one atom", () => {
+    const gid = "g2";
+    const m1 = box("m1", { width: 50, height: 50, groupPath: [gid] });
+    const m2 = box("m2", { x: 100, width: 50, height: 50, groupPath: [gid] });
+    const card = box("card", { width: 400, height: 300, fill: "#fdba74" });
+    const loose = box("loose", { x: 200, width: 20, height: 20 });
+    // card (filled tier) below; unfilled units in insertion order: m1's unit
+    // formed first → both members precede the later loose outline.
+    expect(ids([m1, card, loose, m2])).toEqual(["card", "m1", "m2", "loose"]);
+  });
+
+  it("fillAt follows paint order: adaptive ink reads the visually-top fill", () => {
+    // Big amber card drawn LAST (insertion-top) but paint-BOTTOM; the small
+    // filled badge paints above it. A point inside both must see the badge.
+    const badge = box("badge", { x: 50, y: 50, width: 40, height: 40, fill: "#f5a623" });
+    const card = box("card", { x: 0, y: 0, width: 300, height: 200, fill: "#fdba74" });
+    expect(fillAt(paintOrder([badge, card]), 60, 60)).toBe("#f5a623");
+    // limit walks paint order too: the card sees only what paints BELOW it — paper.
+    expect(fillAt(paintOrder([badge, card]), 60, 60, "card")).toBe(null);
+    // ...and the badge's ground is the card beneath it.
+    expect(fillAt(paintOrder([badge, card]), 60, 60, "badge")).toBe("#fdba74");
   });
 
   it("within the image layer the larger image paints lower", () => {

@@ -149,8 +149,9 @@ export function exportSvg(doc: DrawDoc, opts?: SvgExportOptions): string {
   const crop = doc.background
     ? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 }
     : contentCropLogical(doc, { clamp: false }) ?? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 };
-  const body = paintOrder(doc.shapes)
-    .map((sh) => shapeSvg(sh, doc.shapes))
+  const ordered = paintOrder(doc.shapes);
+  const body = ordered
+    .map((sh) => shapeSvg(sh, ordered)) // fillAt wants paint order, not insertion
     .join("\n  ");
   const bg = doc.background
     ? `<image x="0" y="0" width="${num(doc.width)}" height="${num(doc.height)}" href="data:${doc.background.mediaType};base64,${doc.background.dataBase64}" preserveAspectRatio="none"/>`
