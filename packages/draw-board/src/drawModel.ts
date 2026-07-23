@@ -1955,6 +1955,10 @@ export type DrawAction =
   // `box`, WITHOUT changing the parent itself (its node is mid-Transformer).
   | { type: "reflowChildrenTo"; parentId: string; box: { x: number; y: number; width: number; height: number }; distScale?: number }
   | { type: "endGesture" }
+  // Abort the live gesture: restore the pre-gesture shapes EXACTLY, no history
+  // entry (nothing net happened on the board). Used when a drag turns out not
+  // to be a board edit — e.g. a selection dropped onto the library panel.
+  | { type: "cancelGesture" }
   // Discrete, self-contained commits (own their history push). `detectAttach`
   // (default false) auto-attaches each added shape (without one) to a pre-existing
   // shape it's placed edge-to-edge with — enabled for a single piece of NEW
@@ -2846,6 +2850,14 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         past: changed ? [...s.past, base] : s.past,
         future: changed ? [] : s.future,
       };
+    }
+
+    case "cancelGesture": {
+      // The mirror of endGesture that UNDOES instead of committing: shapes
+      // snap back to the snapshot and history is untouched (no push — the
+      // board ends exactly where it started, so there is nothing to undo).
+      if (!s.gestureBase) return s;
+      return { ...s, shapes: s.gestureBase, gestureBase: null };
     }
 
     case "addShapes": {

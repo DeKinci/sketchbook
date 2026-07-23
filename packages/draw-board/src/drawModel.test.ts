@@ -2852,3 +2852,25 @@ describe("features.shapes — hosts list the shape tools a board mounts", () => 
     expect(drawReducer(s, { type: "setTool", tool: "eraser" }).tool).toBe("eraser");
   });
 });
+
+describe("cancelGesture", () => {
+  it("restores the pre-gesture shapes exactly, with no history entry", () => {
+    let s = initialDrawState({ shapes: [box("a", { x: 10, y: 10 })], width: 720, height: 460 });
+    s = drawReducer(s, { type: "select", ids: ["a"] });
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "translateShapes", ids: ["a"], dx: 50, dy: 30 });
+    expect(s.shapes[0]).toMatchObject({ x: 60, y: 40 });
+    s = drawReducer(s, { type: "cancelGesture" });
+    expect(s.shapes[0]).toMatchObject({ x: 10, y: 10 });
+    expect(s.gestureBase).toBeNull();
+    // The board ends where it started — nothing lands in history to undo.
+    expect(canUndo(s)).toBe(false);
+    // Selection survives the abort — the shapes still exist, untouched.
+    expect(s.selectedIds).toEqual(["a"]);
+  });
+
+  it("no-ops without a live gesture", () => {
+    const s = initialDrawState({ shapes: [box("a")], width: 720, height: 460 });
+    expect(drawReducer(s, { type: "cancelGesture" })).toBe(s);
+  });
+});

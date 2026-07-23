@@ -2266,3 +2266,54 @@ test.describe("toolbar ergonomics — group button placement, the 0 size key, gr
     await expect.poll(cols).toBe(5);
   });
 });
+
+test("element library: ONE shared collection across drawings — capture on page 1, place on page 2, everything survives a reload", async ({ page }) => {
+  await open(page);
+  const panel = page.locator('aside[aria-label="Library elements"]');
+  const tile = panel.locator('[aria-label="Library element"]');
+  const library = () =>
+    page.evaluate(() => JSON.parse(window.localStorage.getItem("sketchbook:library") ?? "null") as { open: boolean; entries: { kind: string }[] } | null);
+
+  // Fresh empty page ⇒ identity camera (stage coords == logical). Draw a rect…
+  await page.locator('button[aria-label^="Rectangle"]').click();
+  await drawStroke(page, { x: 100, y: 80 }, { x: 200, y: 130 });
+  await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length ?? 0).toBe(1);
+
+  // …open the library (rightmost toolbar toggle) and drag the rect INTO it.
+  await page.getByRole("button", { name: "Element library" }).click();
+  await expect(panel).toBeVisible();
+  await page.getByRole("button", { name: "Cursor — select / move (Tab)" }).click();
+  const stageBox = (await page.locator(".konvajs-content canvas").first().boundingBox())!;
+  const pb = (await panel.boundingBox())!;
+  await page.mouse.move(stageBox.x + 150, stageBox.y + 105);
+  await page.mouse.down();
+  await page.mouse.move(pb.x + pb.width / 2, pb.y + pb.height / 2, { steps: 12 });
+  await page.mouse.up();
+  await expect(tile).toHaveCount(1);
+  await expect.poll(async () => (await library())?.entries.length ?? 0).toBe(1);
+  // The capture is a COPY — the source page keeps its shape.
+  expect((await stored(page))[0].doc.shapes.length).toBe(1);
+
+  // A new drawing: the SAME library rides along, panel still open (app-level state).
+  await page.getByRole("button", { name: "New drawing" }).click();
+  const renameInput = page.getByRole("textbox", { name: /Rename Untitled 2/ });
+  await renameInput.press("Enter"); // keep the default name, leave rename mode
+  await expect(panel).toBeVisible();
+  await expect(tile).toHaveCount(1);
+
+  // Place a copy on the fresh page: it lands in THIS drawing's doc only.
+  const tb = (await tile.boundingBox())!;
+  const stage2 = (await page.locator(".konvajs-content canvas").first().boundingBox())!;
+  await page.mouse.move(tb.x + tb.width / 2, tb.y + tb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(stage2.x + 300, stage2.y + 200, { steps: 12 });
+  await page.mouse.up();
+  await expect.poll(async () => (await stored(page)).find((d) => d.name === "Untitled 2")?.doc.shapes.length ?? 0).toBe(1);
+  expect((await stored(page)).find((d) => d.name === "Untitled")!.doc.shapes.length).toBe(1);
+
+  // Reload: the entries AND the open panel come back (both persisted).
+  await page.reload();
+  await page.waitForSelector(".konvajs-content canvas");
+  await expect(panel).toBeVisible();
+  await expect(tile).toHaveCount(1);
+});

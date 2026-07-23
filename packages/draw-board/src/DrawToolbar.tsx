@@ -18,6 +18,7 @@ import {
   Check,
   X,
   ImagePlus,
+  Shapes,
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -689,6 +690,8 @@ export function DrawToolbar({
   onCancel,
   onAdd,
   extra,
+  libraryOpen,
+  onToggleLibrary,
 }: {
   tool: Tool;
   /** The armed selectable tool (select/pen) — the pill's well slides here. */
@@ -766,6 +769,10 @@ export function DrawToolbar({
   /** Host-supplied controls rendered at the FAR RIGHT of the actions cluster
    *  (e.g. the standalone app's export buttons). Operator passes nothing. */
   extra?: React.ReactNode;
+  /** Element library panel state: open/closed shows the RIGHTMOST toggle;
+   *  null/undefined = the feature is off and no toggle renders at all. */
+  libraryOpen?: boolean | null;
+  onToggleLibrary?: () => void;
 }) {
   const persistentActive = tool === "select" || tool === "pen";
   // The cluster buttons mount only the variants this board enables — the
@@ -1122,6 +1129,24 @@ export function DrawToolbar({
             </button>
           )}
           {extra}
+          {libraryOpen != null && (
+            // The element-library toggle holds the toolbar's RIGHTMOST slot —
+            // it opens/closes the panel this row sits beside.
+            <button
+              type="button"
+              onClick={onToggleLibrary}
+              aria-label="Element library"
+              aria-pressed={libraryOpen}
+              title={libraryOpen ? "Hide element library" : "Show element library"}
+              className={`flex h-8 w-8 items-center justify-center rounded-full border transition-colors ${
+                libraryOpen
+                  ? "border-accent-500/60 bg-ink-600 text-white"
+                  : "border-ink-500 bg-ink-700 text-ink-300 hover:bg-ink-600 hover:text-white"
+              }`}
+            >
+              <Shapes size={16} />
+            </button>
+          )}
         </div>
       </div>
     </div>

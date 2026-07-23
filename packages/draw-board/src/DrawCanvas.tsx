@@ -145,6 +145,7 @@ export function DrawCanvas({
   renderAll,
   camBusyRef,
   newId,
+  onMoveGesture,
 }: {
   state: DrawState;
   dispatch: (a: DrawAction) => void;
@@ -193,6 +194,11 @@ export function DrawCanvas({
    *  a full recache hitch mid-pan). */
   camBusyRef?: React.MutableRefObject<boolean>;
   newId: () => string;
+  /** Live select+move gesture feed (set at drag start, null when it settles).
+   *  A drop target outside the stage (the library panel — a mouseup out there
+   *  never reaches Konva) consumes it: `cancel()` aborts the move in place
+   *  (shapes snap back, no history) instead of letting re-entry commit it. */
+  onMoveGesture?: (g: { ids: string[]; cancel: () => void } | null) => void;
 }) {
   const trRef = useRef<Konva.Transformer>(null);
   const { tool, shapes, selectedIds, color, fill, strokeWidth, strokeStyle } = state;
@@ -393,6 +399,7 @@ export function DrawCanvas({
     if (moveRef.current) {
       dispatch({ type: "endGesture" });
       moveRef.current = null;
+      onMoveGesture?.(null);
     }
     marqueeStart.current = null;
     setMarquee(null);
@@ -686,6 +693,7 @@ export function DrawCanvas({
       }
       dispatch({ type: "endGesture" });
       moveRef.current = null;
+      onMoveGesture?.(null);
       return;
     }
     if (marqueeStart.current && marquee) {
@@ -782,6 +790,14 @@ export function DrawCanvas({
       // smallest") plus every dragged container's contents (moveClusterIds folds in
       // containment). The reducer freezes anything left out of this set.
       moveRef.current = { last: p, downAt: p, ids: moveClusterIds(shapes, ids) };
+      onMoveGesture?.({
+        ids: moveRef.current.ids,
+        cancel: () => {
+          moveRef.current = null;
+          dispatch({ type: "cancelGesture" });
+          onMoveGesture?.(null);
+        },
+      });
       return;
     }
     const { x, y } = logicalPointer(e);

@@ -28,3 +28,4 @@ export { BOARD_KEYWORD, embedPngText, readPngText, isPng } from "./pngMeta.ts";
 export { paintShapeGhosts, renderDocThumbnail } from "./ghostPainter.ts";
 export * from "./viewport.ts";
 export * from "./drawModel.ts";
+export * from "./libraryModel.ts";

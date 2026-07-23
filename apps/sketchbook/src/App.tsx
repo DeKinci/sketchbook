@@ -13,6 +13,7 @@ import {
   updateSession,
   type Drawing,
 } from "./lib/drawings.ts";
+import { loadLibrary, saveLibrary, type LibraryState } from "./lib/library.ts";
 
 /** Decode an image file into a new ANNOTATION doc (the image as background). */
 async function docFromImageFile(file: File): Promise<{ doc: DrawDoc; name: string } | null> {
@@ -236,6 +237,19 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(null), 4000);
   }, []);
 
+  // The element library — ONE shared collection across every drawing (its
+  // entries and the panel's open state persist together; a page switch or
+  // reload keeps both). Same ref-routed mutation shape as the drawings.
+  const [library, setLibrary] = useState(loadLibrary);
+  const libraryRef = useRef(library);
+  libraryRef.current = library;
+  const mutateLibrary = useCallback((up: (s: LibraryState) => LibraryState) => {
+    const next = up(libraryRef.current);
+    libraryRef.current = next;
+    saveLibrary(next);
+    setLibrary(next);
+  }, []);
+
   // Hover preview: which drawing, anchored where.
   const [preview, setPreview] = useState<{ id: string; at: { x: number; y: number } } | null>(null);
 
@@ -350,6 +364,12 @@ export default function App() {
             features={URL_FEATURES}
             onNotify={notify}
             minimap
+            library={{
+              entries: library.entries,
+              onChange: (entries) => mutateLibrary((s) => ({ ...s, entries })),
+              open: library.open,
+              onOpenChange: (open) => mutateLibrary((s) => ({ ...s, open })),
+            }}
             boardRef={boardRef}
             toolbarExtra={<ExportCluster board={boardRef} onNotify={notify} />}
             onImportBoard={(doc) => {

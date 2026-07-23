@@ -48,6 +48,8 @@ import {
   type TextShape,
 } from "./drawModel.ts";
 import { textBlockSize, wrapLines } from "./textMetrics.ts";
+import { LibraryPanel } from "./LibraryPanel.tsx";
+import { elementFromShapes, placeElement, type LibraryElement, type LibraryEntry } from "./libraryModel.ts";
 import { BOARD_FONT_STACK, useBoardFont } from "./boardFont.ts";
 import { exportStagePng, sketchFileName } from "./exportPng.ts";
 import { exportBoardPng, exportBoardSvg, parseBoardFile, parseBoardPayload } from "./boardFile.ts";
@@ -201,6 +203,7 @@ export function DrawEditor({
   boardRef,
   toolbarExtra,
   onImportBoard,
+  library,
 }: {
   doc: DrawDoc;
   bgImage: HTMLImageElement | null;
@@ -263,6 +266,17 @@ export function DrawEditor({
    *  (rich PNG/SVG) FIRST — a board file always imports as a board, never as a
    *  placed image, wherever it lands. Absent (Operator): no probing at all. */
   onImportBoard?: (doc: DrawDoc) => void;
+  /** Element library (opt-in; absent = feature off, no panel, no toolbar
+   *  toggle). The host OWNS the entries — they are shared across drawings and
+   *  outlive this editor, so they live beside the docs, never inside one.
+   *  `open`/`onOpenChange` optionally control the panel's visibility from the
+   *  host (persist it app-wide); omit `open` for editor-local toggling. */
+  library?: {
+    entries: LibraryEntry[];
+    onChange: (entries: LibraryEntry[]) => void;
+    open?: boolean;
+    onOpenChange?: (open: boolean) => void;
+  } | null;
 }) {
   // Operator is dark-only. The primary ink is adaptive (CONTRAST_INK) — the
   // canvas resolves it to a bright/dark solid contrasting the BACKGROUND
@@ -701,6 +715,45 @@ export function DrawEditor({
     },
     [dispatch, pastePoint]
   );
+
+  // ── Element library (opt-in right sidebar; host owns the entries) ───────────
+  // Open state: host-controlled when `library.open` is provided (persist it
+  // app-wide — the library is shared across drawings, so its visibility should
+  // survive board switches too), else editor-local.
+  const [libOpenLocal, setLibOpenLocal] = useState(false);
+  const libOpen = library ? (library.open ?? libOpenLocal) : false;
+  const toggleLibrary = () => {
+    if (!library) return;
+    library.onOpenChange?.(!libOpen);
+    if (library.open === undefined) setLibOpenLocal(!libOpen);
+  };
+  // The live select+move gesture (from DrawCanvas) — while set, the panel is an
+  // armed drop target: releasing over it captures the dragged shapes as an
+  // element and ABORTS the move (the shapes never actually go anywhere).
+  const [boardDrag, setBoardDrag] = useState<{ ids: string[]; cancel: () => void } | null>(null);
+  const dropToLibrary = () => {
+    const g = boardDrag;
+    if (!g || !library) return;
+    const ids = new Set(g.ids);
+    // Capture BEFORE cancel (positions are normalized away regardless — the
+    // element is position-free; reading first just avoids racing the dispatch).
+    const picked = stateRef.current.shapes.filter((sh) => ids.has(sh.id));
+    g.cancel();
+    const el = elementFromShapes(picked, newShapeId);
+    if (el) library.onChange([...library.entries, el]);
+  };
+  const placeFromLibrary = (el: LibraryElement, client: { x: number; y: number }) => {
+    const area = areaRef.current;
+    if (!area || !view) return;
+    const r = area.getBoundingClientRect();
+    // Released outside the canvas (over the panel itself, the toolbar, …): no-op.
+    if (client.x < r.left || client.x > r.right || client.y < r.top || client.y > r.bottom) return;
+    const pt = screenToLogical(view, { x: client.x - r.left, y: client.y - r.top });
+    // Same semantics as paste: fresh ids, centered on the point, no attach
+    // re-detection, and the copy lands selected (addShapes selects).
+    dispatch({ type: "addShapes", shapes: placeElement(el, pt, newShapeId) });
+    dispatch({ type: "setTool", tool: "select" });
+  };
   // When the last board copy happened — the paste handler's tie-breaker for the
   // async-clipboard race (see onPaste).
   const lastCopyAt = useRef(-Infinity);
@@ -1324,6 +1377,8 @@ export function DrawEditor({
       onCancel={onCancel}
       onAdd={onSave ? save : undefined}
       extra={toolbarExtra}
+      libraryOpen={library ? libOpen : null}
+      onToggleLibrary={toggleLibrary}
     />
   );
 
@@ -1338,6 +1393,11 @@ export function DrawEditor({
       onPointerDownCapture={claimFocus}
       className="flex h-full min-h-0 flex-col outline-none"
     >
+      {/* Canvas row: the stage area + (opt-in) the library panel on its right.
+          The toolbar below spans BOTH — the panel reads as part of the board.
+          min-w-0 on the stage: a flex-row canvas otherwise floors shrinking at
+          the Konva canvas's last pixel width (the round-43 harness lesson). */}
+      <div className="flex min-h-0 flex-1">
       <div
         ref={areaRef}
         onPointerMove={(e) => {
@@ -1348,7 +1408,7 @@ export function DrawEditor({
         }}
         onDragOver={(e) => e.preventDefault()}
         onDrop={onDrop}
-        className="relative min-h-0 flex-1 overflow-hidden bg-ink-900"
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-ink-900"
       >
         {onToggleExpand && (
           <button
@@ -1386,6 +1446,7 @@ export function DrawEditor({
               renderAll={renderAll}
               camBusyRef={camBusyRef}
               newId={newShapeId}
+              onMoveGesture={library ? setBoardDrag : undefined}
             />
             {session && (
               <textarea
@@ -1501,6 +1562,17 @@ export function DrawEditor({
             )}
           </>
         )}
+      </div>
+      {library && libOpen && (
+        <LibraryPanel
+          entries={library.entries}
+          onChange={library.onChange}
+          boardDrag={boardDrag !== null}
+          onDropFromBoard={dropToLibrary}
+          onPlace={placeFromLibrary}
+          newId={newShapeId}
+        />
+      )}
       </div>
 
       {toolbar}
