@@ -194,16 +194,16 @@ export function isLibraryFileName(name: string): boolean {
   return name.toLowerCase().endsWith(LIBRARY_FILE_EXT);
 }
 
-/** Merge an imported library into the existing one: an incoming entry whose id
- *  matches one already present REPLACES it in place (an update — ids are UUIDs,
- *  so a collision means "same item, newer copy"); a new id is appended. The
- *  existing order is preserved. */
+/** Merge an imported library into the existing one, FAITHFUL to the bundle's
+ *  layout: the incoming order + separators are authoritative for everything the
+ *  bundle carries, so a download → upload restores positions AND groups verbatim
+ *  (that's the point of storing order + separators in the file). An overlapping
+ *  id (UUIDs — a collision means "same item, newer copy") takes the incoming
+ *  copy at its incoming position. Any purely-local entry the bundle doesn't
+ *  include is kept — appended after, in its existing relative order — so upload
+ *  is a merge, never a lossy replace. */
 export function mergeLibrary(existing: LibraryEntry[], incoming: LibraryEntry[]): LibraryEntry[] {
-  const result = existing.slice();
-  for (const inc of incoming) {
-    const i = result.findIndex((e) => e.id === inc.id);
-    if (i >= 0) result[i] = inc;
-    else result.push(inc);
-  }
-  return result;
+  const incomingIds = new Set(incoming.map((e) => e.id));
+  const localOnly = existing.filter((e) => !incomingIds.has(e.id));
+  return [...incoming, ...localOnly];
 }

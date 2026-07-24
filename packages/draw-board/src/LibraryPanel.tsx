@@ -108,8 +108,9 @@ export function LibraryPanel({
     URL.revokeObjectURL(url);
   };
 
-  // Upload a bundle → MERGE into the current library (matching ids update in
-  // place, new ids append). Same code path a window/board file-drop uses.
+  // Upload a bundle → MERGE into the current library, faithful to the file's
+  // positions + groups; local-only items are kept (see mergeLibrary). Same code
+  // path a window/board file-drop uses.
   const importFile = async (file: File) => {
     if (!isLibraryFileName(file.name)) return onNotify?.("Not a library file");
     const parsed = parseLibraryFile(await file.text());

@@ -196,12 +196,32 @@ describe("library bundle (serialize / parse / merge)", () => {
     expect(sanitizeEntries("nope")).toEqual([]);
   });
 
-  it("mergeLibrary appends new ids and replaces matching ones in place (update), preserving order", () => {
-    const existing = [el("a"), sep("s"), el("b")];
-    const updatedB: LibraryEntry = { kind: "element", id: "b", shapes: [rect("s-b", { width: 99 })], width: 99, height: 30 };
-    const merged = mergeLibrary(existing, [updatedB, el("c")]);
-    expect(merged.map((e) => e.id)).toEqual(["a", "s", "b", "c"]); // order kept, c appended
-    expect((merged[2] as LibraryElement).width).toBe(99); // b replaced with the newer copy
+  it("mergeLibrary reproduces the incoming bundle's positions AND groups (a faithful restore)", () => {
+    // A downloaded backup with two labeled groups.
+    const bundle = [sep("g1", "Icons"), el("a"), el("b"), sep("g2", "Arrows"), el("c")];
+    // Locally the arrangement has drifted — reordered, and one extra local-only
+    // element added since the backup was taken.
+    const local = [el("c"), el("a"), el("b"), el("z")];
+    const merged = mergeLibrary(local, bundle);
+    // The bundle's layout is restored verbatim (order + separators); the purely
+    // local element rides along, appended after (upload never drops local work).
+    expect(merged.map((e) => e.id)).toEqual(["g1", "a", "b", "g2", "c", "z"]);
+  });
+
+  it("mergeLibrary takes the incoming (newer) copy of an overlapping element, at its bundle position", () => {
+    const local = [el("a"), el("b")];
+    const updatedB: LibraryElement = { kind: "element", id: "b", shapes: [rect("s-b", { width: 99 })], width: 99, height: 30 };
+    const merged = mergeLibrary(local, [updatedB, el("a")]); // bundle order: b then a
+    expect(merged.map((e) => e.id)).toEqual(["b", "a"]); // the bundle's order is authoritative
+    expect((merged[0] as LibraryElement).width).toBe(99); // newer copy wins
+  });
+
+  it("mergeLibrary lands a disjoint bundle as a coherent block, keeping local groups intact", () => {
+    const local = [el("x"), sep("sx", "Mine"), el("y")];
+    const bundle = [el("p"), sep("sp", "Theirs"), el("q")];
+    const merged = mergeLibrary(local, bundle);
+    // The imported group first (faithful to its file), then the untouched local group.
+    expect(merged.map((e) => e.id)).toEqual(["p", "sp", "q", "x", "sx", "y"]);
   });
 
   it("isLibraryFileName matches the extension case-insensitively", () => {
