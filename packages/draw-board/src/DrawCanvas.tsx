@@ -48,6 +48,7 @@ import {
   type Viewport,
   type ViewportPolicy,
 } from "./viewport.ts";
+import { snapCenterlines, type SnapGuide } from "./snapGuides.ts";
 
 /** Shapes whose scale can be baked into geometry (the Transformer attaches to a
  *  lone one of these). Lines/pen strokes are move-only in v1. */
@@ -56,6 +57,12 @@ const RESIZABLE = new Set(["rect", "ellipse", "diamond", "text", "image"]);
  *  through (members' own nodes never get handles). Reserved — never a shape id. */
 const UNIT_PROXY_ID = "__unit_proxy__";
 const SELECT_COLOR = "#8b5cf6";
+/** Alignment guide lines — a distinct pink, apart from the violet selection
+ *  chrome, so a snap reads as its own thing. */
+const SNAP_COLOR = "#ec4899";
+/** Screen-px pull radius for centerline snapping — divided by the zoom so the
+ *  pull feels the same at any scale. Small = "gentle". */
+const SNAP_PX = 6;
 /** The Transformer's full handle set — every shape but text. Text gets ONLY the
  *  horizontal pair: the side handles resize the WRAP BOX (lines reflow live,
  *  glyphs unscaled, the block grows vertically); type size lives in the size
@@ -205,8 +212,22 @@ export function DrawCanvas({
   const selected = new Set(selectedIds);
   const [marquee, setMarquee] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
+  // Live centerline alignment guides (drawn while a drag/resize snaps); empty
+  // when nothing is aligned. Transient view state — never persisted.
+  const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([]);
   const marqueeStart = useRef<{ x: number; y: number } | null>(null);
-  const moveRef = useRef<{ last: { x: number; y: number }; downAt: { x: number; y: number }; ids: string[] } | null>(null);
+  // `origin`/`targets` are captured once at press: the moving cluster's start
+  // bounds and every OTHER unit's box (snap candidates, frozen for the drag).
+  // `applied` is the snap-adjusted cumulative delta already dispatched, so each
+  // move sends only the increment.
+  const moveRef = useRef<{
+    last: { x: number; y: number };
+    downAt: { x: number; y: number };
+    ids: string[];
+    origin: Box;
+    targets: Box[];
+    applied: { dx: number; dy: number };
+  } | null>(null);
   const erasing = useRef(false);
   // Double-click detection is OURS, not Konva's. Konva synthesizes dblclick
   // from ANY two down/up pairs inside its 400ms window — movement-blind
@@ -399,6 +420,7 @@ export function DrawCanvas({
     if (moveRef.current) {
       dispatch({ type: "endGesture" });
       moveRef.current = null;
+      setSnapGuides([]);
       onMoveGesture?.(null);
     }
     marqueeStart.current = null;
@@ -693,6 +715,7 @@ export function DrawCanvas({
       }
       dispatch({ type: "endGesture" });
       moveRef.current = null;
+      setSnapGuides([]);
       onMoveGesture?.(null);
       return;
     }
@@ -789,11 +812,32 @@ export function DrawCanvas({
       // Followers ride by INCLUSION: the size-gated attach cluster ("largest drags
       // smallest") plus every dragged container's contents (moveClusterIds folds in
       // containment). The reducer freezes anything left out of this set.
-      moveRef.current = { last: p, downAt: p, ids: moveClusterIds(shapes, ids) };
+      const clusterIds = moveClusterIds(shapes, ids);
+      const clusterSet = new Set(clusterIds);
+      // Snap candidates: the box of every OTHER unit (a whole group counts once,
+      // as its unit bounds; loose shapes each count). Captured now — they're
+      // frozen for the drag — so the move loop just measures against them.
+      const seenUnit = new Set<string>();
+      const targets: Box[] = [];
+      for (const sh of shapes) {
+        if (clusterSet.has(sh.id)) continue;
+        const key = units.rootOf(sh.id);
+        if (key && units.membersOf(key).size > 1) {
+          if (seenUnit.has(key)) continue;
+          seenUnit.add(key);
+          const ub = units.boundsOf(key);
+          if (ub) targets.push(ub);
+        } else {
+          targets.push(boundingBox(sh));
+        }
+      }
+      const origin = contentBounds(shapes.filter((sh) => clusterSet.has(sh.id))) ?? { x: p.x, y: p.y, width: 0, height: 0 };
+      moveRef.current = { last: p, downAt: p, ids: clusterIds, origin, targets, applied: { dx: 0, dy: 0 } };
       onMoveGesture?.({
         ids: moveRef.current.ids,
         cancel: () => {
           moveRef.current = null;
+          setSnapGuides([]);
           dispatch({ type: "cancelGesture" });
           onMoveGesture?.(null);
         },
@@ -859,13 +903,25 @@ export function DrawCanvas({
       return;
     }
     if (moveRef.current) {
+      const mv = moveRef.current;
       const p = logicalPointer(e);
-      const dx = p.x - moveRef.current.last.x;
-      const dy = p.y - moveRef.current.last.y;
+      // Where the cluster WANTS to be (raw pointer delta from the press), then
+      // gently pull its centerlines onto any nearby unit's centerline. The snap
+      // is sticky: the box rides the target line until the pointer drags past the
+      // (screen-true) threshold. Dispatch only the increment past what's applied.
+      const rawDx = p.x - mv.downAt.x;
+      const rawDy = p.y - mv.downAt.y;
+      const snap = snapCenterlines({ ...mv.origin, x: mv.origin.x + rawDx, y: mv.origin.y + rawDy }, mv.targets, sPx(SNAP_PX));
+      const wantDx = rawDx + snap.dx;
+      const wantDy = rawDy + snap.dy;
+      const dx = wantDx - mv.applied.dx;
+      const dy = wantDy - mv.applied.dy;
       if (dx || dy) {
-        dispatch({ type: "translateShapes", ids: moveRef.current.ids, dx, dy });
-        moveRef.current.last = p;
+        dispatch({ type: "translateShapes", ids: mv.ids, dx, dy });
+        mv.applied = { dx: wantDx, dy: wantDy };
       }
+      mv.last = p;
+      setSnapGuides(snap.guides);
       return;
     }
     if (marqueeStart.current) {
@@ -1718,6 +1774,18 @@ export function DrawCanvas({
             listening={false}
           />
         )}
+
+        {/* Centerline alignment guides — a thin screen-constant line through the
+            shapes whose centerlines the drag/resize has snapped onto. */}
+        {snapGuides.map((g, i) => (
+          <Line
+            key={`snap-${i}`}
+            points={g.axis === "x" ? [g.pos, g.from, g.pos, g.to] : [g.from, g.pos, g.to, g.pos]}
+            stroke={SNAP_COLOR}
+            strokeWidth={sPx(1)}
+            listening={false}
+          />
+        ))}
 
         {/* Synthetic proxy rect for whole-group scaling: the Transformer attaches
             HERE (members' own nodes never get handles). Invisible + non-listening
