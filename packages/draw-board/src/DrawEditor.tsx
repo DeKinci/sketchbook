@@ -142,6 +142,11 @@ const TEXT_BOX_INSET = 6;
 /** Below this cap the sliver is no useful column — let the text overflow
  *  instead of wrapping into a 2-char ribbon ("try its best", not "at any cost"). */
 const MIN_TEXT_WRAP = 30;
+/** Empty/short click-target floor (screen px) for a horizontally-pinned field's
+ *  box — the counterpart of the `minWidth: 2rem` a left-anchored field carries.
+ *  A pinned field sets its width explicitly (box must equal the pivot), so it
+ *  can't lean on the CSS min; this floors that explicit width instead. */
+const MIN_FIELD_PX = 32;
 
 /** An in-progress text edit. `kind` selects the target: a NEW standalone text
  *  (nothing exists in the model until commit — so a stray mouse-up can't tear it
@@ -701,24 +706,38 @@ export function DrawEditor({
     const ta = taRef.current;
     const cur = sessionRef.current;
     if (!ta || !cur || !view) return;
-    let w = (cur.maxWidth ?? 0) * view.scale;
+    const model = textBlockSize(value, cur.fontSize, cur.maxWidth);
+    // The box width AND the width the box is PIVOTED on must be one number, or a
+    // centered/pinned field's box-center drifts off the anchor and the text
+    // wobbles horizontally as each glyph is typed (the box grew off the browser's
+    // scrollWidth while the pivot used the model width — and scrollWidth is
+    // inflated to the 2rem min for short text, so a fresh caption opened ~8px
+    // off-centre and crawled inward as it filled).
+    let pivotW = (cur.maxWidth ?? model.width) * view.scale;
     if (cur.maxWidth === undefined) {
-      ta.style.width = "0px";
-      w = ta.scrollWidth + 2; // + caret room at the line end
-      ta.style.width = `${w}px`;
+      if (cur.gx !== 0) {
+        // Uncapped + horizontally pinned (a centered caption, or a bond that
+        // grows sideways): take the box straight from the MODEL — canvas-exact
+        // and the SAME width the commit lays the block at — floored to the empty-
+        // field click target, so it stays symmetric about the pinned point. Not
+        // the browser scrollWidth: its per-glyph drift from the canvas (and the
+        // min-width inflation) is exactly what jittered the field.
+        pivotW = Math.max(model.width * view.scale, MIN_FIELD_PX);
+        ta.style.width = `${pivotW}px`;
+      } else {
+        // Uncapped + left-anchored: grows rightward off a fixed left, so the box
+        // width never enters the pivot (gx = 0) — use the browser's own measure
+        // (+ caret room) so the end caret is never clipped.
+        ta.style.width = "0px";
+        ta.style.width = `${ta.scrollWidth + 2}px`;
+      }
     }
     ta.style.height = "0px";
-    const h = ta.scrollHeight;
-    ta.style.height = `${h}px`;
-    // Place the box off its pinned anchor using the MODEL block metrics — the
-    // exact width/height the committed shape renders to — NOT the measured box.
-    // The browser's scrollHeight/scrollWidth carry a sub-pixel of extra box, so a
-    // CENTERED field (gx/gy = 0.5) pinned on them lands ~0.5px off the canvas and
-    // rounds to a visible 1px jump between editing and shown. The measured box
-    // still drives the field's SIZE (never clips a descender); only the anchor
-    // pivot switches to model space. Top-left growth (gx/gy = 0) is unaffected.
-    const model = textBlockSize(value, cur.fontSize, cur.maxWidth);
-    const pivotW = (cur.maxWidth ?? model.width) * view.scale;
+    ta.style.height = `${ta.scrollHeight}px`;
+    // Pivot off the pinned anchor. Horizontal now uses the SAME width the box
+    // does, so box-center == anchor == the committed shape's center — no typing
+    // wobble and no commit jump. Vertical keeps the model height (its parity is
+    // byte-exact and proven). gx/gy = 0 reduces to plain left/top placement.
     const pivotH = model.height * view.scale;
     ta.style.left = `${cur.anchorX * view.scale + view.x - cur.gx * pivotW}px`;
     ta.style.top = `${cur.anchorY * view.scale + view.y - cur.gy * pivotH}px`;
@@ -1608,12 +1627,14 @@ export function DrawEditor({
                     fontFamily: BOARD_FONT_STACK,
                     // Capped: the field IS the wrap box — it wraps at the parent's
                     // edge (or the text's own box) instead of growing out of it.
-                    // Uncapped: no width here — the WYSIWYG effect grows it with
-                    // the longest line (minWidth just keeps an empty field's caret
-                    // clickable).
+                    // Uncapped: no width here — the WYSIWYG effect grows it with the
+                    // longest line. A LEFT-anchored field carries a min-width so an
+                    // empty field's caret stays clickable; a PINNED field must not
+                    // (its box is set explicitly to equal the pivot — a CSS min
+                    // would re-inflate it off-centre), so it floors in the effect.
                     ...(session.maxWidth !== undefined
                       ? { width: session.maxWidth * view.scale, whiteSpace: "pre-wrap" as const, overflowWrap: "break-word" as const }
-                      : { minWidth: "2rem" }),
+                      : session.gx === 0 && { minWidth: "2rem" }),
                   };
                 })()}
               />
