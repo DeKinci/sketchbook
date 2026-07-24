@@ -8,7 +8,6 @@ import { Minimap } from "./Minimap.tsx";
 import type { CropControl } from "./CropLayer.tsx";
 import { useDrawing, newShapeId } from "./useDrawing.ts";
 import {
-  boundingBox,
   canRedo,
   canUndo,
   cloneShape,
@@ -134,14 +133,6 @@ export interface BoardHandle {
   getDoc(): DrawDoc;
 }
 
-/** Area shapes a text edit wraps INSIDE (its "page"). Deliberately narrower
- *  than the model's attach targets: another text is never a wrap boundary. */
-const WRAP_CONTAINERS = new Set(["rect", "ellipse", "image"]);
-/** Breathing room between wrapped text and its container's right edge. */
-const TEXT_BOX_INSET = 6;
-/** Below this cap the sliver is no useful column — let the text overflow
- *  instead of wrapping into a 2-char ribbon ("try its best", not "at any cost"). */
-const MIN_TEXT_WRAP = 30;
 /** Empty/short click-target floor (screen px) for a horizontally-pinned field's
  *  box — the counterpart of the `minWidth: 2rem` a left-anchored field carries.
  *  A pinned field sets its width explicitly (box must equal the pivot), so it
@@ -524,24 +515,6 @@ export function DrawEditor({
   // inert the moment focus leaves it (composer Enter stays the composer's).
   const cropControlRef = useRef<CropControl | null>(null);
 
-  /** Wrap cap for a text anchored at (x, y): the room to the INNERMOST
-   *  containing shape's right edge (minus a small inset). Undefined when
-   *  nothing contains the point or the sliver left is too narrow to be a
-   *  useful column ("try its best" — overflow beats a 2-char ribbon). */
-  const containKap = useCallback((x: number, y: number): number | undefined => {
-    let cap: number | undefined;
-    let area = Infinity;
-    for (const sh of stateRef.current.shapes) {
-      if (!WRAP_CONTAINERS.has(sh.type)) continue;
-      const b = boundingBox(sh);
-      if (x < b.x || y < b.y || x > b.x + b.width || y > b.y + b.height) continue;
-      if (b.width * b.height >= area) continue;
-      area = b.width * b.height;
-      cap = b.x + b.width - x - TEXT_BOX_INSET;
-    }
-    return cap !== undefined && cap >= MIN_TEXT_WRAP ? cap : undefined;
-  }, []);
-
   const startText = useCallback(
     (x: number, y: number, captionOf?: string) => {
       const s = stateRef.current;
@@ -558,9 +531,14 @@ export function DrawEditor({
         setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, fill: s.fill, maxWidth: undefined, gx: 0.5, gy: 0.5, anchorX: x, anchorY: y, align: "center", captionOf });
         return;
       }
-      setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, fill: s.fill, maxWidth: containKap(x, y), gx: 0, gy: 0, anchorX: x, anchorY: y });
+      // Text placed with the text tool ALWAYS grows as typed — even dropped inside
+      // a shape. Auto-wrapping to the container was wrong (a stroke eats the box; a
+      // diamond/ellipse has a smaller, non-rectangular interior) and is what made a
+      // label wrap the instant you typed. Wrapping is now an explicit choice: drag
+      // the text's side handle to fix a width (that stamps `width` → it wraps).
+      setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, fill: s.fill, maxWidth: undefined, gx: 0, gy: 0, anchorX: x, anchorY: y });
     },
-    [containKap]
+    []
   );
   const startEditText = useCallback(
     (id: string) => {
@@ -574,7 +552,8 @@ export function DrawEditor({
       const centered = sh.align === "center";
       const { gx, gy } = centered ? { gx: 0.5, gy: 0.5 } : growthOrigin(sh.attach);
       const b = textBlockSize(sh.text, sh.fontSize, sh.width);
-      // The shape's own box wins; an unboxed text inside a container caps at it.
+      // Only a text with its OWN stamped width wraps (the user dragged it to a
+      // fixed column); every other text re-grows freely, matching how it was typed.
       setSession({
         kind: "edit-text",
         id,
@@ -583,7 +562,7 @@ export function DrawEditor({
         fontSize: sh.fontSize,
         color: sh.stroke,
         fill: sh.fill ?? null,
-        maxWidth: sh.width ?? containKap(sh.x, sh.y),
+        maxWidth: sh.width,
         gx,
         gy,
         anchorX: sh.x + gx * b.width,
@@ -591,7 +570,7 @@ export function DrawEditor({
         ...(centered && { align: "center" as const }),
       });
     },
-    [containKap]
+    []
   );
   const commitEdit = useCallback(() => {
     const cur = sessionRef.current;

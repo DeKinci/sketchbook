@@ -264,8 +264,8 @@ test("z law: a big filled diamond drawn LAST sinks beneath a small filled badge 
   expect((await stored(page))[0].doc.shapes.map((sh) => (sh as { id: string }).id)).toEqual(["badge", "dia"]);
 });
 
-test("typography: text typed in a shape wraps at its edge (stored as a box), center-anchors, and rides the parent's resize", async ({ page }) => {
-  await openSeeded(page, [rect("r1", 100, 100, 360, 220)]); // right edge 460, bottom 320
+test("typography: text typed in a shape GROWS as typed (no auto-wrap); kept inside it center-anchors and rides the parent's resize", async ({ page }) => {
+  await openSeeded(page, [rect("r1", 100, 100, 360, 220)]); // right edge 460, bottom 320, center (280,210)
   const box = (await page.locator(".konvajs-content").boundingBox())!;
   const toScreen = async (pt: { x: number; y: number }) => {
     const cam = await page.evaluate(() => {
@@ -275,24 +275,25 @@ test("typography: text typed in a shape wraps at its edge (stored as a box), cen
     return { x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale };
   };
 
-  // Text tool → click well inside the rect (clear of every edge) → type a
-  // sentence far wider than the room to the rect's right edge.
+  // Text tool → click well inside the rect → type a short label. It must GROW as
+  // typed, NOT auto-wrap to the container (a stroke eats the box; a diamond or
+  // ellipse's interior is smaller and non-rectangular). Wrapping is opt-in via the
+  // side handle (covered by the next test). Kept fully inside, it center-anchors.
   await page.getByRole("button", { name: "Text (3)" }).click();
   const at = await toScreen({ x: 150, y: 160 });
   await page.mouse.click(at.x, at.y);
-  const source = "the quick brown fox jumps over the lazy dog near the fence";
-  await page.keyboard.type(source);
+  await page.keyboard.type("brown fox"); // short → stays inside the rect
   await page.keyboard.press("Enter");
   await expect.poll(async () => (await stored(page))[0]?.doc.shapes.length ?? 0).toBe(2);
   type StoredText = { type: string; x: number; y: number; text: string; width?: number; attach?: { id: string; ax: number; ay: number } };
   const before = ((await stored(page))[0].doc.shapes as StoredText[]).find((sh) => sh.type === "text")!;
-  expect(before.text).toBe(source); // the SOURCE stays unwrapped — lines derive
-  expect(before.width).toBeCloseTo(460 - 150 - 6, 0); // wrap box = room to the parent's right edge (minus inset)
-  expect(before.attach).toMatchObject({ id: "r1", ax: 0.5, ay: 0.5 }); // placed mid-shape → center bond
+  expect(before.text).toBe("brown fox");
+  expect(before.width, "text in a shape grows — no auto-wrap box").toBeUndefined();
+  expect(before.attach).toMatchObject({ id: "r1", ax: 0.5, ay: 0.5 }); // fully inside → center bond
 
-  // A selected text offers ONLY the horizontal side handles — they resize the
-  // wrap box; type size lives in the size control, so corners/verticals are gone.
-  const onText = await toScreen({ x: 160, y: 170 });
+  // A selected text offers ONLY the horizontal side handles — they set a wrap
+  // column; type size lives in the size control, so corners/verticals are gone.
+  const onText = await toScreen({ x: 160, y: 168 });
   await page.mouse.click(onText.x, onText.y);
   await expect
     .poll(() =>
@@ -303,9 +304,9 @@ test("typography: text typed in a shape wraps at its edge (stored as a box), cen
     )
     .toEqual(["middle-left", "middle-right"]);
 
-  // Stretch the rect 100px wider by its middle-right anchor: the caption keeps
-  // its offset from the parent's CENTER → it slides +50 with it.
-  const inRect = await toScreen({ x: 120, y: 300 }); // inside the rect, clear of the text block
+  // Stretch the rect 100px wider by its middle-right anchor: the label keeps its
+  // offset from the parent's CENTER → it slides +50 with it.
+  const inRect = await toScreen({ x: 130, y: 300 }); // inside the rect, clear of the text
   await page.mouse.click(inRect.x, inRect.y);
   const handle = await toScreen({ x: 460, y: 210 });
   await page.mouse.move(handle.x, handle.y);
@@ -317,14 +318,20 @@ test("typography: text typed in a shape wraps at its edge (stored as a box), cen
   await expect
     .poll(async () => (((await stored(page))[0].doc.shapes as StoredText[]).find((sh) => sh.type === "text")!.x - before.x))
     .toBeCloseTo(50, 0);
+});
 
-  // The SVG export carries the wrap: one <text> per rendered line.
+test("typography: a text with a stored width wraps (opt-in), and the SVG export carries one <text> per line", async ({ page }) => {
+  // Wrapping is now an explicit column, not automatic. A text WITH its own width
+  // (the user dragged the side handle to fix one) wraps its source into lines, and
+  // the SVG export renders one <text> per rendered line.
+  const source = "the quick brown fox jumps over the lazy dog near the fence";
+  await openSeeded(page, [{ id: "tb", type: "text", stroke: "#e5484d", strokeWidth: 3, x: 80, y: 100, text: source, fontSize: 18, width: 180 }]);
   await page.getByRole("button", { name: "More export options" }).click();
   const downloadP = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download as SVG" }).click();
   const svg = fs.readFileSync((await (await downloadP).path())!, "utf8");
   const lines = [...svg.matchAll(/<text [^>]*>([^<]*)<\/text>/g)].map((m) => m[1]);
-  expect(lines.length).toBeGreaterThan(1); // it wrapped
+  expect(lines.length).toBeGreaterThan(1); // it wrapped into the box
   expect(lines.join(" ").replace(/\s+/g, " ")).toContain("lazy dog"); // …into the source's words
 });
 
