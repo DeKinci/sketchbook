@@ -10,6 +10,7 @@
  */
 
 import { textBlockSize } from "./textMetrics.ts";
+import { SVG_NONE } from "./svgRecolor.ts";
 
 export const TOOLS = ["select", "pen", "rect", "ellipse", "diamond", "line", "arrow", "darrow", "text", "eraser"] as const;
 export type Tool = (typeof TOOLS)[number];
@@ -166,6 +167,23 @@ export interface ImageShape extends BaseShape {
   /** Non-destructive crop: the SOURCE-pixel region shown in the box. Absent =
    *  full image. Reversible (clear it to uncrop). */
   crop?: { x: number; y: number; width: number; height: number };
+  /** For `image/svg+xml` only: the SVG's own colors as a two-channel palette so
+   *  it recolors like a vector shape (see {@link paintStroke}/{@link paintFill}).
+   *  Populated at add-time. Non-destructive — `dataBase64` keeps the untouched
+   *  source; the render/export layer bakes the maps ({@link recolorSvg}). */
+  svg?: SvgPaint;
+}
+/** An SVG image's recoloring state. `fills`/`strokes` are the distinct ORIGINAL
+ *  colors the source uses per paint channel (normalized `#rrggbb`, encounter
+ *  order) — the image's palette. `fillMap`/`strokeMap` remap an original color
+ *  to a replacement (a `#rrggbb`, or {@link SVG_NONE} for a fill); an absent key
+ *  = unchanged. The CURRENT color of an original `o` is `map[o] ?? o`; clearing a
+ *  map restores the source. */
+export interface SvgPaint {
+  fills: string[];
+  strokes: string[];
+  fillMap?: Record<string, string>;
+  strokeMap?: Record<string, string>;
 }
 export type Shape = BoxShape | SegmentShape | FreehandShape | TextShape | ImageShape;
 
@@ -547,6 +565,100 @@ export function applyFill(sh: Shape, fill: string | null): Shape {
     return next;
   }
   return { ...sh, fill };
+}
+
+// ── A shape's paint channels (uniform over local shapes AND SVG images) ───────
+// An SVG image's own fill/stroke colors are its palette, so it recolors exactly
+// like a vector shape. `shape*` read a shape's CURRENT channel colors; `paint*`
+// write them. Both branch local-vs-SVG here, so the selection derivations and
+// the color reducer cases stay uniform and images stop being a special case.
+
+/** A live SVG image (has a discovered palette). */
+function svgImage(sh: Shape): (ImageShape & { svg: SvgPaint }) | null {
+  return sh.type === "image" && sh.svg ? (sh as ImageShape & { svg: SvgPaint }) : null;
+}
+/** The CURRENT value of an SVG palette entry (original mapped through its map);
+ *  a fill's {@link SVG_NONE} surfaces as null (the unfilled class). */
+const svgCur = (map: Record<string, string> | undefined, orig: string): string => map?.[orig] ?? orig;
+
+/** A shape's current STROKE colors: a local shape's single stroke, an SVG
+ *  image's stroke palette, or none (a raster image / a non-SVG blob). Powers
+ *  {@link selectionStrokes} and the stroke reducer cases. */
+export function shapeStrokes(sh: Shape): string[] {
+  const im = svgImage(sh);
+  if (im) return im.svg.strokes.map((o) => svgCur(im.svg.strokeMap, o));
+  return sh.type === "image" ? [] : [sh.stroke];
+}
+/** A shape's current FILL colors (null = none): a fillable shape's single fill,
+ *  an SVG image's fill palette, or none (segments / raster images). */
+export function shapeFills(sh: Shape): (string | null)[] {
+  const im = svgImage(sh);
+  if (im) return im.svg.fills.map((o) => { const v = svgCur(im.svg.fillMap, o); return v === SVG_NONE ? null : v; });
+  if (isFillable(sh)) return [sh.fill ?? null];
+  return [];
+}
+
+/** Rewrite the map entry for original `o` toward `to`: stripping the entry when
+ *  `to` returns to the original (keeps docs slim), else recording it. */
+function remap(map: Record<string, string>, o: string, to: string): void {
+  if (to === o) delete map[o];
+  else map[o] = to;
+}
+/** With `next` a mutated clone of the shape's channel map, produce the updated
+ *  SvgPaint (dropping an emptied map field) or the same image when unchanged. */
+function withSvgMap(sh: ImageShape & { svg: SvgPaint }, key: "fillMap" | "strokeMap", next: Record<string, string>, changed: boolean): Shape {
+  if (!changed) return sh;
+  const svg: SvgPaint = { ...sh.svg };
+  if (Object.keys(next).length) svg[key] = next;
+  else delete svg[key];
+  return { ...sh, svg };
+}
+
+/** Recolor a shape's STROKE channel. `pick(cur)` returns the replacement for a
+ *  current stroke color, or undefined to leave it. A local shape has one stroke;
+ *  an SVG image remaps each palette entry (keyed by ORIGINAL, matched on
+ *  CURRENT). Returns the SAME reference when nothing changes (no-op guards). */
+export function paintStroke(sh: Shape, pick: (cur: string) => string | undefined): Shape {
+  const im = svgImage(sh);
+  if (im) {
+    if (!im.svg.strokes.length) return sh;
+    const next = { ...(im.svg.strokeMap ?? {}) };
+    let changed = false;
+    for (const o of im.svg.strokes) {
+      const cur = svgCur(im.svg.strokeMap, o);
+      const to = pick(cur);
+      if (to === undefined || to === cur) continue;
+      remap(next, o, to);
+      changed = true;
+    }
+    return withSvgMap(im, "strokeMap", next, changed);
+  }
+  if (sh.type === "image") return sh; // raster: no paintable stroke
+  const to = pick(sh.stroke);
+  return to === undefined || to === sh.stroke ? sh : { ...sh, stroke: to };
+}
+/** Fill counterpart of {@link paintStroke}. `pick(cur)` sees/returns null = none;
+ *  an SVG image stores {@link SVG_NONE} for a none-mapped fill. */
+export function paintFill(sh: Shape, pick: (cur: string | null) => string | null | undefined): Shape {
+  const im = svgImage(sh);
+  if (im) {
+    if (!im.svg.fills.length) return sh;
+    const next = { ...(im.svg.fillMap ?? {}) };
+    let changed = false;
+    for (const o of im.svg.fills) {
+      const stored = svgCur(im.svg.fillMap, o);
+      const cur = stored === SVG_NONE ? null : stored;
+      const to = pick(cur);
+      if (to === undefined || to === cur) continue;
+      remap(next, o, to === null ? SVG_NONE : to);
+      changed = true;
+    }
+    return withSvgMap(im, "fillMap", next, changed);
+  }
+  if (!isFillable(sh)) return sh;
+  const cur = sh.fill ?? null;
+  const to = pick(cur);
+  return to === undefined || to === cur ? sh : applyFill(sh, to);
 }
 
 /** The topmost fill color under a point — the backdrop the adaptive ink
@@ -1459,28 +1571,25 @@ export function unitSizeStep(shapes: Shape[], ids: string[]): number {
 }
 
 /** The color DECLARATION the stroke pill shows for a selection: the distinct
- *  stroke values present on the selected shapes, in encounter order. Images are
- *  excluded — their stroke field never paints. Empty selection (or image-only)
- *  → empty; the editor then falls back to the ambient pen ink. */
+ *  stroke values present on the selected shapes, in encounter order. A vector
+ *  shape contributes its stroke; an SVG image its whole stroke palette; a raster
+ *  image nothing. Empty selection (or paintless) → empty; the editor then falls
+ *  back to the ambient pen ink. */
 export function selectionStrokes(shapes: Shape[], selectedIds: string[]): string[] {
   const sel = new Set(selectedIds);
   const out: string[] = [];
-  for (const sh of shapes) if (sel.has(sh.id) && sh.type !== "image" && !out.includes(sh.stroke)) out.push(sh.stroke);
+  for (const sh of shapes) if (sel.has(sh.id)) for (const c of shapeStrokes(sh)) if (!out.includes(c)) out.push(c);
   return out;
 }
 
 /** Fill counterpart of {@link selectionStrokes}: the distinct fills across the
- *  selection's FILLABLE members (null = none — the unfilled are a class too,
- *  mergeable like any other). Segments/images carry no interior and contribute
- *  nothing; a selection with no fillable member yields []. */
+ *  selection (null = none — the unfilled are a class too, mergeable like any
+ *  other). A fillable shape contributes its fill; an SVG image its fill palette;
+ *  segments/raster images nothing. A selection with no fillable member → []. */
 export function selectionFills(shapes: Shape[], selectedIds: string[]): (string | null)[] {
   const sel = new Set(selectedIds);
   const out: (string | null)[] = [];
-  for (const sh of shapes) {
-    if (!sel.has(sh.id) || !isFillable(sh)) continue;
-    const f = sh.fill ?? null;
-    if (!out.includes(f)) out.push(f);
-  }
+  for (const sh of shapes) if (sel.has(sh.id)) for (const f of shapeFills(sh)) if (!out.includes(f)) out.push(f);
   return out;
 }
 
@@ -2258,46 +2367,52 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
     }
     case "setColor": {
       // Mid-draw: live-recolor the in-progress draft (no history — the draw
-      // gesture will commit it). Otherwise recolor the selection (undoable).
+      // gesture will commit it). Otherwise recolor the selection (undoable). An
+      // SVG image sets ALL its stroke-palette entries to the color (see
+      // {@link paintStroke}); a vector shape its single stroke.
+      const set = (sh: Shape) => paintStroke(sh, () => a.color);
       if (s.draftId) {
-        return { ...s, color: a.color, shapes: mapShapes(s.shapes, new Set([s.draftId]), (sh) => ({ ...sh, stroke: a.color })) };
+        return { ...s, color: a.color, shapes: mapShapes(s.shapes, new Set([s.draftId]), set) };
       }
       if (s.selectedIds.length) {
-        return { ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), (sh) => ({ ...sh, stroke: a.color }))), color: a.color };
+        return { ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), set)), color: a.color };
       }
       return { ...s, color: a.color };
     }
     case "setFill": {
       // Mirrors setColor: live-refill a draft, else the selection (undoable),
-      // else just the pref. Segments/images carry no interior to fill; "none"
-      // drops the field (persisted docs stay slim) — see applyFill.
+      // else just the pref. Segments carry no interior; a raster image none;
+      // "none" strips a shape's fill / maps an SVG fill to none.
+      const set = (sh: Shape) => paintFill(sh, () => a.fill);
       if (s.draftId) {
-        return { ...s, fill: a.fill, shapes: mapShapes(s.shapes, new Set([s.draftId]), (sh) => applyFill(sh, a.fill)) };
+        return { ...s, fill: a.fill, shapes: mapShapes(s.shapes, new Set([s.draftId]), set) };
       }
       if (s.selectedIds.length) {
-        return { ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), (sh) => applyFill(sh, a.fill))), fill: a.fill };
+        return { ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), set)), fill: a.fill };
       }
       return { ...s, fill: a.fill };
     }
     case "recolor": {
-      // Drag-a-swatch-onto-another: restroke exactly the `from` class within
-      // the selection. Grouped members recolor like any member (color is an
-      // allowed group edit); images never match. No-ops return s untouched —
-      // no empty history entries.
+      // Drag-a-swatch-onto-another: recolor exactly the `from` stroke CLASS
+      // within the selection — a vector's stroke, or an SVG image's matching
+      // palette entries; other classes stay. Grouped members recolor like any
+      // member. No-ops return s untouched (no empty history entries).
       if (!s.selectedIds.length || a.from === a.to) return s;
       const sel = new Set(s.selectedIds);
-      const hit = (sh: Shape) => sel.has(sh.id) && sh.type !== "image" && sh.stroke.toLowerCase() === a.from.toLowerCase();
-      if (!s.shapes.some(hit)) return s;
-      return commit(s, s.shapes.map((sh) => (hit(sh) ? { ...sh, stroke: a.to } : sh)));
+      const from = a.from.toLowerCase();
+      const next = s.shapes.map((sh) => (sel.has(sh.id) ? paintStroke(sh, (cur) => (cur.toLowerCase() === from ? a.to : undefined)) : sh));
+      if (next.every((sh, i) => sh === s.shapes[i])) return s;
+      return commit(s, next);
     }
     case "refill": {
-      // Fill-class merge (null = the unfilled class). Same no-op guards.
+      // Fill-class merge (null = the unfilled class). Same no-op guards; an SVG
+      // image remaps its matching fill-palette entries.
       const from = a.from?.toLowerCase() ?? null;
       if (!s.selectedIds.length || from === (a.to?.toLowerCase() ?? null)) return s;
       const sel = new Set(s.selectedIds);
-      const hit = (sh: Shape) => sel.has(sh.id) && isFillable(sh) && (sh.fill?.toLowerCase() ?? null) === from;
-      if (!s.shapes.some(hit)) return s;
-      return commit(s, s.shapes.map((sh) => (hit(sh) ? applyFill(sh, a.to) : sh)));
+      const next = s.shapes.map((sh) => (sel.has(sh.id) ? paintFill(sh, (cur) => ((cur?.toLowerCase() ?? null) === from ? a.to : undefined)) : sh));
+      if (next.every((sh, i) => sh === s.shapes[i])) return s;
+      return commit(s, next);
     }
     case "setShade": {
       const isStroke = a.level === "stroke";
@@ -2339,19 +2454,20 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
             : { fillShades: { ...s.fillShades, [a.family]: shade as string } }),
         ...(follows ? (isStroke ? { color: shade as string } : { fill: shade }) : {}),
       };
-      // With a selection the retune reaches the drawing: every selected shape
-      // of this column at this level unifies onto the new shade (any rung —
-      // "replace the color in the line", not a single-class merge).
+      // With a selection the retune reaches the drawing: every selected shape's
+      // colors in this column at this level unify onto the new shade (any rung —
+      // "replace the color in the line", not a single-class merge). An SVG image
+      // repaints each palette entry in the column.
       if (s.selectedIds.length) {
         const sel = new Set(s.selectedIds);
-        const hit = (sh: Shape) =>
-          sel.has(sh.id) &&
-          (isStroke
-            ? sh.type !== "image" && inCol(sh.stroke) && sh.stroke.toLowerCase() !== shade
-            : isFillable(sh) && inCol(sh.fill ?? null) && (sh.fill?.toLowerCase() ?? null) !== shade);
-        if (s.shapes.some(hit)) {
-          return commit(base, s.shapes.map((sh) => (hit(sh) ? (isStroke ? { ...sh, stroke: shade as string } : applyFill(sh, shade)) : sh)));
-        }
+        const repaint = (sh: Shape): Shape => {
+          if (!sel.has(sh.id)) return sh;
+          return isStroke
+            ? paintStroke(sh, (cur) => (inCol(cur) && cur.toLowerCase() !== shade ? (shade as string) : undefined))
+            : paintFill(sh, (cur) => (inCol(cur) && (cur?.toLowerCase() ?? null) !== shade ? shade : undefined));
+        };
+        const next = s.shapes.map(repaint);
+        if (next.some((sh, i) => sh !== s.shapes[i])) return commit(base, next);
       }
       return laneChanged || follows ? base : s;
     }
