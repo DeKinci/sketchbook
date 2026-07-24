@@ -155,7 +155,14 @@ export function LibraryPanel({
     <aside
       ref={asideRef}
       aria-label="Library elements"
-      className={`relative z-20 flex w-64 shrink-0 flex-col overflow-y-auto border-l border-ink-600 bg-ink-900 ${
+      // Explicit width here + explicit grid columns + tile aspect below, via
+      // inline styles rather than the `w-64` / `grid-cols-3` / `aspect-square`
+      // utilities: those are unique to THIS file, so a host whose Tailwind build
+      // hasn't (re)scanned the package drops them and the panel collapses to one
+      // full-width column. Inline styles need no CSS generation — the layout is
+      // correct in any host, hot-reloaded or not.
+      style={{ width: "16rem" }}
+      className={`relative z-20 flex shrink-0 flex-col overflow-y-auto border-l border-ink-600 bg-ink-900 ${
         armed ? "bg-accent-600/5 ring-1 ring-inset ring-accent-500/70" : ""
       }`}
       onMouseEnter={
@@ -212,13 +219,14 @@ export function LibraryPanel({
       }}
     >
       <div className="px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-ink-500">Library</div>
-      <div className="grid grid-cols-3 content-start gap-2 p-2 pt-1">
+      <div data-testid="library-grid" className="grid content-start gap-2 p-2 pt-1" style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
         {items.map((item, i) =>
           "placeholder" in item ? (
             <div
               key={`slot-${i}`}
               aria-label="Insertion slot"
-              className="flex aspect-square items-center justify-center overflow-hidden rounded-md border-2 border-dashed border-accent-500/70 bg-accent-600/10 p-1"
+              className="flex items-center justify-center overflow-hidden rounded-md border-2 border-dashed border-accent-500/70 bg-accent-600/10 p-1"
+              style={{ aspectRatio: "1 / 1" }}
             >
               {item.placeholder && <img src={item.placeholder} alt="" className="h-full w-full object-contain opacity-70" />}
             </div>
@@ -271,7 +279,8 @@ export function LibraryPanel({
                 else entryEls.current.delete(e.id);
               }}
               aria-label="Library element"
-              className="group relative aspect-square cursor-grab touch-none select-none overflow-hidden rounded-md border border-ink-600 bg-ink-800/60 p-1 transition-colors hover:border-ink-400 active:cursor-grabbing"
+              className="group relative cursor-grab touch-none select-none overflow-hidden rounded-md border border-ink-600 bg-ink-800/60 p-1 transition-colors hover:border-ink-400 active:cursor-grabbing"
+              style={{ aspectRatio: "1 / 1" }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setMenu({ x: e.clientX, y: e.clientY, id: item.entry.id, kind: "element" });
