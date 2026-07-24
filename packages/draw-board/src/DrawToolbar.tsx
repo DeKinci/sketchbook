@@ -19,6 +19,7 @@ import {
   X,
   ImagePlus,
   Shapes,
+  Frame,
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -692,6 +693,7 @@ export function DrawToolbar({
   extra,
   libraryOpen,
   onToggleLibrary,
+  zoom,
 }: {
   tool: Tool;
   /** The armed selectable tool (select/pen) — the pill's well slides here. */
@@ -773,6 +775,11 @@ export function DrawToolbar({
    *  null/undefined = the feature is off and no toggle renders at all. */
   libraryOpen?: boolean | null;
   onToggleLibrary?: () => void;
+  /** Camera zoom controls — rendered on the toolbar's LEFT flank beside the
+   *  history buttons. Absent (fixed viewport, or pre-measure before the camera
+   *  exists) → no zoom cluster mounts. `scale` drives the % readout; the four
+   *  callbacks are step-out · reset-to-100% · step-in · fit-content. */
+  zoom?: { scale: number; onOut: () => void; onReset: () => void; onIn: () => void; onFit: () => void };
 }) {
   const persistentActive = tool === "select" || tool === "pen";
   // The cluster buttons mount only the variants this board enables — the
@@ -806,7 +813,7 @@ export function DrawToolbar({
   const rootRef = useRef<HTMLDivElement>(null);
   const toolsRef = useRef<HTMLDivElement>(null);
   const styleRef = useRef<HTMLDivElement>(null);
-  const historyRef = useRef<HTMLDivElement>(null);
+  const leftRef = useRef<HTMLDivElement>(null);
   const actionsRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(false);
   useLayoutEffect(() => {
@@ -816,18 +823,19 @@ export function DrawToolbar({
     const EDGE = 12; // right-3 — the pinned cluster's offset from the padding box
     const measure = () => {
       const center = (toolsRef.current?.offsetWidth ?? 0) + GAP + (styleRef.current?.offsetWidth ?? 0);
-      // The side row's CONTENT (its two clusters) — never the row box itself:
-      // unpinned it's basis-full, so its own width would read as "never fits"
-      // and latch the layout permanently stacked. The clusters render the same
-      // content in both states, so this measurement can't oscillate.
-      const side = (historyRef.current?.offsetWidth ?? 0) + GAP + (actionsRef.current?.offsetWidth ?? 0);
-      // True centering: the tools center on the root's midline, so the side
-      // cluster needs width + edge + one gap of clearance on BOTH flanks.
-      setPinned(center + 2 * (side + EDGE + GAP) <= root.clientWidth);
+      // Each FLANK's own content width — never a row box: unpinned the pair sits
+      // in a basis-full row, so measuring that box would read "never fits" and
+      // latch the layout permanently stacked. Both flanks render the same
+      // content pinned or not, so this measurement can't oscillate.
+      // The flanks pin to OPPOSITE edges (history+zoom left, actions right), so
+      // true centering needs the LARGER flank cleared on BOTH sides (symmetric)
+      // — reserving their SUM would wrap needlessly early now they're split.
+      const flank = Math.max(leftRef.current?.offsetWidth ?? 0, actionsRef.current?.offsetWidth ?? 0);
+      setPinned(center + 2 * (flank + EDGE + GAP) <= root.clientWidth);
     };
     measure();
     const ro = new ResizeObserver(measure);
-    for (const el of [root, toolsRef.current, styleRef.current, historyRef.current, actionsRef.current]) if (el) ro.observe(el);
+    for (const el of [root, toolsRef.current, styleRef.current, leftRef.current, actionsRef.current]) if (el) ro.observe(el);
     return () => ro.disconnect();
   }, []);
 
@@ -1079,21 +1087,69 @@ export function DrawToolbar({
       )}
       </div>
 
-      {/* History + apply/cancel — absolutely pinned right when the MEASURED
-          center row + both pinned sides fit the container (so the tool groups
-          stay truly centered); otherwise its own full row, history left /
-          actions right. z-30 keeps the export menu above the root's local
-          layers. */}
-      <div className={`z-30 order-3 flex items-center gap-2 ${pinned ? "absolute right-3 top-1/2 -translate-y-1/2" : "basis-full justify-between"}`}>
-        <div ref={historyRef} className="flex items-center gap-0.5">
-          <IconButton label="Undo (⌘Z)" disabled={!canUndo} onClick={onUndo} className="disabled:opacity-30">
-            <Undo2 size={16} />
-          </IconButton>
-          <IconButton label="Redo (⌘⇧Z)" disabled={!canRedo} onClick={onRedo} className="disabled:opacity-30">
-            <Redo2 size={16} />
-          </IconButton>
+      {/* History + zoom on the LEFT, apply/cancel on the RIGHT. When the
+          MEASURED center row + both flanks fit (`pinned`), each flank hugs its
+          own edge absolutely so the tool groups stay truly centered; otherwise
+          the pair drops into flow as its own full-width row, split left/right.
+          Pinned the wrapper is `contents` — it adds NO box of its own, so the
+          two flanks position against the toolbar root directly (a full-width
+          overlay would eat the centered pills' clicks). z-30 on each flank keeps
+          the export menu above the root's local layers. */}
+      <div className={pinned ? "contents" : "order-3 flex basis-full flex-wrap items-center justify-between gap-2"}>
+        <div ref={leftRef} className={`z-30 flex items-center gap-2 ${pinned ? "absolute left-3 top-1/2 -translate-y-1/2" : ""}`}>
+          <div className="flex items-center gap-0.5">
+            <IconButton label="Undo (⌘Z)" disabled={!canUndo} onClick={onUndo} className="disabled:opacity-30">
+              <Undo2 size={16} />
+            </IconButton>
+            <IconButton label="Redo (⌘⇧Z)" disabled={!canRedo} onClick={onRedo} className="disabled:opacity-30">
+              <Redo2 size={16} />
+            </IconButton>
+          </div>
+          {/* Zoom — the segmented-pill idiom of the size/style clusters, so it
+              reads as one camera control paired with history. Only mounts when
+              the host has a live camera (see the `zoom` prop). */}
+          {zoom && (
+            <div className="flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5 text-ink-300">
+              <button
+                type="button"
+                onClick={zoom.onOut}
+                aria-label="Zoom out"
+                title="Zoom out (⌘-)"
+                className="flex h-7 w-7 items-center justify-center rounded-full transition-colors hover:bg-ink-700 hover:text-white"
+              >
+                <Minus size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={zoom.onReset}
+                aria-label="Reset zoom to 100%"
+                title="Reset to 100%"
+                className="min-w-[3.25rem] rounded-full px-1 text-center text-[11px] tabular-nums transition-colors hover:bg-ink-700 hover:text-white"
+              >
+                {Math.round(zoom.scale * 100)}%
+              </button>
+              <button
+                type="button"
+                onClick={zoom.onIn}
+                aria-label="Zoom in"
+                title="Zoom in (⌘=)"
+                className="flex h-7 w-7 items-center justify-center rounded-full transition-colors hover:bg-ink-700 hover:text-white"
+              >
+                <Plus size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={zoom.onFit}
+                aria-label="Fit content"
+                title="Fit content (⌘0)"
+                className="flex h-7 w-7 items-center justify-center rounded-full transition-colors hover:bg-ink-700 hover:text-white"
+              >
+                <Frame size={13} />
+              </button>
+            </div>
+          )}
         </div>
-        <div ref={actionsRef} className="flex items-center gap-2">
+        <div ref={actionsRef} className={`z-30 flex items-center gap-2 ${pinned ? "absolute right-3 top-1/2 -translate-y-1/2" : ""}`}>
           {/* Upload rides with the actions in EVERY layout — one copy, so both
               layout states hold identical content and the pin measurement
               can't oscillate. */}

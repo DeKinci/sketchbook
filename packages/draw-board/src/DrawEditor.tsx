@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent } from "react";
 import { flushSync } from "react-dom";
-import { Frame, Maximize2, Minimize2, Minus, Plus } from "lucide-react";
+import { Maximize2, Minimize2 } from "lucide-react";
 import type Konva from "konva";
 import { DrawToolbar } from "./DrawToolbar.tsx";
 import { DrawCanvas } from "./DrawCanvas.tsx";
@@ -1464,6 +1464,9 @@ export function DrawEditor({
       extra={toolbarExtra}
       libraryOpen={library ? libOpen : null}
       onToggleLibrary={toggleLibrary}
+      // Zoom rides the toolbar's left flank beside history — only with a live
+      // camera (the fixed policy has none, and it's absent until measured).
+      zoom={policy !== "fixed" && view ? { scale: view.scale, onOut: () => zoomStep(-1), onReset: resetZoom, onIn: () => zoomStep(1), onFit: fitContent } : undefined}
     />
   );
 
@@ -1590,50 +1593,6 @@ export function DrawEditor({
                   };
                 })()}
               />
-            )}
-            {policy !== "fixed" && (
-              <div
-                className={`absolute bottom-2 left-2 z-10 flex items-center gap-0.5 rounded-full border border-ink-600 bg-ink-800/80 px-1 py-0.5 text-ink-300 backdrop-blur${
-                  state.gestureBase ? " pointer-events-none" : ""
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => zoomStep(-1)}
-                  aria-label="Zoom out"
-                  title="Zoom out (⌘-)"
-                  className="flex h-6 w-6 items-center justify-center rounded-full transition-colors hover:bg-ink-700 hover:text-white"
-                >
-                  <Minus size={13} />
-                </button>
-                <button
-                  type="button"
-                  onClick={resetZoom}
-                  aria-label="Reset zoom to 100%"
-                  title="Reset to 100%"
-                  className="min-w-11 rounded-full px-1 text-center text-[11px] tabular-nums transition-colors hover:bg-ink-700 hover:text-white"
-                >
-                  {Math.round(view.scale * 100)}%
-                </button>
-                <button
-                  type="button"
-                  onClick={() => zoomStep(1)}
-                  aria-label="Zoom in"
-                  title="Zoom in (⌘=)"
-                  className="flex h-6 w-6 items-center justify-center rounded-full transition-colors hover:bg-ink-700 hover:text-white"
-                >
-                  <Plus size={13} />
-                </button>
-                <button
-                  type="button"
-                  onClick={fitContent}
-                  aria-label="Fit content"
-                  title="Fit content (⌘0)"
-                  className="flex h-6 w-6 items-center justify-center rounded-full transition-colors hover:bg-ink-700 hover:text-white"
-                >
-                  <Frame size={12} />
-                </button>
-              </div>
             )}
             {minimap && policy !== "fixed" && (
               // pointer-events-none while a content gesture is LIVE: a stroke or
