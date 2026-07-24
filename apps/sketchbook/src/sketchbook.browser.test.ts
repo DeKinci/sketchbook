@@ -540,7 +540,7 @@ test("dblclick on a shape spawns a FREE caption inside it — or engages the exi
   type StoredShape = { id: string; type: string; text?: string; x?: number; attach?: { id: string; ax?: number; ay?: number } };
   const shapesStored = async () => (await stored(page))[0].doc.shapes as StoredShape[];
 
-  // Dblclick the empty container: a caption session opens at the click point;
+  // Dblclick the container: a caption session opens CENTERED in the shape;
   // typing + Enter mints a FREE text shape bonded by containment — not text
   // baked into the rect.
   const at = toScreen({ x: 200, y: 160 });
@@ -551,7 +551,17 @@ test("dblclick on a shape spawns a FREE caption inside it — or engages the exi
   await expect.poll(async () => (await shapesStored()).length).toBe(2);
   const t1 = (await shapesStored()).find((s) => s.type === "text")!;
   expect(t1.text).toBe("cap");
-  expect(t1.x).toBeCloseTo(200, 0); // spawned where the dblclick aimed
+  // The caption lands CENTERED in the rect (center 200,160) and center-aligned —
+  // not top-left at the click point. Read the rendered node's own box.
+  const cap = await page.evaluate(() => {
+    type TextNode = { text(): string; x(): number; y(): number; width(): number; height(): number; align(): string };
+    const stage = (window as unknown as { Konva: { stages: { find(sel: string): TextNode[] }[] } }).Konva.stages.at(-1)!;
+    const t = stage.find("Text").find((n) => n.text() === "cap")!;
+    return { cx: t.x() + t.width() / 2, cy: t.y() + t.height() / 2, align: t.align() };
+  });
+  expect(cap.cx).toBeCloseTo(200, 0); // centered on the rect's center-x…
+  expect(cap.cy).toBeCloseTo(160, 0); // …and center-y
+  expect(cap.align).toBe("center");
   expect(t1.attach).toMatchObject({ id: "R", ax: 0.5, ay: 0.5 }); // a bond, not a baked-in label
 
   // Dblclick elsewhere INSIDE the shape (clear of the caption's block): the
