@@ -176,6 +176,11 @@ interface EditSession {
    *  paired with gx/gy = 0.5 so the block grows symmetrically from the shape's
    *  center. Absent = the left-aligned free-text default. */
   align?: "center";
+  /** For a double-click caption: the id of the shape it was spawned into — the
+   *  commit bonds the (free-growing) caption to it with a center box-bond, so it
+   *  rides the shape on move/resize without needing its wide box to sit fully
+   *  inside the shape (which geometric attach would require). */
+  captionOf?: string;
 }
 
 /**
@@ -533,18 +538,19 @@ export function DrawEditor({
   }, []);
 
   const startText = useCallback(
-    (x: number, y: number, caption?: { boxWidth: number }) => {
+    (x: number, y: number, captionOf?: string) => {
       const s = stateRef.current;
       setValue("");
-      if (caption) {
-        // Double-click caption: (x,y) is the CONTAINER'S CENTER. Grow the field
-        // symmetrically from it (gx/gy = 0.5) and center-align the lines, so the
-        // label reads centered in the shape while typing and once committed. A
-        // fixed wrap box (the container's inner width) keeps the visible glyphs
-        // pinned on the center — no commit-time jump from the model↔browser width
-        // gap that a free field's half-offset would otherwise amplify.
-        const cap = Math.max(MIN_TEXT_WRAP, caption.boxWidth - 2 * TEXT_BOX_INSET);
-        setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, fill: s.fill, maxWidth: cap, gx: 0.5, gy: 0.5, anchorX: x, anchorY: y, align: "center" });
+      if (captionOf) {
+        // Double-click caption: (x,y) is the CONTAINER'S CENTER. The caption is
+        // NOT wrapped to the shape — a stroke eats into the box, and a diamond or
+        // ellipse has a smaller, non-rectangular inner area, so a shape-width box
+        // is simply wrong. Instead it starts small and GROWS as typed, like a
+        // free text, but CENTERED: symmetric growth from the center (gx/gy = 0.5)
+        // + center-aligned lines, so the label stays centered in the shape while
+        // typing and once committed. Pixel-exact metrics (textMetrics' canvas
+        // measure) keep the centered field and the committed block on one center.
+        setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, fill: s.fill, maxWidth: undefined, gx: 0.5, gy: 0.5, anchorX: x, anchorY: y, align: "center", captionOf });
         return;
       }
       setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, fill: s.fill, maxWidth: containKap(x, y), gx: 0, gy: 0, anchorX: x, anchorY: y });
@@ -604,7 +610,25 @@ export function DrawEditor({
           type: "addShapes",
           detectAttach: true, // a placed text glues to a shape it's dropped against
           distScale: distScale(), // screen-true glue range, same as every other placement
-          shapes: [{ id: newShapeId(), type: "text", stroke: cur.color, strokeWidth: stateRef.current.strokeWidth, x, y, text, fontSize: cur.fontSize, ...(width !== undefined && { width }), ...(cur.fill && { fill: cur.fill }), ...(cur.align && { align: cur.align }) }],
+          shapes: [
+            {
+              id: newShapeId(),
+              type: "text",
+              stroke: cur.color,
+              strokeWidth: stateRef.current.strokeWidth,
+              x,
+              y,
+              text,
+              fontSize: cur.fontSize,
+              ...(width !== undefined && { width }),
+              ...(cur.fill && { fill: cur.fill }),
+              ...(cur.align && { align: cur.align }),
+              // A double-click caption bonds to its KNOWN shape (center box-bond),
+              // so its free-growing box need not sit fully inside — detectAttach
+              // keeps a pre-set attach (it only fills an empty one).
+              ...(cur.captionOf && { attach: { id: cur.captionOf, kind: "box" as const, ax: 0.5, ay: 0.5, dx: 0, dy: 0 } }),
+            },
+          ],
         });
         // Text is one-use → snap back to the last selectable tool.
         dispatch({ type: "setTool", tool: stateRef.current.baseTool });

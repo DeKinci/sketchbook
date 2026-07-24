@@ -23,13 +23,12 @@
  * latin + cyrillic.
  */
 import { useEffect, useState } from "react";
+import { BOARD_FONT_FAMILY, BOARD_FONT_STACK } from "./boardFontStack.ts";
 
-/** Family list used VERBATIM by the Konva text nodes, the edit textarea, and
- *  SVG exports — one string, one resolution path. The fallbacks only engage
- *  where the embedded face is absent (an exported SVG opened elsewhere, a
- *  glyph outside the embedded subsets); Arial's metric compatibility keeps
- *  layout stable even then. */
-export const BOARD_FONT_STACK = "DrawBoardSans, Arial, sans-serif";
+// Re-exported so the many `import { BOARD_FONT_STACK } from "./boardFont.ts"`
+// sites keep working; the const itself lives in the React/blob-free
+// boardFontStack.ts so the pure model can share it (see textMetrics.ts).
+export { BOARD_FONT_STACK };
 
 // Google Fonts' subset ranges — glyphs outside them (CJK, symbols…) fall
 // through to the stack's platform fallbacks, like any missing glyph would.
@@ -60,7 +59,7 @@ export function ensureBoardFont(): Promise<void> {
   }
   loading = (async () => {
     const face = (b64: string, unicodeRange: string) =>
-      new FontFace("DrawBoardSans", Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0)), { unicodeRange });
+      new FontFace(BOARD_FONT_FAMILY, Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0)), { unicodeRange });
     const faces = [face(ARIMO_LATIN_B64, LATIN_RANGE), face(ARIMO_CYRILLIC_B64, CYRILLIC_RANGE)];
     await Promise.all(faces.map((f) => f.load()));
     for (const f of faces) document.fonts.add(f);

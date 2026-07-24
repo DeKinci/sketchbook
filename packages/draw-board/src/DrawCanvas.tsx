@@ -172,7 +172,7 @@ export function DrawCanvas({
   /** A text shape currently being edited (hidden under the textarea), or null. */
   editingId: string | null;
   /** Place + edit a new standalone text at these logical coords (text tool). */
-  onTextClick: (x: number, y: number, caption?: { boxWidth: number }) => void;
+  onTextClick: (x: number, y: number, captionOf?: string) => void;
   /** Reopen an existing text shape for editing. */
   onEditText: (id: string) => void;
   /** An image currently in crop mode (rendered by the crop overlay), or null. */
@@ -973,9 +973,12 @@ export function DrawCanvas({
         // The pair's first click selected the container — clear it so no
         // Transformer frames a shape under the typing overlay.
         dispatch({ type: "select", ids: [] });
-        // Caption spawns CENTERED in the container (not at the click point) — the
-        // box's center + inner width drive a symmetric, center-aligned field.
-        onTextClick(b.x + b.width / 2, b.y + b.height / 2, { boxWidth: b.width });
+        // Caption spawns CENTERED on the container's center (not the click
+        // point) and grows as typed — it is NOT wrapped to the shape box (a
+        // stroke + non-rectangular shapes make that wrong; see startText). The
+        // hit id rides along so it bonds to THIS shape (a known-parent center
+        // bond), not whatever detectAttach's geometry guesses for a wide label.
+        onTextClick(b.x + b.width / 2, b.y + b.height / 2, hit.id);
       }
     }
   };

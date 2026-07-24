@@ -4,16 +4,22 @@
  * (canvas render, bbox/hit/attach, SVG export, the edit overlay's box) derives
  * from the SAME wrap, so they can never disagree.
  *
- * Measurement uses real per-glyph advance tables for everything the embedded
- * board face covers — ASCII from the canonical Arial/Helvetica table, Cyrillic
- * measured from the embedded Arimo cyrillic subset (Arimo is Arial-metric-
- * compatible by design). The board renders text in that face everywhere
- * (boardFont.ts: Konva nodes, the textarea, the SVG export), so the pure
- * estimate IS the rendered layout — critically, the model's wrap points match
- * the browser's, or committed text and the edit overlay would break lines in
- * different places. Glyphs beyond the tables fall back to a 0.6em average
- * (the old whole-string heuristic).
+ * Width is PIXEL-EXACT by measuring the actual board face with the browser's
+ * canvas `measureText` wherever a canvas exists (every real board render) — the
+ * same engine Konva paints with, so the model's line widths and wrap points
+ * match the rendered glyphs to the pixel, KERNING and every embedded glyph
+ * (Latin-1 accents, typographic punctuation, €, …) included. A per-glyph
+ * summation can't: it misses kerning and needs a table entry per glyph, so any
+ * character outside the baked ASCII/Cyrillic tables (é, ñ, Ö, æ, —, …) fell back
+ * to a 0.6em guess and produced boxes too short to hold their own text.
+ *
+ * The baked advance tables below stay the Node/SSR fallback (no canvas there):
+ * ASCII from the canonical Arial/Helvetica table, Cyrillic measured from the
+ * embedded Arimo subset (Arimo is Arial-metric-compatible), both exact for the
+ * glyphs they cover; the 0.6em fallback only bites glyphs the FONT can't render
+ * either (CJK/emoji → platform fallback, inherently approximate).
  */
+import { BOARD_FONT_FAMILY, BOARD_FONT_STACK } from "./boardFontStack.ts";
 
 /** Arial/Helvetica advance widths for ASCII 32..126, in 1/1000 em. */
 // prettier-ignore
@@ -50,8 +56,48 @@ const FALLBACK_W = 600;
  *  with `leading-none`. The block height is simply lines × fontSize. */
 export const TEXT_LINE_H = 1;
 
-/** Rendered width of a single line (no newlines) at `fontSize`. */
+// ── Canvas measurer (the browser IS the rendered width) ──────────────────────
+// Measured at the ACTUAL fontSize — canvas advances are NOT perfectly linear
+// across sizes (measuring at 1000px and scaling drifts ~1% from the real size,
+// enough to overflow a box), so we set the true px size and read the width off
+// it, exactly as Konva paints. The ctx is created lazily and ONLY once the
+// embedded face is actually loaded (document.fonts.check), so it can never bind
+// — and then cache — the platform fallback taken before the font settled (the
+// long-lived-context staleness boardFont.ts warns about). Absent in Node/SSR
+// and before the font loads → null, and the baked tables carry the layout.
+let measureCtx: CanvasRenderingContext2D | null = null;
+let measureFont = ""; // the font string currently set on measureCtx
+function boardMeasureCtx(): CanvasRenderingContext2D | null {
+  if (measureCtx) return measureCtx;
+  if (typeof document === "undefined" || !document.fonts?.check) return null;
+  // check() throws on a malformed font string and can be false until load —
+  // both mean "not ready", fall back to the tables for now (retried next call).
+  let ready = false;
+  try {
+    ready = document.fonts.check(`1000px ${BOARD_FONT_FAMILY}`);
+  } catch {
+    ready = false;
+  }
+  if (!ready) return null;
+  measureCtx = document.createElement("canvas").getContext("2d");
+  return measureCtx;
+}
+
+/** Rendered width of a single line (no newlines) at `fontSize`. Canvas-measured
+ *  against the real board face at that exact size where possible (kerning +
+ *  every embedded glyph exact); the per-glyph advance tables are the Node/
+ *  pre-load fallback. */
 export function lineWidth(line: string, fontSize: number): number {
+  if (line === "") return 0;
+  const ctx = boardMeasureCtx();
+  if (ctx) {
+    const f = `${fontSize}px ${BOARD_FONT_STACK}`;
+    if (f !== measureFont) {
+      ctx.font = f; // bound AFTER the face loaded → resolves the real face
+      measureFont = f;
+    }
+    return ctx.measureText(line).width;
+  }
   let w = 0;
   for (const ch of line) {
     const code = ch.codePointAt(0)!;
