@@ -65,6 +65,18 @@ describe("elementFromShapes", () => {
   it("returns null for an empty capture", () => {
     expect(elementFromShapes([], newId)).toBeNull();
   });
+
+  it("stores captured shapes in paint order — a small fill stays above a big fill", () => {
+    // Array order small→big (small drawn first); on the board the footprint sort
+    // paints the small fill on top. The captured element must preserve THAT look,
+    // so it stores big (bottom) first, small (top) last.
+    const orig = [
+      rect("small", { fill: "#f00", x: 20, y: 20, width: 30, height: 30 }),
+      rect("big", { fill: "#00f", x: 0, y: 0, width: 100, height: 100 }),
+    ];
+    const el = elementFromShapes(orig, newId)!;
+    expect(el.shapes.map((s) => (s as BoxShape).width)).toEqual([100, 30]);
+  });
 });
 
 describe("placeElement", () => {

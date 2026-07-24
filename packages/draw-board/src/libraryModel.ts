@@ -13,7 +13,7 @@
  * Placing it back clones again with fresh ids (every placement is an
  * independent copy).
  */
-import { clonePastedShapes, contentBounds, type Shape } from "./drawModel.ts";
+import { clonePastedShapes, contentBounds, paintOrder, type Shape } from "./drawModel.ts";
 import { exportSvg } from "./svgExport.ts";
 
 export interface LibraryElement {
@@ -46,7 +46,10 @@ export function elementFromShapes(shapes: Shape[], newId: () => string): Library
   return {
     kind: "element",
     id: newId(),
-    shapes: clonePastedShapes(shapes, -b.x, -b.y, newId),
+    // Store in paint order so the tile preview and every placement read like the
+    // board did (a captured group is placed as a group — an atom in array order —
+    // so its stored order IS its stacking; see paintOrder's "nothing disappears").
+    shapes: clonePastedShapes(paintOrder(shapes), -b.x, -b.y, newId),
     width: b.width,
     height: b.height,
   };

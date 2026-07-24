@@ -2524,8 +2524,21 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         if (stash) out.dormant = [...(out.dormant ?? []), stash];
         return out;
       });
+      // Normalize intra-group paint order at BUILD time. A group paints as ONE
+      // atom in array order — {@link paintOrder} never re-sorts WITHIN a unit —
+      // so unless members are stored in paint order here, grouping would silently
+      // RE-STACK them: a small filled badge that showed on top while loose would
+      // sink under a big filled card ("nothing disappears" is broken by ⌘G).
+      // Order the child units by the same footprint tiers (each child subgroup
+      // stays an intact atom, ordered among its siblings); rewrite only the
+      // member slots so interleaved non-members — and the array order that
+      // undo/paste/glue lean on — are otherwise undisturbed.
+      const paintIds = paintOrder(s.shapes.filter((sh) => members.has(sh.id))).map((sh) => sh.id);
+      const stamped = new Map(next.filter((sh) => members.has(sh.id)).map((sh) => [sh.id, sh]));
+      let pi = 0;
+      const ordered = next.map((sh) => (members.has(sh.id) ? stamped.get(paintIds[pi++])! : sh));
       // Post-state: selection = the new unit's members (⌘G⌘G round-trips).
-      return { ...commit(s, next), selectedIds: memberIds };
+      return { ...commit(s, ordered), selectedIds: memberIds };
     }
     case "ungroup": {
       if (s.gestureBase || s.draftId) return s;

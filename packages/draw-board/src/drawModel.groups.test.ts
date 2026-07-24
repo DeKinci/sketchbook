@@ -18,6 +18,7 @@ import {
   reflowAttachments,
   clonePastedShapes,
   normalizeGroups,
+  paintOrder,
   boundingBox,
   scaleStepTarget,
   slotTargetStep,
@@ -902,5 +903,69 @@ describe("clipboard + import transforms", () => {
     expect(normalizeGroups(clean)).toBe(clean);
     const s = seeded([box("a", { groupPath: ["dead"] }), box("b")]);
     expect(byId(s, "a").groupPath).toBeUndefined(); // singleton collapsed at open
+  });
+});
+
+describe("groupSelection — intra-group paint order (nothing disappears after ⌘G)", () => {
+  const groupIds = (s: DrawState, gid: string) => s.shapes.filter((sh) => sh.groupPath?.includes(gid)).map((sh) => sh.id);
+
+  it("a small filled shape drawn BEFORE a big filled one stays on top after grouping", () => {
+    // Loose, the footprint sort already puts the small fill on top even though it
+    // was drawn first. Grouping must not re-stack it under the big fill.
+    let s = seeded([
+      box("small", { fill: "#f00", x: 20, y: 20, width: 30, height: 30 }),
+      box("big", { fill: "#00f", x: 0, y: 0, width: 100, height: 100 }),
+    ]);
+    expect(paintOrder(s.shapes).map((sh) => sh.id)).toEqual(["big", "small"]);
+    s = grouped(s, ["small", "big"], "g");
+    // A group paints as one atom in ARRAY order, so members must be STORED in
+    // paint order — big (bottom) first, small (top) last.
+    expect(groupIds(s, "g")).toEqual(["big", "small"]);
+    // ...and the whole-doc paint order agrees — no live re-sort needed.
+    expect(paintOrder(s.shapes).map((sh) => sh.id)).toEqual(["big", "small"]);
+  });
+
+  it("an image member sinks to the bottom of the group order", () => {
+    let s = seeded([box("v", { fill: "#f00" }), image("img", { x: 0, y: 0, width: 200, height: 200 })]);
+    s = grouped(s, ["v", "img"], "g");
+    expect(groupIds(s, "g")).toEqual(["img", "v"]); // image bottom, vector on top
+  });
+
+  it("orders child units by footprint while keeping each subgroup's internal order intact", () => {
+    // sub = {s1, s2} pre-grouped (small footprint); mid = a big loose fill. The
+    // subgroup is an atom: its members keep their order; only the two child units
+    // reorder so the big fill sinks below the subgroup.
+    let s = seeded([
+      box("s1", { fill: "#f00", x: 10, y: 10, width: 20, height: 20, groupPath: ["sub"] }),
+      box("s2", { fill: "#f00", x: 0, y: 0, width: 40, height: 40, groupPath: ["sub"] }),
+      box("mid", { fill: "#0f0", x: 0, y: 0, width: 300, height: 300 }),
+    ]);
+    s = grouped(s, ["s1", "mid"], "g"); // s1 expands to sub → 2 child units
+    expect(groupIds(s, "g")).toEqual(["mid", "s1", "s2"]);
+  });
+
+  it("interleaved non-members keep their slots; only the grouped shapes reorder", () => {
+    // between/after are loose non-members sitting among the members in the array.
+    let s = seeded([
+      box("small", { fill: "#f00", x: 20, y: 20, width: 30, height: 30 }),
+      box("between", { x: 500, y: 500, width: 10, height: 10 }),
+      box("big", { fill: "#00f", x: 0, y: 0, width: 100, height: 100 }),
+    ]);
+    s = grouped(s, ["small", "big"], "g");
+    // Non-member "between" stays put; member slots now hold big then small.
+    expect(s.shapes.map((sh) => sh.id)).toEqual(["big", "between", "small"]);
+  });
+
+  it("ungroup then regroup is stable (idempotent order)", () => {
+    let s = seeded([
+      box("small", { fill: "#f00", x: 20, y: 20, width: 30, height: 30 }),
+      box("big", { fill: "#00f", x: 0, y: 0, width: 100, height: 100 }),
+    ]);
+    s = grouped(s, ["small", "big"], "g1");
+    const first = groupIds(s, "g1");
+    s = drawReducer(s, { type: "select", ids: ["small", "big"] });
+    s = drawReducer(s, { type: "ungroup" });
+    s = grouped(s, ["small", "big"], "g2");
+    expect(groupIds(s, "g2")).toEqual(first); // re-grouping yields the same order
   });
 });
