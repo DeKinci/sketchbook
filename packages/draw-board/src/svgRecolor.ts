@@ -109,9 +109,19 @@ export function normalizeColor(token: string): string | null {
   if (fn) {
     const parts = fn[2].split(/[\s,/]+/).filter(Boolean);
     if (parts.length < 3) return null;
-    if (fn[1].startsWith("rgb")) return toHex(chan(parts[0], 255), chan(parts[1], 255), chan(parts[2], 255));
-    // hsl: h is an angle (deg), s/l are percentages.
-    return hslToHex(parseFloat(parts[0]), chan(parts[1], 1), chan(parts[2], 1));
+    if (fn[1].startsWith("rgb")) {
+      const r = chan(parts[0], 255);
+      const g = chan(parts[1], 255);
+      const b = chan(parts[2], 255);
+      return [r, g, b].every(Number.isFinite) ? toHex(r, g, b) : null; // reject rgb(nan,…)
+    }
+    // hsl: h is an angle (deg), s/l are percentages. A bare number (no %) is
+    // invalid CSS — reject it rather than clamp it into a wrong color.
+    const h = parseFloat(parts[0]);
+    const s = chan(parts[1], 1);
+    const l = chan(parts[2], 1);
+    if (![h, s, l].every(Number.isFinite) || s < 0 || s > 1 || l < 0 || l > 1) return null;
+    return hslToHex(h, s, l);
   }
   return CSS_NAMED[t] ?? null;
 }
@@ -119,25 +129,50 @@ export function normalizeColor(token: string): string | null {
 // One color token: a hex, an rgb()/rgba()/hsl()/hsla() function, or a bareword
 // (named color / currentColor). Ordered so functions match whole, not truncated.
 const COLOR_TOKEN = String.raw`#[0-9a-fA-F]+|rgba?\([^)]*\)|hsla?\([^)]*\)|[a-zA-Z]+`;
-// `fill`/`stroke` (whole word — never `fill-opacity`/`stroke-width`) then `:`/`=`
-// then an optional quote then the color. Captures: kw, sep(incl. quote), value.
-const PAINT_RE = new RegExp(String.raw`\b(fill|stroke)(\s*[:=]\s*['"]?)(${COLOR_TOKEN})`, "gi");
+// `fill`/`stroke` as a WHOLE property then `:`/`=` then an optional quote then
+// the color. The lookbehind rejects a leading word char or `-` so a trailing
+// suffix never matches (`fill-opacity`, `stroke-width` fail on the separator)
+// AND a prefixed name never does either (`flood-fill`, whose `-` would satisfy
+// a plain `\b`). Captures: kw, sep (incl. quote), value.
+const PAINT_RE = new RegExp(String.raw`(?<![\w-])(fill|stroke)(\s*[:=]\s*['"]?)(${COLOR_TOKEN})`, "gi");
+
+// Markup whose TEXT is not paint: XML comments and the character content of
+// script/title/desc/metadata. A literal `fill:#hex` inside them (a description,
+// a comment, a data blob) must never enter the palette or be rewritten. `<style>`
+// is deliberately NOT skipped — its CSS rules are real paint.
+const SKIP_RE = /<!--[\s\S]*?-->|<(script|title|desc|metadata)\b[\s\S]*?<\/\1\s*>/gi;
+
+/** Rebuild `svg` with `fn` applied to every NON-skip segment (skip regions pass
+ *  through verbatim) — so the paint scan/rewrite ignores comments/desc/etc. */
+function overPaintRegions(svg: string, fn: (segment: string) => string): string {
+  let out = "";
+  let last = 0;
+  for (const m of svg.matchAll(SKIP_RE)) {
+    out += fn(svg.slice(last, m.index)) + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + fn(svg.slice(last));
+}
 
 /**
  * The distinct flat colors an SVG uses for fill and for stroke, each as a
  * normalized `#rrggbb` in first-encounter order — the image's two-channel
  * palette. Presentation attributes, inline `style`, and `<style>` CSS rules are
- * all scanned uniformly; `none`/gradients are ignored.
+ * all scanned uniformly; `none`/gradients and non-paint markup (comments,
+ * desc/title/script/metadata text) are ignored.
  */
 export function svgPalette(svgText: string): { fills: string[]; strokes: string[] } {
   const fills: string[] = [];
   const strokes: string[] = [];
-  for (const m of svgText.matchAll(PAINT_RE)) {
-    const norm = normalizeColor(m[3]);
-    if (!norm) continue;
-    const bucket = m[1].toLowerCase() === "fill" ? fills : strokes;
-    if (!bucket.includes(norm)) bucket.push(norm);
-  }
+  overPaintRegions(svgText, (seg) => {
+    for (const m of seg.matchAll(PAINT_RE)) {
+      const norm = normalizeColor(m[3]);
+      if (!norm) continue;
+      const bucket = m[1].toLowerCase() === "fill" ? fills : strokes;
+      if (!bucket.includes(norm)) bucket.push(norm);
+    }
+    return seg;
+  });
   return { fills, strokes };
 }
 
@@ -154,13 +189,15 @@ export function recolorSvg(
   strokeMap?: Record<string, string>
 ): string {
   if (!fillMap && !strokeMap) return svgText;
-  return svgText.replace(PAINT_RE, (whole, kw: string, sep: string, value: string) => {
-    const norm = normalizeColor(value);
-    if (!norm) return whole;
-    const map = kw.toLowerCase() === "fill" ? fillMap : strokeMap;
-    const to = map?.[norm];
-    return to === undefined ? whole : `${kw}${sep}${to}`;
-  });
+  return overPaintRegions(svgText, (seg) =>
+    seg.replace(PAINT_RE, (whole, kw: string, sep: string, value: string) => {
+      const norm = normalizeColor(value);
+      if (!norm) return whole;
+      const map = kw.toLowerCase() === "fill" ? fillMap : strokeMap;
+      const to = map?.[norm];
+      return to === undefined ? whole : `${kw}${sep}${to}`;
+    })
+  );
 }
 
 /**

@@ -49,6 +49,13 @@ describe("normalizeColor — canonicalize any CSS color to #rrggbb", () => {
     expect(normalizeColor("#12")).toBeNull(); // malformed hex length
     expect(normalizeColor("#gggggg")).toBeNull(); // non-hex digits
   });
+
+  it("malformed function-colors → null (never a bogus #NaN or clamped-wrong hex)", () => {
+    expect(normalizeColor("rgb(nan, 0, 0)")).toBeNull();
+    expect(normalizeColor("rgb(1, 2)")).toBeNull(); // too few channels
+    expect(normalizeColor("hsl(120, 50, 50)")).toBeNull(); // s/l missing % is invalid CSS
+    expect(normalizeColor("hsl(120, 50%, 50%)")).toBe("#40bf40"); // the valid form still works
+  });
 });
 
 describe("svgPalette — the two-channel color set of an SVG", () => {
@@ -90,6 +97,20 @@ describe("svgPalette — the two-channel color set of an SVG", () => {
     const p = svgPalette(`<svg><rect fill-opacity="0.5" stroke-width="2" fill="#abcdef"/></svg>`);
     expect(p.fills).toEqual(["#abcdef"]);
     expect(p.strokes).toEqual([]);
+  });
+
+  it("does NOT match a prefixed property like flood-fill (the `-` boundary trap)", () => {
+    const p = svgPalette(`<svg><feFlood flood-fill="#123456"/><rect fill="#abcdef"/></svg>`);
+    expect(p.fills).toEqual(["#abcdef"]); // flood-fill ignored
+    // and recolor leaves flood-fill untouched
+    expect(recolorSvg(`<feFlood flood-fill="#123456"/>`, { "#123456": "#000000" })).toBe(`<feFlood flood-fill="#123456"/>`);
+  });
+
+  it("ignores `fill:`/`stroke:` inside comments, <title>/<desc>, and <script> — but not <style>", () => {
+    const src = `<svg><!-- fill:#111111 --><title>fill:#222222</title><desc>stroke:#333333</desc><script>var fill="#444444"</script><style>.a{fill:#555555}</style><rect fill="#abcdef"/></svg>`;
+    const p = svgPalette(src);
+    expect(p.fills).toEqual(["#555555", "#abcdef"]); // the <style> rule + the real attr; NOT the text-node hexes
+    expect(p.strokes).toEqual([]); // the <desc> stroke is inert
   });
 });
 
@@ -134,6 +155,12 @@ describe("recolorSvg — bake per-channel maps into the SVG text", () => {
     const src = `<rect fill="#ff0000"/>`;
     expect(recolorSvg(src)).toBe(src);
     expect(recolorSvg(src, {}, {})).toBe(src);
+  });
+
+  it("preserves skip regions verbatim while rewriting real paint around them", () => {
+    const src = `<svg><!-- fill:#ff0000 --><desc>fill:#ff0000</desc><rect fill="#ff0000"/></svg>`;
+    const out = recolorSvg(src, { "#ff0000": "#0000ff" });
+    expect(out).toBe(`<svg><!-- fill:#ff0000 --><desc>fill:#ff0000</desc><rect fill="#0000ff"/></svg>`);
   });
 });
 

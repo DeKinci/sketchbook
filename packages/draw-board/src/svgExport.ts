@@ -139,10 +139,14 @@ function shapeSvg(sh: Shape, shapes: Shape[]): string {
       // href; everything else embeds its raw bytes as a base64 data URL. (The
       // rich <metadata> doc still carries the untouched source + maps, so
       // re-import stays non-destructive.)
-      const href =
-        sh.mediaType === "image/svg+xml" && sh.svg && (sh.svg.fillMap || sh.svg.strokeMap)
-          ? svgDataUrl(recolorSvg(decodeSvg(sh.dataBase64), sh.svg.fillMap, sh.svg.strokeMap))
-          : `data:${sh.mediaType};base64,${sh.dataBase64}`;
+      let href = `data:${sh.mediaType};base64,${sh.dataBase64}`;
+      if (sh.mediaType === "image/svg+xml" && sh.svg && (sh.svg.fillMap || sh.svg.strokeMap)) {
+        try {
+          href = svgDataUrl(recolorSvg(decodeSvg(sh.dataBase64), sh.svg.fillMap, sh.svg.strokeMap));
+        } catch {
+          /* undecodable → embed the raw bytes (colors just won't be baked) */
+        }
+      }
       return `<image x="${num(sh.x)}" y="${num(sh.y)}" width="${num(sh.width)}" height="${num(sh.height)}" href="${href}" preserveAspectRatio="none"/>`;
     }
   }
