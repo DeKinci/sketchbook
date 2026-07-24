@@ -48,7 +48,7 @@ import {
   type Viewport,
   type ViewportPolicy,
 } from "./viewport.ts";
-import { snapCenterlines, type SnapGuide } from "./snapGuides.ts";
+import { snapCenterlines, snapResize, type SnapGuide } from "./snapGuides.ts";
 
 /** Shapes whose scale can be baked into geometry (the Transformer attaches to a
  *  lone one of these). Lines/pen strokes are move-only in v1. */
@@ -228,6 +228,9 @@ export function DrawCanvas({
     targets: Box[];
     applied: { dx: number; dy: number };
   } | null>(null);
+  // Snap candidates for the in-flight RESIZE (the box of every non-resized unit),
+  // captured at transform start and read by the Transformer's boundBoxFunc.
+  const resizeTargetsRef = useRef<Box[] | null>(null);
   const erasing = useRef(false);
   // Double-click detection is OURS, not Konva's. Konva synthesizes dblclick
   // from ANY two down/up pairs inside its 400ms window — movement-blind
@@ -692,6 +695,28 @@ export function DrawCanvas({
     return best;
   };
 
+  /** Snap candidates for an align gesture: the box of every unit NOT in `exclude`
+   *  (a whole group counts once as its unit bounds; loose shapes each). Used by
+   *  both the move drag and the resize transform to feed {@link snapCenterlines}
+   *  / {@link snapResize}. */
+  const snapTargetsExcluding = (exclude: Set<string>): Box[] => {
+    const seen = new Set<string>();
+    const out: Box[] = [];
+    for (const sh of shapes) {
+      if (exclude.has(sh.id)) continue;
+      const key = units.rootOf(sh.id);
+      if (key && units.membersOf(key).size > 1) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const ub = units.boundsOf(key);
+        if (ub) out.push(ub);
+      } else {
+        out.push(boundingBox(sh));
+      }
+    }
+    return out;
+  };
+
   // ── Stage-level pointer (pan / draw / select+move / marquee / erase) ────────
   /** Settle whatever content gesture is live — the ONE teardown path, used by
    *  mouseup, by an outside-release detected on re-entry (buttons gone), and by
@@ -814,23 +839,9 @@ export function DrawCanvas({
       // containment). The reducer freezes anything left out of this set.
       const clusterIds = moveClusterIds(shapes, ids);
       const clusterSet = new Set(clusterIds);
-      // Snap candidates: the box of every OTHER unit (a whole group counts once,
-      // as its unit bounds; loose shapes each count). Captured now — they're
-      // frozen for the drag — so the move loop just measures against them.
-      const seenUnit = new Set<string>();
-      const targets: Box[] = [];
-      for (const sh of shapes) {
-        if (clusterSet.has(sh.id)) continue;
-        const key = units.rootOf(sh.id);
-        if (key && units.membersOf(key).size > 1) {
-          if (seenUnit.has(key)) continue;
-          seenUnit.add(key);
-          const ub = units.boundsOf(key);
-          if (ub) targets.push(ub);
-        } else {
-          targets.push(boundingBox(sh));
-        }
-      }
+      // Snap candidates captured now (frozen for the drag) — the move loop just
+      // measures the cluster's centerlines against them.
+      const targets = snapTargetsExcluding(clusterSet);
       const origin = contentBounds(shapes.filter((sh) => clusterSet.has(sh.id))) ?? { x: p.x, y: p.y, width: 0, height: 0 };
       moveRef.current = { last: p, downAt: p, ids: clusterIds, origin, targets, applied: { dx: 0, dy: 0 } };
       onMoveGesture?.({
@@ -1109,6 +1120,9 @@ export function DrawCanvas({
     // never changes the width prop, so nothing else would undo the pin.
     onTransformStart: (e: KonvaEventObject<Event>) => {
       dispatch({ type: "beginGesture" });
+      // Capture align targets for the resize (every unit but this shape). A text
+      // side-drag reflows its wrap box, not a geometric box → no centerline snap.
+      resizeTargetsRef.current = sh.type === "text" ? null : snapTargetsExcluding(new Set([sh.id]));
       if (sh.type !== "text" && sh.type !== "image") {
         const n = strokedNodeOf(e.target);
         if (n) {
@@ -1151,6 +1165,8 @@ export function DrawCanvas({
         }
       }
       bakeTransform(e, sh);
+      resizeTargetsRef.current = null;
+      setSnapGuides([]);
       dispatch({ type: "endGesture" });
     },
   });
@@ -1803,6 +1819,7 @@ export function DrawCanvas({
             listening={false}
             onTransformStart={(e) => {
               dispatch({ type: "beginGesture" });
+              resizeTargetsRef.current = null; // group scale reads the factor, not the box → no centerline snap in v1
               const anchor = trRef.current?.getActiveAnchor() ?? "bottom-right";
               const b = proxyBounds;
               // SIDE anchors stretch one axis (members follow the scaling —
@@ -1857,7 +1874,17 @@ export function DrawCanvas({
           // Set per-selection HERE (react-konva re-applies props each render —
           // an imperatively set anchor list would revert on the next render).
           enabledAnchors={soleResizable && soleSel?.type === "text" ? TEXT_ANCHORS : ALL_ANCHORS}
-          boundBoxFunc={(oldBox, newBox) => (newBox.width < 6 || newBox.height < 6 ? oldBox : newBox)}
+          boundBoxFunc={(oldBox, newBox) => {
+            if (newBox.width < 6 || newBox.height < 6) return oldBox;
+            const targets = resizeTargetsRef.current;
+            if (!targets || !targets.length) return newBox;
+            // The Transformer boxes are ABSOLUTE (screen) px; snap in LOGICAL
+            // space so the pull is zoom-true and the guides render on the plane.
+            const toL = (b: { x: number; y: number; width: number; height: number }) => ({ x: (b.x - view.x) / vs, y: (b.y - view.y) / vs, width: b.width / vs, height: b.height / vs });
+            const { box, guides } = snapResize(toL(newBox), toL(oldBox), targets, sPx(SNAP_PX));
+            setSnapGuides(guides);
+            return { ...newBox, x: box.x * vs + view.x, y: box.y * vs + view.y, width: box.width * vs, height: box.height * vs };
+          }}
         />
 
         {croppingId &&
