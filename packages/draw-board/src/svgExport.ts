@@ -17,6 +17,7 @@ import { boundingBox, contrastSolidOver, dashFor, diamondPoints, fillAt, isContr
 import { wrapLines } from "./textMetrics.ts";
 import { BOARD_FONT_STACK } from "./boardFont.ts";
 import { contentCropLogical } from "./exportPng.ts";
+import { recolorSvg, decodeSvg, svgDataUrl } from "./svgRecolor.ts";
 
 export const SVG_META_ID = "draw-board-doc";
 
@@ -134,7 +135,15 @@ function shapeSvg(sh: Shape, shapes: Shape[]): string {
       );
     }
     case "image": {
-      return `<image x="${num(sh.x)}" y="${num(sh.y)}" width="${num(sh.width)}" height="${num(sh.height)}" href="data:${sh.mediaType};base64,${sh.dataBase64}" preserveAspectRatio="none"/>`;
+      // A recolored SVG bakes its maps into an inline (percent-encoded) SVG
+      // href; everything else embeds its raw bytes as a base64 data URL. (The
+      // rich <metadata> doc still carries the untouched source + maps, so
+      // re-import stays non-destructive.)
+      const href =
+        sh.mediaType === "image/svg+xml" && sh.svg && (sh.svg.fillMap || sh.svg.strokeMap)
+          ? svgDataUrl(recolorSvg(decodeSvg(sh.dataBase64), sh.svg.fillMap, sh.svg.strokeMap))
+          : `data:${sh.mediaType};base64,${sh.dataBase64}`;
+      return `<image x="${num(sh.x)}" y="${num(sh.y)}" width="${num(sh.width)}" height="${num(sh.height)}" href="${href}" preserveAspectRatio="none"/>`;
     }
   }
 }

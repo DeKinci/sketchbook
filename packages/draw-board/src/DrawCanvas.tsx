@@ -36,7 +36,9 @@ import {
   type DrawState,
   type Shape,
   type BoxShape,
+  type ImageShape,
 } from "./drawModel.ts";
+import { recolorSvg, decodeSvg, svgDataUrl } from "./svgRecolor.ts";
 import {
   padBox,
   panBy,
@@ -49,6 +51,25 @@ import {
   type ViewportPolicy,
 } from "./viewport.ts";
 import { snapCenterlines, snapResize, type SnapGuide } from "./snapGuides.ts";
+
+/** The signature that decides when a placed image's decoded element must
+ *  reload: the SVG recolor maps (the only thing that changes its pixels — the
+ *  source bytes are immutable). "" = no recolor. */
+function imageReloadSig(sh: ImageShape): string {
+  return sh.svg?.fillMap || sh.svg?.strokeMap ? JSON.stringify([sh.svg.fillMap ?? 0, sh.svg.strokeMap ?? 0]) : "";
+}
+/** The data URL to decode for a placed image: a recolored inline SVG when the
+ *  image is an SVG carrying recolor maps, else the raw source bytes. Falls back
+ *  to the raw bytes if the SVG can't be decoded/rewritten. */
+function imageSrc(sh: ImageShape): string {
+  const raw = `data:${sh.mediaType};base64,${sh.dataBase64}`;
+  if (sh.mediaType !== "image/svg+xml" || !sh.svg || (!sh.svg.fillMap && !sh.svg.strokeMap)) return raw;
+  try {
+    return svgDataUrl(recolorSvg(decodeSvg(sh.dataBase64), sh.svg.fillMap, sh.svg.strokeMap));
+  } catch {
+    return raw;
+  }
+}
 
 /** Shapes whose scale can be baked into geometry (the Transformer attaches to a
  *  lone one of these). Lines/pen strokes are move-only in v1. */
@@ -448,15 +469,19 @@ export function DrawCanvas({
     pinchRef.current = { d, c };
   };
 
-  // Decoded element cache for placed image shapes (keyed by shape id).
-  const [imgEls, setImgEls] = useState<Record<string, HTMLImageElement>>({});
+  // Decoded element cache for placed image shapes (keyed by shape id). Each
+  // entry remembers the recolor signature it was loaded at, so an SVG recolor
+  // reloads the element while the last-loaded pixels keep showing until it does.
+  const [imgEls, setImgEls] = useState<Record<string, { sig: string; el: HTMLImageElement }>>({});
   useEffect(() => {
     let live = true;
     for (const sh of shapes) {
-      if (sh.type !== "image" || imgEls[sh.id]) continue;
+      if (sh.type !== "image") continue;
+      const sig = imageReloadSig(sh);
+      if (imgEls[sh.id]?.sig === sig) continue;
       const el = new Image();
-      el.onload = () => live && setImgEls((m) => ({ ...m, [sh.id]: el }));
-      el.src = `data:${sh.mediaType};base64,${sh.dataBase64}`;
+      el.onload = () => live && setImgEls((m) => ({ ...m, [sh.id]: { sig, el } }));
+      el.src = imageSrc(sh);
     }
     return () => {
       live = false;
@@ -526,7 +551,7 @@ export function DrawCanvas({
     // below), and the sampled backdrop must match what's actually visible.
     for (const sh of paintOrder(shapesRef.current)) {
       if (sh.type !== "image") continue;
-      const el = imgEls[sh.id];
+      const el = imgEls[sh.id]?.el;
       if (!el) continue;
       ctx.drawImage(el, mx(sh.x), my(sh.y), (sh.width / rect.width) * w, (sh.height / rect.height) * h);
     }
@@ -1591,7 +1616,7 @@ export function DrawCanvas({
                 </Fragment>
               );
             case "image": {
-              const img = imgEls[sh.id];
+              const img = imgEls[sh.id]?.el;
               if (!img || sh.id === croppingId) return null; // decoding, or the crop overlay renders it
               return <KonvaImage key={sh.id} {...common(sh)} image={img} x={sh.x} y={sh.y} width={sh.width} height={sh.height} crop={sh.crop} />;
             }
@@ -1890,7 +1915,7 @@ export function DrawCanvas({
         {croppingId &&
           (() => {
             const sh = shapes.find((s) => s.id === croppingId);
-            const img = imgEls[croppingId];
+            const img = imgEls[croppingId]?.el;
             if (!sh || sh.type !== "image" || !img) return null;
             return (
               <CropLayer

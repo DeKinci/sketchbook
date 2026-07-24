@@ -7,6 +7,7 @@ import { DrawCanvas } from "./DrawCanvas.tsx";
 import { Minimap } from "./Minimap.tsx";
 import type { CropControl } from "./CropLayer.tsx";
 import { useDrawing, newShapeId } from "./useDrawing.ts";
+import { svgPalette, decodeSvg } from "./svgRecolor.ts";
 import {
   canRedo,
   canUndo,
@@ -909,6 +910,18 @@ export function DrawEditor({
       // quadrant rule as before; the infinite plane has no edges to respect.
       const x = policy === "infinite" ? cx - w / 2 : Math.max(0, cx - w / 2);
       const y = policy === "infinite" ? cy - h / 2 : Math.max(0, cy - h / 2);
+      // An SVG carries its own colors — discover them so it recolors like a
+      // vector shape (its fills light the fill lane, its strokes the stroke
+      // lane). Non-SVG rasters stay opaque blobs.
+      let svg: ImageShape["svg"];
+      if (att.mediaType === "image/svg+xml") {
+        try {
+          const pal = svgPalette(decodeSvg(att.dataBase64));
+          if (pal.fills.length || pal.strokes.length) svg = pal;
+        } catch {
+          /* undecodable SVG → treat as an opaque image (no palette) */
+        }
+      }
       const shape: ImageShape = {
         id: newShapeId(),
         type: "image",
@@ -920,6 +933,7 @@ export function DrawEditor({
         height: h,
         dataBase64: att.dataBase64,
         mediaType: att.mediaType,
+        ...(svg ? { svg } : {}),
       };
       dispatch({ type: "addShapes", shapes: [shape], detectAttach, distScale: distScale() });
       dispatch({ type: "setTool", tool: "select" });

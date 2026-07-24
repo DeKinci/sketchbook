@@ -37,6 +37,22 @@ describe("exportSvg", () => {
     expect(svg).toContain('href="data:image/png;base64,QUJD"');
   });
 
+  it("a placed image embeds its raw bytes; a recolored SVG bakes the maps into an inline href", () => {
+    const src = `<svg xmlns="http://www.w3.org/2000/svg"><rect fill="#ff0000"/></svg>`;
+    const b64 = Buffer.from(src, "utf-8").toString("base64");
+    const img = (over: object = {}): Shape =>
+      ({ id: "im", type: "image", stroke: "#000", strokeWidth: 1, x: 0, y: 0, width: 50, height: 50, dataBase64: b64, mediaType: "image/svg+xml", ...over }) as Shape;
+    // No maps → raw base64 passthrough (unchanged behavior).
+    expect(exportSvg(doc([img()]))).toContain(`href="data:image/svg+xml;base64,${b64}"`);
+    // A fill recolor → an inline percent-encoded href carrying the NEW color.
+    const svg = exportSvg(doc([img({ svg: { fills: ["#ff0000"], strokes: [], fillMap: { "#ff0000": "#0000ff" } } })]));
+    const m = svg.match(/href="(data:image\/svg\+xml;charset=utf-8,[^"]*)"/);
+    expect(m).toBeTruthy();
+    const decoded = decodeURIComponent(m![1].slice("data:image/svg+xml;charset=utf-8,".length));
+    expect(decoded).toContain(`fill="#0000ff"`);
+    expect(decoded).not.toContain(`#ff0000`);
+  });
+
   it("stroke styles: dasharray scales with the width; dotted boxes gain round caps; solid emits none", () => {
     const svg = exportSvg(
       doc([
