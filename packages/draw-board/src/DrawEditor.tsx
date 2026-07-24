@@ -49,7 +49,7 @@ import {
 } from "./drawModel.ts";
 import { textBlockSize, wrapLines } from "./textMetrics.ts";
 import { LibraryPanel } from "./LibraryPanel.tsx";
-import { elementFromShapes, placeElement, type LibraryElement, type LibraryEntry } from "./libraryModel.ts";
+import { elementFromShapes, elementPreviewUrl, findDuplicateId, insertElementAt, placeElement, type LibraryElement, type LibraryEntry } from "./libraryModel.ts";
 import { BOARD_FONT_STACK, useBoardFont } from "./boardFont.ts";
 import { exportStagePng, sketchFileName } from "./exportPng.ts";
 import { exportBoardPng, exportBoardSvg, parseBoardFile, parseBoardPayload } from "./boardFile.ts";
@@ -729,9 +729,22 @@ export function DrawEditor({
   };
   // The live select+move gesture (from DrawCanvas) — while set, the panel is an
   // armed drop target: releasing over it captures the dragged shapes as an
-  // element and ABORTS the move (the shapes never actually go anywhere).
-  const [boardDrag, setBoardDrag] = useState<{ ids: string[]; cancel: () => void } | null>(null);
-  const dropToLibrary = () => {
+  // element and ABORTS the move (the shapes never actually go anywhere). A
+  // preview of the dragged selection rides along so the panel can render the
+  // MINIATURIZED slot as the pointer hovers a drop position.
+  const [boardDrag, setBoardDrag] = useState<{ ids: string[]; cancel: () => void; preview: string } | null>(null);
+  // Build the capture element from the dragged ids once (used for the live
+  // preview AND the actual drop — same normalized shapes either way).
+  const captureElement = (ids: Set<string>) => elementFromShapes(stateRef.current.shapes.filter((sh) => ids.has(sh.id)), newShapeId);
+  const handleMoveGesture = (g: { ids: string[]; cancel: () => void } | null) => {
+    if (!g) {
+      setBoardDrag(null);
+      return;
+    }
+    const el = captureElement(new Set(g.ids));
+    setBoardDrag({ ...g, preview: el ? elementPreviewUrl(el) : "" });
+  };
+  const dropToLibrary = (index: number) => {
     const g = boardDrag;
     if (!g || !library) return;
     const ids = new Set(g.ids);
@@ -740,7 +753,14 @@ export function DrawEditor({
     const picked = stateRef.current.shapes.filter((sh) => ids.has(sh.id));
     g.cancel();
     const el = elementFromShapes(picked, newShapeId);
-    if (el) library.onChange([...library.entries, el]);
+    if (!el) return;
+    // No duplicates: an identical arrangement already in the library is a no-op
+    // (a copy is a copy — re-adding it just clutters the shelf).
+    if (findDuplicateId(library.entries, el)) {
+      notify("Already in the library");
+      return;
+    }
+    library.onChange(insertElementAt(library.entries, el, index));
   };
   const placeFromLibrary = (el: LibraryElement, client: { x: number; y: number }) => {
     const area = areaRef.current;
@@ -1446,7 +1466,7 @@ export function DrawEditor({
               renderAll={renderAll}
               camBusyRef={camBusyRef}
               newId={newShapeId}
-              onMoveGesture={library ? setBoardDrag : undefined}
+              onMoveGesture={library && libOpen ? handleMoveGesture : undefined}
             />
             {session && (
               <textarea
@@ -1567,9 +1587,10 @@ export function DrawEditor({
         <LibraryPanel
           entries={library.entries}
           onChange={library.onChange}
-          boardDrag={boardDrag !== null}
+          boardDrag={boardDrag ? { preview: boardDrag.preview } : null}
           onDropFromBoard={dropToLibrary}
           onPlace={placeFromLibrary}
+          boardScale={view?.scale ?? 1}
           newId={newShapeId}
         />
       )}

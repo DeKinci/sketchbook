@@ -6,6 +6,11 @@ import {
   removeEntry,
   addSeparatorAfter,
   renameSeparator,
+  insertElementAt,
+  moveEntry,
+  elementSignature,
+  findDuplicateId,
+  type LibraryElement,
   type LibraryEntry,
 } from "./libraryModel.ts";
 import { contentBounds, type BoxShape, type Shape } from "./drawModel.ts";
@@ -101,5 +106,52 @@ describe("library entry ops", () => {
     const cleared = renameSeparator(named, "s1", "   ");
     expect((cleared[1] as { label?: string }).label).toBeUndefined();
     expect(renameSeparator(entries, "e1", "nope")[0]).toMatchObject({ id: "e1", kind: "element" });
+  });
+
+  it("insertElementAt drops the element at the slot, clamping out-of-range indices", () => {
+    const entries = [el("e1"), el("e2")];
+    const fresh = { kind: "element", id: "new", shapes: [rect("x")], width: 40, height: 30 } as LibraryElement;
+    expect(insertElementAt(entries, fresh, 1).map((e) => e.id)).toEqual(["e1", "new", "e2"]);
+    expect(insertElementAt(entries, fresh, 0).map((e) => e.id)).toEqual(["new", "e1", "e2"]);
+    expect(insertElementAt(entries, fresh, 99).map((e) => e.id)).toEqual(["e1", "e2", "new"]);
+  });
+
+  it("moveEntry pulls one out and reinserts at the target slot (index is over the OTHERS)", () => {
+    const entries = [el("a"), el("b"), el("c")];
+    expect(moveEntry(entries, "a", 2).map((e) => e.id)).toEqual(["b", "c", "a"]); // a → end
+    expect(moveEntry(entries, "c", 0).map((e) => e.id)).toEqual(["c", "a", "b"]); // c → front
+    expect(moveEntry(entries, "b", 1).map((e) => e.id)).toEqual(["a", "b", "c"]); // stays put
+    expect(moveEntry(entries, "ghost", 0)).toBe(entries); // unknown id → identity
+  });
+});
+
+describe("dedup by signature", () => {
+  it("two captures of the same arrangement (fresh ids each, different board positions) share a signature", () => {
+    const a = elementFromShapes([rect("a1", { x: 100, y: 50 }), rect("a2", { x: 170, y: 90, width: 20, height: 20 })], newId)!;
+    const b = elementFromShapes([rect("b1", { x: 300, y: 210 }), rect("b2", { x: 370, y: 250, width: 20, height: 20 })], newId)!;
+    expect(elementSignature(a.shapes)).toBe(elementSignature(b.shapes));
+  });
+
+  it("a different arrangement gets a different signature", () => {
+    const a = elementFromShapes([rect("a1", { width: 40, height: 30 })], newId)!;
+    const b = elementFromShapes([rect("b1", { width: 80, height: 30 })], newId)!;
+    expect(elementSignature(a.shapes)).not.toBe(elementSignature(b.shapes));
+  });
+
+  it("grouping is part of the signature but the reminted gid is NOT", () => {
+    const grouped = elementFromShapes([rect("a", { groupPath: ["g1"] }), rect("b", { x: 80, groupPath: ["g1"] })], newId)!;
+    const grouped2 = elementFromShapes([rect("a", { groupPath: ["gZZ"] }), rect("b", { x: 80, groupPath: ["gZZ"] })], newId)!;
+    const loose = elementFromShapes([rect("a"), rect("b", { x: 80 })], newId)!;
+    expect(elementSignature(grouped.shapes)).toBe(elementSignature(grouped2.shapes)); // gid name irrelevant
+    expect(elementSignature(grouped.shapes)).not.toBe(elementSignature(loose.shapes)); // but grouped ≠ ungrouped
+  });
+
+  it("findDuplicateId spots an existing match and clears a novel element; separators never match", () => {
+    const first = elementFromShapes([rect("a1", { x: 10, y: 10 })], newId)!;
+    const same = elementFromShapes([rect("z9", { x: 400, y: 400 })], newId)!; // same 40×30 rect elsewhere
+    const other = elementFromShapes([rect("b1", { width: 120, height: 90 })], newId)!;
+    const entries: LibraryEntry[] = [{ kind: "separator", id: "s" }, first];
+    expect(findDuplicateId(entries, same)).toBe(first.id);
+    expect(findDuplicateId(entries, other)).toBeNull();
   });
 });

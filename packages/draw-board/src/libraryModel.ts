@@ -84,3 +84,67 @@ export function renameSeparator(entries: LibraryEntry[], id: string, label: stri
   const trimmed = label.trim();
   return entries.map((e) => (e.id === id && e.kind === "separator" ? { ...e, label: trimmed || undefined } : e));
 }
+
+/** Insert an element at a specific position (drag-in drops at the hovered slot,
+ *  not just the end). Index is clamped into [0, length]. */
+export function insertElementAt(entries: LibraryEntry[], el: LibraryElement, index: number): LibraryEntry[] {
+  const at = Math.max(0, Math.min(index, entries.length));
+  return [...entries.slice(0, at), el, ...entries.slice(at)];
+}
+
+/** Reorder: pull entry `id` out and reinsert it at `toIndex` — where `toIndex`
+ *  is an index into the list WITH the entry already removed (the panel computes
+ *  the drop slot over the OTHER entries, so this matches what the user sees). */
+export function moveEntry(entries: LibraryEntry[], id: string, toIndex: number): LibraryEntry[] {
+  const from = entries.findIndex((e) => e.id === id);
+  if (from === -1) return entries;
+  const without = entries.filter((e) => e.id !== id);
+  const at = Math.max(0, Math.min(toIndex, without.length));
+  return [...without.slice(0, at), entries[from], ...without.slice(at)];
+}
+
+/** A canonical, id-INDEPENDENT signature of an element's shapes — two captures
+ *  of the same arrangement (fresh ids/gids each time, normalized to the origin)
+ *  produce the SAME string, so the library can reject exact duplicates.
+ *
+ *  Canonicalization: strip each shape's `id`; renumber group ids and every
+ *  id-reference (attach / arrow binds / dormant-edge targets) to the shape's
+ *  array index or the gid's first-seen ordinal; round geometry to 2 decimals so
+ *  ULP-level offset noise from two different board positions can't diverge. */
+export function elementSignature(shapes: Shape[]): string {
+  const idIndex = new Map(shapes.map((s, i) => [s.id, i] as const));
+  const gidOrdinal = new Map<string, number>();
+  for (const s of shapes) for (const g of s.groupPath ?? []) if (!gidOrdinal.has(g)) gidOrdinal.set(g, gidOrdinal.size);
+  const ref = (id: string) => idIndex.get(id) ?? -1;
+  const gid = (g: string) => gidOrdinal.get(g) ?? -1;
+
+  const canon = shapes.map((s) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const c: any = { ...s };
+    delete c.id;
+    if (s.groupPath) c.groupPath = s.groupPath.map(gid);
+    if (c.attach) c.attach = { ...c.attach, id: ref(c.attach.id) };
+    if (c.bindStart) c.bindStart = { ...c.bindStart, id: ref(c.bindStart.id) };
+    if (c.bindEnd) c.bindEnd = { ...c.bindEnd, id: ref(c.bindEnd.id) };
+    if (c.dormant) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      c.dormant = c.dormant.map((d: any) => ({
+        ...d,
+        gid: gid(d.gid),
+        attach: d.attach ? { ...d.attach, id: ref(d.attach.id) } : undefined,
+        bindStart: d.bindStart ? { ...d.bindStart, id: ref(d.bindStart.id) } : undefined,
+        bindEnd: d.bindEnd ? { ...d.bindEnd, id: ref(d.bindEnd.id) } : undefined,
+      }));
+    }
+    return c;
+  });
+  return JSON.stringify(canon, (_k, v) => (typeof v === "number" ? Math.round(v * 100) / 100 : v));
+}
+
+/** The id of the first library element whose shapes match `el` exactly (same
+ *  signature), or null if `el` is new. Separators never match. */
+export function findDuplicateId(entries: LibraryEntry[], el: LibraryElement): string | null {
+  const sig = elementSignature(el.shapes);
+  for (const e of entries) if (e.kind === "element" && elementSignature(e.shapes) === sig) return e.id;
+  return null;
+}
