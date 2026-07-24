@@ -686,8 +686,18 @@ export function DrawEditor({
     ta.style.height = "0px";
     const h = ta.scrollHeight;
     ta.style.height = `${h}px`;
-    ta.style.left = `${cur.anchorX * view.scale + view.x - cur.gx * w}px`;
-    ta.style.top = `${cur.anchorY * view.scale + view.y - cur.gy * h}px`;
+    // Place the box off its pinned anchor using the MODEL block metrics — the
+    // exact width/height the committed shape renders to — NOT the measured box.
+    // The browser's scrollHeight/scrollWidth carry a sub-pixel of extra box, so a
+    // CENTERED field (gx/gy = 0.5) pinned on them lands ~0.5px off the canvas and
+    // rounds to a visible 1px jump between editing and shown. The measured box
+    // still drives the field's SIZE (never clips a descender); only the anchor
+    // pivot switches to model space. Top-left growth (gx/gy = 0) is unaffected.
+    const model = textBlockSize(value, cur.fontSize, cur.maxWidth);
+    const pivotW = (cur.maxWidth ?? model.width) * view.scale;
+    const pivotH = model.height * view.scale;
+    ta.style.left = `${cur.anchorX * view.scale + view.x - cur.gx * pivotW}px`;
+    ta.style.top = `${cur.anchorY * view.scale + view.y - cur.gy * pivotH}px`;
   }, [value, session, view]);
 
   // ── Add an image / text (drop or paste from the system) ─────────────────────
