@@ -148,3 +148,59 @@ export function findDuplicateId(entries: LibraryEntry[], el: LibraryElement): st
   for (const e of entries) if (e.kind === "element" && elementSignature(e.shapes) === sig) return e.id;
   return null;
 }
+
+// ── Portable library bundle (download / upload / drop) ──────────────────────
+
+/** Extension of an exported library bundle — a distinctive suffix so a drop
+ *  target can recognize it by name (custom types carry no reliable MIME). */
+export const LIBRARY_FILE_EXT = ".drawlib";
+const LIBRARY_KIND = "draw-board-library";
+
+/** Keep only well-formed entries — files are user-supplied and cross-version,
+ *  so never trust the shape blindly. An element needs a `shapes` array; a
+ *  separator needs only its id. */
+export function sanitizeEntries(raw: unknown): LibraryEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((e): e is LibraryEntry => {
+    if (!e || typeof (e as { id?: unknown }).id !== "string") return false;
+    const kind = (e as { kind?: unknown }).kind;
+    if (kind === "separator") return true;
+    return kind === "element" && Array.isArray((e as { shapes?: unknown }).shapes);
+  });
+}
+
+/** Serialize the whole library to a portable bundle: a JSON envelope with a
+ *  magic marker + version so import can recognize (and reject) it. */
+export function serializeLibrary(entries: LibraryEntry[]): string {
+  return JSON.stringify({ v: 1, kind: LIBRARY_KIND, entries }, null, 2);
+}
+
+/** Parse a bundle's text into its entries, or null if it isn't one of ours. */
+export function parseLibraryFile(text: string): LibraryEntry[] | null {
+  try {
+    const p = JSON.parse(text) as { kind?: unknown; entries?: unknown };
+    if (p?.kind !== LIBRARY_KIND) return null;
+    return sanitizeEntries(p.entries);
+  } catch {
+    return null;
+  }
+}
+
+/** Does this filename look like a library bundle? (Drop-target routing.) */
+export function isLibraryFileName(name: string): boolean {
+  return name.toLowerCase().endsWith(LIBRARY_FILE_EXT);
+}
+
+/** Merge an imported library into the existing one: an incoming entry whose id
+ *  matches one already present REPLACES it in place (an update — ids are UUIDs,
+ *  so a collision means "same item, newer copy"); a new id is appended. The
+ *  existing order is preserved. */
+export function mergeLibrary(existing: LibraryEntry[], incoming: LibraryEntry[]): LibraryEntry[] {
+  const result = existing.slice();
+  for (const inc of incoming) {
+    const i = result.findIndex((e) => e.id === inc.id);
+    if (i >= 0) result[i] = inc;
+    else result.push(inc);
+  }
+  return result;
+}

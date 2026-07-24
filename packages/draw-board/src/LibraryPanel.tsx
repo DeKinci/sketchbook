@@ -21,12 +21,18 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Download, Upload } from "lucide-react";
 import {
   addSeparatorAfter,
   elementPreviewUrl,
+  isLibraryFileName,
+  LIBRARY_FILE_EXT,
+  mergeLibrary,
   moveEntry,
+  parseLibraryFile,
   removeEntry,
   renameSeparator,
+  serializeLibrary,
   type LibraryElement,
   type LibraryEntry,
 } from "./libraryModel.ts";
@@ -59,6 +65,7 @@ export function LibraryPanel({
   onDropFromBoard,
   onPlace,
   boardScale,
+  onNotify,
   newId,
 }: {
   entries: LibraryEntry[];
@@ -73,6 +80,8 @@ export function LibraryPanel({
   onPlace: (el: LibraryElement, client: { x: number; y: number }) => void;
   /** Current board camera scale — sizes the full-size drag-out ghost. */
   boardScale: number;
+  /** User-facing notices (import result / rejected file). */
+  onNotify?: (message: string) => void;
   newId: () => string;
 }) {
   const [over, setOver] = useState(false); // board drag hovering the panel
@@ -83,6 +92,31 @@ export function LibraryPanel({
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const asideRef = useRef<HTMLElement>(null);
   const entryEls = useRef(new Map<string, HTMLElement>());
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Download the whole library as a portable bundle (a temporary object-URL
+  // anchor — the self-contained way, no host download plumbing needed).
+  const downloadLibrary = () => {
+    const blob = new Blob([serializeLibrary(entries)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `library${LIBRARY_FILE_EXT}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  // Upload a bundle → MERGE into the current library (matching ids update in
+  // place, new ids append). Same code path a window/board file-drop uses.
+  const importFile = async (file: File) => {
+    if (!isLibraryFileName(file.name)) return onNotify?.("Not a library file");
+    const parsed = parseLibraryFile(await file.text());
+    if (!parsed) return onNotify?.("Not a library file");
+    onChange(mergeLibrary(entries, parsed));
+    onNotify?.(`Imported ${parsed.length} item${parsed.length === 1 ? "" : "s"}`);
+  };
 
   // Esc closes the menu BEFORE the editor's own Esc ladder sees the key
   // (capture phase + stopPropagation — the board must not also clear its
@@ -218,7 +252,41 @@ export function LibraryPanel({
         setTile(null);
       }}
     >
-      <div className="px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-ink-500">Library</div>
+      <div className="flex items-center justify-between px-2 pb-1 pt-2">
+        <span className="pl-1 text-[10px] font-medium uppercase tracking-wider text-ink-500">Library</span>
+        <div className="flex items-center gap-0.5">
+          <button
+            type="button"
+            aria-label="Download library"
+            title="Download library"
+            onClick={downloadLibrary}
+            disabled={entries.length === 0}
+            className="flex h-6 w-6 items-center justify-center rounded text-ink-400 transition-colors hover:bg-ink-700 hover:text-white disabled:pointer-events-none disabled:opacity-30"
+          >
+            <Download size={13} />
+          </button>
+          <button
+            type="button"
+            aria-label="Upload library"
+            title="Upload library (merges with the current one)"
+            onClick={() => fileInputRef.current?.click()}
+            className="flex h-6 w-6 items-center justify-center rounded text-ink-400 transition-colors hover:bg-ink-700 hover:text-white"
+          >
+            <Upload size={13} />
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={LIBRARY_FILE_EXT}
+            hidden
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = ""; // let the same file be re-picked
+              if (f) void importFile(f);
+            }}
+          />
+        </div>
+      </div>
       <div data-testid="library-grid" className="grid content-start gap-2 p-2 pt-1" style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
         {items.map((item, i) =>
           "placeholder" in item ? (

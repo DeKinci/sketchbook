@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Plus } from "lucide-react";
-import { DrawEditor, parseBoardFile, renderDocThumbnail, type BoardHandle, type DrawDoc, type DrawFeatures } from "@operator/draw-board";
+import { DrawEditor, isLibraryFileName, mergeLibrary, parseBoardFile, parseLibraryFile, renderDocThumbnail, type BoardHandle, type DrawDoc, type DrawFeatures } from "@operator/draw-board";
 import { ExportCluster } from "./ExportCluster.tsx";
 import {
   createDrawing,
@@ -249,6 +249,37 @@ export default function App() {
     saveLibrary(next);
     setLibrary(next);
   }, []);
+
+  // Drop a `.drawlib` ANYWHERE in the window → merge it into the library and
+  // reveal the panel. Capture phase so it preempts the board/sidebar drop
+  // handlers (which would try to read it as an image/board file); the global
+  // dragover keeps the whole window a valid drop target.
+  useEffect(() => {
+    const onDragOver = (e: DragEvent) => {
+      if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
+    };
+    const onDrop = (e: DragEvent) => {
+      const file = Array.from(e.dataTransfer?.files ?? []).find((f) => isLibraryFileName(f.name));
+      if (!file) return; // not ours — let board/sidebar handle images & board files
+      e.preventDefault();
+      e.stopPropagation();
+      void (async () => {
+        const parsed = parseLibraryFile(await file.text());
+        if (!parsed) {
+          notify("Not a library file");
+          return;
+        }
+        mutateLibrary((s) => ({ open: true, entries: mergeLibrary(s.entries, parsed) }));
+        notify(`Imported ${parsed.length} item${parsed.length === 1 ? "" : "s"} into the library`);
+      })();
+    };
+    window.addEventListener("dragover", onDragOver, true);
+    window.addEventListener("drop", onDrop, true);
+    return () => {
+      window.removeEventListener("dragover", onDragOver, true);
+      window.removeEventListener("drop", onDrop, true);
+    };
+  }, [mutateLibrary, notify]);
 
   // Hover preview: which drawing, anchored where.
   const [preview, setPreview] = useState<{ id: string; at: { x: number; y: number } } | null>(null);

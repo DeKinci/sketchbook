@@ -49,7 +49,7 @@ import {
 } from "./drawModel.ts";
 import { textBlockSize, wrapLines } from "./textMetrics.ts";
 import { LibraryPanel } from "./LibraryPanel.tsx";
-import { elementFromShapes, elementPreviewUrl, findDuplicateId, insertElementAt, placeElement, type LibraryElement, type LibraryEntry } from "./libraryModel.ts";
+import { elementFromShapes, elementPreviewUrl, findDuplicateId, insertElementAt, isLibraryFileName, mergeLibrary, parseLibraryFile, placeElement, type LibraryElement, type LibraryEntry } from "./libraryModel.ts";
 import { BOARD_FONT_STACK, useBoardFont } from "./boardFont.ts";
 import { exportStagePng, sketchFileName } from "./exportPng.ts";
 import { exportBoardPng, exportBoardSvg, parseBoardFile, parseBoardPayload } from "./boardFile.ts";
@@ -727,6 +727,25 @@ export function DrawEditor({
     library.onOpenChange?.(!libOpen);
     if (library.open === undefined) setLibOpenLocal(!libOpen);
   };
+  // Ref so the (deps-frozen) onDrop callback reads the live library prop.
+  const libraryRef = useRef(library);
+  libraryRef.current = library;
+  /** Merge a dropped/imported `.drawlib` bundle into the library, then reveal
+   *  the panel so the result is visible. Returns false if `file` isn't a
+   *  bundle (the caller falls back to its normal file handling). */
+  const importLibraryFile = async (file: File): Promise<boolean> => {
+    const lib = libraryRef.current;
+    if (!lib || !isLibraryFileName(file.name)) return false;
+    const parsed = parseLibraryFile(await file.text());
+    if (!parsed) {
+      notify("Not a library file");
+      return true; // it CLAIMED to be one (by extension) — don't place it as an image
+    }
+    lib.onChange(mergeLibrary(lib.entries, parsed));
+    lib.onOpenChange?.(true);
+    notify(`Imported ${parsed.length} item${parsed.length === 1 ? "" : "s"} into the library`);
+    return true;
+  };
   // The live select+move gesture (from DrawCanvas) — while set, the panel is an
   // armed drop target: releasing over it captures the dragged shapes as an
   // element and ABORTS the move (the shapes never actually go anywhere). A
@@ -959,7 +978,18 @@ export function DrawEditor({
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
-      const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
+      const all = Array.from(e.dataTransfer.files);
+      // A library bundle dropped on the board merges into the library (not an
+      // image to place). Stop propagation so a host window-drop handler — which
+      // covers drops OUTSIDE the board — doesn't also merge it.
+      const libFile = all.find((f) => isLibraryFileName(f.name));
+      if (libFile && libraryRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        void importLibraryFile(libFile);
+        return;
+      }
+      const files = all.filter((f) => f.type.startsWith("image/"));
       if (!files.length) return;
       e.preventDefault();
       const stage = stageRef.current;
@@ -1591,6 +1621,7 @@ export function DrawEditor({
           onDropFromBoard={dropToLibrary}
           onPlace={placeFromLibrary}
           boardScale={view?.scale ?? 1}
+          onNotify={notify}
           newId={newShapeId}
         />
       )}

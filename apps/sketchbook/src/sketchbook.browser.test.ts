@@ -2317,3 +2317,47 @@ test("element library: ONE shared collection across drawings — capture on page
   await expect(panel).toBeVisible();
   await expect(tile).toHaveCount(1);
 });
+
+test("library import/export: download the bundle, and drop a .drawlib ANYWHERE in the window to merge it", async ({ page }) => {
+  const el = (id: string, w: number, h: number, color: string) => ({
+    kind: "element",
+    id,
+    width: w,
+    height: h,
+    shapes: [{ id: `s-${id}`, type: "rect", stroke: color, strokeWidth: 3, x: 0, y: 0, width: w, height: h }],
+  });
+  // Init scripts re-run on every navigation (incl. reload) — only seed a virgin
+  // store, so the reload below keeps what the drop merged in.
+  await page.addInitScript((lib) => {
+    if (window.localStorage.getItem("sketchbook:library") === null) window.localStorage.setItem("sketchbook:library", JSON.stringify(lib));
+  }, { open: true, entries: [el("e1", 40, 30, "#e5484d")] });
+  await open(page);
+  const panel = page.locator('aside[aria-label="Library elements"]');
+  const tiles = panel.locator('[aria-label="Library element"]');
+  await expect(panel).toBeVisible();
+  await expect(tiles).toHaveCount(1);
+
+  // Download → a .drawlib bundle with our envelope + the one element.
+  const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "Download library" }).click()]);
+  expect(download.suggestedFilename()).toBe("library.drawlib");
+  const bundleText = fs.readFileSync((await download.path())!, "utf8");
+  expect(JSON.parse(bundleText).kind).toBe("draw-board-library");
+
+  // Drop a bundle onto the SIDEBAR area (not the board) — a window-level drop
+  // that merges: e1 updates in place (id match), e2 is appended.
+  const incoming = JSON.stringify({ v: 1, kind: "draw-board-library", entries: [el("e1", 88, 30, "#e5484d"), el("e2", 50, 50, "#3b82f6")] });
+  await page.evaluate((txt) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([txt], "shared.drawlib", { type: "application/json" }));
+    document.body.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+  }, incoming);
+  await expect(tiles).toHaveCount(2);
+  await expect
+    .poll(() => page.evaluate(() => (JSON.parse(window.localStorage.getItem("sketchbook:library") ?? "{}").entries ?? []).length))
+    .toBe(2);
+
+  // Persisted merge survives a reload.
+  await page.reload();
+  await page.waitForSelector(".konvajs-content canvas");
+  await expect(page.locator('aside[aria-label="Library elements"] [aria-label="Library element"]')).toHaveCount(2);
+});

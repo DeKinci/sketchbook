@@ -10,6 +10,12 @@ import {
   moveEntry,
   elementSignature,
   findDuplicateId,
+  serializeLibrary,
+  parseLibraryFile,
+  mergeLibrary,
+  sanitizeEntries,
+  isLibraryFileName,
+  LIBRARY_FILE_EXT,
   type LibraryElement,
   type LibraryEntry,
 } from "./libraryModel.ts";
@@ -153,5 +159,42 @@ describe("dedup by signature", () => {
     const entries: LibraryEntry[] = [{ kind: "separator", id: "s" }, first];
     expect(findDuplicateId(entries, same)).toBe(first.id);
     expect(findDuplicateId(entries, other)).toBeNull();
+  });
+});
+
+describe("library bundle (serialize / parse / merge)", () => {
+  const el = (id: string): LibraryEntry => ({ kind: "element", id, shapes: [rect(`s-${id}`)], width: 40, height: 30 });
+  const sep = (id: string, label?: string): LibraryEntry => ({ kind: "separator", id, label });
+
+  it("round-trips through serialize → parse", () => {
+    const entries = [el("e1"), sep("s1", "grp"), el("e2")];
+    const parsed = parseLibraryFile(serializeLibrary(entries));
+    expect(parsed).toEqual(entries);
+  });
+
+  it("parseLibraryFile rejects non-bundles (wrong kind, junk, plain array)", () => {
+    expect(parseLibraryFile("not json")).toBeNull();
+    expect(parseLibraryFile(JSON.stringify({ kind: "something-else", entries: [] }))).toBeNull();
+    expect(parseLibraryFile(JSON.stringify([el("e1")]))).toBeNull(); // bare array, no envelope
+  });
+
+  it("sanitizeEntries drops malformed entries (missing id, bad kind, element without shapes)", () => {
+    const raw = [el("ok"), { kind: "element", id: "no-shapes" }, { kind: "bogus", id: "x" }, { id: "no-kind" }, sep("s")];
+    expect(sanitizeEntries(raw).map((e) => e.id)).toEqual(["ok", "s"]);
+    expect(sanitizeEntries("nope")).toEqual([]);
+  });
+
+  it("mergeLibrary appends new ids and replaces matching ones in place (update), preserving order", () => {
+    const existing = [el("a"), sep("s"), el("b")];
+    const updatedB: LibraryEntry = { kind: "element", id: "b", shapes: [rect("s-b", { width: 99 })], width: 99, height: 30 };
+    const merged = mergeLibrary(existing, [updatedB, el("c")]);
+    expect(merged.map((e) => e.id)).toEqual(["a", "s", "b", "c"]); // order kept, c appended
+    expect((merged[2] as LibraryElement).width).toBe(99); // b replaced with the newer copy
+  });
+
+  it("isLibraryFileName matches the extension case-insensitively", () => {
+    expect(isLibraryFileName(`my library${LIBRARY_FILE_EXT}`)).toBe(true);
+    expect(isLibraryFileName("MY-LIB.DRAWLIB")).toBe(true);
+    expect(isLibraryFileName("photo.png")).toBe(false);
   });
 });
