@@ -163,6 +163,22 @@ export function recolorSvg(
   });
 }
 
+/**
+ * The palette to stamp on a freshly-added image so it recolors like a vector
+ * shape: an SVG's discovered fill/stroke colors, or undefined for a raster (or
+ * an SVG with no flat colors / one that won't decode — an opaque blob either
+ * way). Extracted from the add path so real-code tests hit the discovery.
+ */
+export function discoverSvgPaint(dataBase64: string, mediaType: string): { fills: string[]; strokes: string[] } | undefined {
+  if (mediaType !== "image/svg+xml") return undefined;
+  try {
+    const pal = svgPalette(decodeSvg(dataBase64));
+    return pal.fills.length || pal.strokes.length ? pal : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Decode base64 SVG bytes to text (UTF-8 safe). Works in node and the browser. */
 export function decodeSvg(dataBase64: string): string {
   const bin = atob(dataBase64);

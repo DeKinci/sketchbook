@@ -7,7 +7,7 @@ import { DrawCanvas } from "./DrawCanvas.tsx";
 import { Minimap } from "./Minimap.tsx";
 import type { CropControl } from "./CropLayer.tsx";
 import { useDrawing, newShapeId } from "./useDrawing.ts";
-import { svgPalette, decodeSvg } from "./svgRecolor.ts";
+import { discoverSvgPaint } from "./svgRecolor.ts";
 import {
   canRedo,
   canUndo,
@@ -913,15 +913,7 @@ export function DrawEditor({
       // An SVG carries its own colors — discover them so it recolors like a
       // vector shape (its fills light the fill lane, its strokes the stroke
       // lane). Non-SVG rasters stay opaque blobs.
-      let svg: ImageShape["svg"];
-      if (att.mediaType === "image/svg+xml") {
-        try {
-          const pal = svgPalette(decodeSvg(att.dataBase64));
-          if (pal.fills.length || pal.strokes.length) svg = pal;
-        } catch {
-          /* undecodable SVG → treat as an opaque image (no palette) */
-        }
-      }
+      const svg = discoverSvgPaint(att.dataBase64, att.mediaType);
       const shape: ImageShape = {
         id: newShapeId(),
         type: "image",

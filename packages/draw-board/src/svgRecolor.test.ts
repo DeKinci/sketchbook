@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { normalizeColor, svgPalette, recolorSvg, decodeSvg, svgDataUrl, SVG_NONE } from "./svgRecolor.ts";
+import { normalizeColor, svgPalette, recolorSvg, decodeSvg, svgDataUrl, discoverSvgPaint, SVG_NONE } from "./svgRecolor.ts";
+
+const b64 = (s: string) => Buffer.from(s, "utf-8").toString("base64");
 
 describe("normalizeColor — canonicalize any CSS color to #rrggbb", () => {
   it("hex: short/long/upper/alpha all fold to lowercase #rrggbb", () => {
@@ -132,6 +134,21 @@ describe("recolorSvg — bake per-channel maps into the SVG text", () => {
     const src = `<rect fill="#ff0000"/>`;
     expect(recolorSvg(src)).toBe(src);
     expect(recolorSvg(src, {}, {})).toBe(src);
+  });
+});
+
+describe("discoverSvgPaint — the palette stamped on a freshly-added image", () => {
+  it("returns an SVG's discovered fill/stroke palette", () => {
+    const paint = discoverSvgPaint(b64(`<svg><rect fill="#e5484d" stroke="#0000ff"/></svg>`), "image/svg+xml");
+    expect(paint).toEqual({ fills: ["#e5484d"], strokes: ["#0000ff"] });
+  });
+
+  it("is undefined for a raster image (an opaque blob)", () => {
+    expect(discoverSvgPaint(b64("not-an-svg"), "image/png")).toBeUndefined();
+  });
+
+  it("is undefined for an SVG with no flat colors (nothing to recolor)", () => {
+    expect(discoverSvgPaint(b64(`<svg><rect fill="url(#g)" stroke="none"/></svg>`), "image/svg+xml")).toBeUndefined();
   });
 });
 
