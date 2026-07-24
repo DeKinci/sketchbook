@@ -890,6 +890,48 @@ test.describe("rich exports + import drop surfaces", () => {
     await page.mouse.move(10, 400); // leave the row
     await expect(page.locator("[data-row-preview]")).toHaveCount(0);
   });
+
+  test("dropping an SVG discovers its colors and a swatch recolors it — the full user journey", async ({ page }) => {
+    await open(page);
+    await page.getByRole("button", { name: "Cursor — select / move (Tab)" }).click();
+    // Drop a real two-color SVG icon onto the board — the add path discovers its
+    // fill/stroke palette so it recolors like a vector shape.
+    const SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60"><circle cx="30" cy="30" r="26" fill="#e5484d" stroke="#0000ff" stroke-width="4"/></svg>`;
+    const b64 = Buffer.from(SVG, "utf-8").toString("base64");
+    await dropFile(page, ".konvajs-content", b64, "icon.svg", "image/svg+xml");
+
+    // The placed image persisted WITH its discovered two-channel palette.
+    const imageOf = async () => {
+      const d = (await stored(page)).find((x) => x.name === "Untitled");
+      return d?.doc.shapes.find((s) => (s as { type: string }).type === "image") as
+        | { id: string; svg?: { fills: string[]; strokes: string[]; fillMap?: Record<string, string> } }
+        | undefined;
+    };
+    await expect.poll(async () => (await imageOf())?.svg?.fills ?? null).toEqual(["#e5484d"]);
+    expect((await imageOf())!.svg!.strokes).toEqual(["#0000ff"]);
+
+    // The dropped image is auto-selected — wait for it to decode + render.
+    await page.waitForFunction(() => {
+      const s = (window as unknown as { Konva: { stages: { find(sel: string): { image(): unknown }[] }[] } }).Konva.stages.at(-1);
+      return !!s && s.find("Image").length > 0 && !!s.find("Image")[0].image();
+    });
+
+    // Click a COLOR fill swatch (skip the "No fill" special) → the fill class
+    // recolors; the stroke stays.
+    const swatch = page.locator('[data-lane-level="fill"][data-lane-value^="#"]').first();
+    const to = (await swatch.getAttribute("data-lane-value"))!;
+    await swatch.click();
+    await expect.poll(async () => (await imageOf())?.svg?.fillMap?.["#e5484d"] ?? null).toBe(to);
+    // Render: the Konva image is now a recolored inline SVG (new fill, kept stroke).
+    const src = await page.evaluate(() => {
+      const s = (window as unknown as { Konva: { stages: { find(sel: string): { image(): { src: string } | null }[] }[] } }).Konva.stages.at(-1);
+      return s?.find("Image")[0]?.image()?.src ?? "";
+    });
+    expect(src).toContain("image/svg+xml;charset=utf-8,");
+    const decoded = decodeURIComponent(src);
+    expect(decoded).toContain(`fill="${to}"`);
+    expect(decoded).toContain(`stroke="#0000ff"`);
+  });
 });
 
 test.describe("round-trips: SVG, paste, slim, clipboard copy", () => {
