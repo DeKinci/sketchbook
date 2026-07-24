@@ -239,7 +239,12 @@ export function LibraryPanel({
                 else entryEls.current.delete(e.id);
               }}
               role="separator"
-              className="col-span-full flex items-center gap-2 py-0.5"
+              // A 1px line is near-impossible to right-click, so the whole
+              // padded band — not just the hairline — is the menu hit target.
+              // Inline padding (not a py-* utility) so the enlarged target holds
+              // even in a host whose Tailwind hasn't rescanned this file.
+              className="col-span-full flex items-center gap-2"
+              style={{ paddingTop: "0.5rem", paddingBottom: "0.5rem" }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setMenu({ x: e.clientX, y: e.clientY, id: item.entry.id, kind: "separator" });
