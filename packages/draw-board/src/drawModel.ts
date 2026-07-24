@@ -148,6 +148,10 @@ export interface TextShape extends BaseShape {
   /** Background highlight painted behind the block (see {@link textBgBox}) —
    *  purely visual: layout/hit/attach metrics stay the bare block. */
   fill?: string;
+  /** Horizontal alignment of the wrapped lines within the block. Absent = left
+   *  (the free-text default); "center" is stamped on a caption double-clicked
+   *  into a container, so a multi-line label reads centered in the shape. */
+  align?: "center";
 }
 /** A raster placed onto the canvas (dropped/pasted image) — movable/resizable,
  *  distinct from the single full-canvas background. */
@@ -1702,7 +1706,9 @@ export function growthOrigin(at: Attach | undefined): { gx: number; gy: number }
  *  the edge that moved. */
 function retypeset(sh: TextShape, patch: Partial<Pick<TextShape, "text" | "fontSize" | "width">>): TextShape {
   const next = { ...sh, ...patch };
-  const { gx, gy } = growthOrigin(sh.attach);
+  // A centered caption grows from its own center (pivot 0.5/0.5) so re-editing
+  // keeps it centered; every other text pivots on its bond edge.
+  const { gx, gy } = sh.align === "center" ? { gx: 0.5, gy: 0.5 } : growthOrigin(sh.attach);
   if (!gx && !gy) return next;
   const was = textBlockSize(sh.text, sh.fontSize, sh.width);
   const is = textBlockSize(next.text, next.fontSize, next.width);

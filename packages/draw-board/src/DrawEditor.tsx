@@ -172,6 +172,10 @@ interface EditSession {
    *  text) — the field paints it live so the edit is WYSIWYG, and the adaptive
    *  ink resolves its glyph color against it. Null = none. */
   fill: string | null;
+  /** Center-align the field's lines (a caption double-clicked into a shape) —
+   *  paired with gx/gy = 0.5 so the block grows symmetrically from the shape's
+   *  center. Absent = the left-aligned free-text default. */
+  align?: "center";
 }
 
 /**
@@ -529,9 +533,20 @@ export function DrawEditor({
   }, []);
 
   const startText = useCallback(
-    (x: number, y: number) => {
+    (x: number, y: number, caption?: { boxWidth: number }) => {
       const s = stateRef.current;
       setValue("");
+      if (caption) {
+        // Double-click caption: (x,y) is the CONTAINER'S CENTER. Grow the field
+        // symmetrically from it (gx/gy = 0.5) and center-align the lines, so the
+        // label reads centered in the shape while typing and once committed. A
+        // fixed wrap box (the container's inner width) keeps the visible glyphs
+        // pinned on the center — no commit-time jump from the model↔browser width
+        // gap that a free field's half-offset would otherwise amplify.
+        const cap = Math.max(MIN_TEXT_WRAP, caption.boxWidth - 2 * TEXT_BOX_INSET);
+        setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, fill: s.fill, maxWidth: cap, gx: 0.5, gy: 0.5, anchorX: x, anchorY: y, align: "center" });
+        return;
+      }
       setSession({ kind: "new-text", id: null, x, y, fontSize: fontForStroke(s.strokeWidth), color: s.color, fill: s.fill, maxWidth: containKap(x, y), gx: 0, gy: 0, anchorX: x, anchorY: y });
     },
     [containKap]
@@ -541,10 +556,12 @@ export function DrawEditor({
       const sh = stateRef.current.shapes.find((s) => s.id === id) as TextShape | undefined;
       if (!sh || sh.type !== "text") return;
       setValue(sh.text);
-      // Bond-pinned growth: the field extends away from the shape's glued edge
-      // (a text bound above its parent grows UP), mirroring what the commit's
-      // retypeset will do to the model.
-      const { gx, gy } = growthOrigin(sh.attach);
+      // A centered caption re-grows from its own center (gx/gy = 0.5) so editing
+      // keeps it centered; every other text uses bond-pinned growth — the field
+      // extends away from the shape's glued edge (a text bound above its parent
+      // grows UP), mirroring what the commit's retypeset will do to the model.
+      const centered = sh.align === "center";
+      const { gx, gy } = centered ? { gx: 0.5, gy: 0.5 } : growthOrigin(sh.attach);
       const b = textBlockSize(sh.text, sh.fontSize, sh.width);
       // The shape's own box wins; an unboxed text inside a container caps at it.
       setSession({
@@ -560,6 +577,7 @@ export function DrawEditor({
         gy,
         anchorX: sh.x + gx * b.width,
         anchorY: sh.y + gy * b.height,
+        ...(centered && { align: "center" as const }),
       });
     },
     [containKap]
@@ -575,11 +593,18 @@ export function DrawEditor({
     const width = wrapped ? cur.maxWidth : undefined;
     if (cur.kind === "new-text") {
       if (text) {
+        // Place the block off its pinned anchor by the growth fractions — the free
+        // default (gx/gy = 0, anchor = top-left) reduces to the click point, while
+        // a centered caption (gx/gy = 0.5, anchor = shape center) lands with its
+        // bounding box centered on the shape. Same math the live field used.
+        const size = textBlockSize(text, cur.fontSize, width);
+        const x = cur.anchorX - cur.gx * size.width;
+        const y = cur.anchorY - cur.gy * size.height;
         dispatch({
           type: "addShapes",
           detectAttach: true, // a placed text glues to a shape it's dropped against
           distScale: distScale(), // screen-true glue range, same as every other placement
-          shapes: [{ id: newShapeId(), type: "text", stroke: cur.color, strokeWidth: stateRef.current.strokeWidth, x: cur.x, y: cur.y, text, fontSize: cur.fontSize, ...(width !== undefined && { width }), ...(cur.fill && { fill: cur.fill }) }],
+          shapes: [{ id: newShapeId(), type: "text", stroke: cur.color, strokeWidth: stateRef.current.strokeWidth, x, y, text, fontSize: cur.fontSize, ...(width !== undefined && { width }), ...(cur.fill && { fill: cur.fill }), ...(cur.align && { align: cur.align }) }],
         });
         // Text is one-use → snap back to the last selectable tool.
         dispatch({ type: "setTool", tool: stateRef.current.baseTool });
@@ -1539,6 +1564,9 @@ export function DrawEditor({
                     color: ink,
                     caretColor: ink,
                     ...(session.fill && { backgroundColor: session.fill, boxShadow: `0 0 0 ${pad}px ${session.fill}` }),
+                    // Center a caption's lines live (overrides the base text-left)
+                    // so the typing field matches the committed align="center".
+                    ...(session.align === "center" && { textAlign: "center" as const }),
                     fontSize: session.fontSize * view.scale,
                     fontFamily: BOARD_FONT_STACK,
                     // Capped: the field IS the wrap box — it wraps at the parent's

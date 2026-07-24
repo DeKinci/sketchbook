@@ -172,7 +172,7 @@ export function DrawCanvas({
   /** A text shape currently being edited (hidden under the textarea), or null. */
   editingId: string | null;
   /** Place + edit a new standalone text at these logical coords (text tool). */
-  onTextClick: (x: number, y: number) => void;
+  onTextClick: (x: number, y: number, caption?: { boxWidth: number }) => void;
   /** Reopen an existing text shape for editing. */
   onEditText: (id: string) => void;
   /** An image currently in crop mode (rendered by the crop overlay), or null. */
@@ -973,7 +973,9 @@ export function DrawCanvas({
         // The pair's first click selected the container — clear it so no
         // Transformer frames a shape under the typing overlay.
         dispatch({ type: "select", ids: [] });
-        onTextClick(p.x, p.y);
+        // Caption spawns CENTERED in the container (not at the click point) — the
+        // box's center + inner width drive a symmetric, center-aligned field.
+        onTextClick(b.x + b.width / 2, b.y + b.height / 2, { boxWidth: b.width });
       }
     }
   };
@@ -1504,6 +1506,7 @@ export function DrawCanvas({
                     x={sh.x}
                     y={sh.y}
                     width={boundingBox(sh).width}
+                    align={sh.align === "center" ? "center" : "left"}
                     wrap="none"
                     text={wrapLines(sh.text, sh.fontSize, sh.width).join("\n")}
                     fontSize={sh.fontSize}

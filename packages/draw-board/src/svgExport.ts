@@ -121,10 +121,15 @@ function shapeSvg(sh: Shape, shapes: Shape[]): string {
             return `<rect x="${num(b.x)}" y="${num(b.y)}" width="${num(b.width)}" height="${num(b.height)}" rx="${num(b.pad)}" fill="${sh.fill}"/>`;
           })()
         : "";
+      // Centered captions anchor each line at the block's mid-x (text-anchor
+      // middle) — the same per-line centering Konva's align="center" paints.
+      const centered = sh.align === "center";
+      const tx = centered ? num(sh.x + boundingBox(sh).width / 2) : num(sh.x);
+      const anchor = centered ? ` text-anchor="middle"` : "";
       return (
         bg +
         wrapLines(sh.text, sh.fontSize, sh.width)
-          .map((ln, i) => `<text x="${num(sh.x)}" y="${num(sh.y + sh.fontSize * (i + 1))}" font-family="${BOARD_FONT_STACK}" font-size="${sh.fontSize}" fill="${color}">${esc(ln)}</text>`)
+          .map((ln, i) => `<text x="${tx}" y="${num(sh.y + sh.fontSize * (i + 1))}"${anchor} font-family="${BOARD_FONT_STACK}" font-size="${sh.fontSize}" fill="${color}">${esc(ln)}</text>`)
           .join("")
       );
     }

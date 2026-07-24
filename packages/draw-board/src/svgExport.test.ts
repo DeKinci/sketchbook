@@ -63,6 +63,18 @@ describe("exportSvg", () => {
     expect(free).toMatch(/y="70"[^>]*>two<\/text>/);
   });
 
+  it("centered caption anchors every line at the block mid-x (text-anchor middle)", () => {
+    const svg = exportSvg(
+      doc([{ id: "t", type: "text", stroke: "#f5a623", strokeWidth: 3, x: 20, y: 50, text: "aaa bbb ccc", fontSize: 10, width: 40, align: "center" } as Shape])
+    );
+    // Block mid-x = x + width/2 = 40 — every wrapped line centered there.
+    expect(svg).toMatch(/<text x="40"[^>]*text-anchor="middle"[^>]*>aaa bbb<\/text>/);
+    expect(svg).toMatch(/<text x="40"[^>]*text-anchor="middle"[^>]*>ccc<\/text>/);
+    // A left-aligned text (no align) stays anchored at x with no text-anchor.
+    const left = exportSvg(doc([{ id: "t", type: "text", stroke: "#f5a623", strokeWidth: 3, x: 20, y: 50, text: "aaa", fontSize: 10 } as Shape]));
+    expect(left).not.toMatch(/text-anchor/);
+  });
+
   it("fills: interior on boxes, closed twin under an enclosed doodle, padded bg chip behind text", () => {
     const shapes: Shape[] = [
       { ...rect("rf"), fill: "#f5a623" } as Shape,
