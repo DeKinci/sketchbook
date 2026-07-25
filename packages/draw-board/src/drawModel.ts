@@ -1474,9 +1474,11 @@ export function paintOrder(shapes: readonly Shape[]): Shape[] {
     }
     u.members.push(sh);
     // A member joins the size-sorted FILL tier if it paints an opaque interior:
-    // an image (whole box) or a shape/text with a `fill`. Its footprint is the
-    // union AABB of those members only — a giant unfilled outline adds nothing.
-    if (sh.type === "image" || ("fill" in sh && sh.fill)) {
+    // an image (whole box), or a shape that {@link paintsFill} NOW (a filled
+    // box/text, or an ENCLOSED filled pen — an open pen's dormant fill doesn't
+    // paint, so it stays a stroke). Its footprint is the union AABB of those
+    // members only — a giant unfilled outline adds nothing.
+    if (sh.type === "image" || paintsFill(sh)) {
       const b = boundingBox(sh);
       u.box = u.box
         ? {

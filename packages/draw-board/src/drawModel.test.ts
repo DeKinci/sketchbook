@@ -1579,6 +1579,27 @@ describe("paintOrder — the fill/stroke z invariant matrix", () => {
       expect(ids([pen("p"), outline()])).toEqual(["p", "outline"]);
     });
   });
+
+  describe("the fill tier is what PAINTS a fill now — not merely what carries the field", () => {
+    it("an ENCLOSED filled pen is a fill (size-sorts); an OPEN pen with a dormant fill stays a stroke", () => {
+      // Closed loop, filled → a fill: it sinks below a smaller unfilled outline? No —
+      // the outline is a stroke and rides on top; the closed pen sits in the fill tier.
+      const closed: Shape = { id: "closed", type: "pen", stroke: "#000", strokeWidth: 3, fill: "#f00", points: [0, 0, 100, 0, 100, 100, 0, 100, 0, 0] };
+      expect(ids([closed, outline()])).toEqual(["closed", "outline"]); // fill below, stroke on top
+      // Same fill field, but the path is OPEN → paints no interior → a stroke, so it
+      // keeps insertion order with other strokes (never sinks into the fill tier).
+      const open: Shape = { id: "open", type: "pen", stroke: "#000", strokeWidth: 3, fill: "#f00", points: [0, 0, 100, 100] };
+      expect(ids([open, bigFill()])).toEqual(["bigFill", "open"]); // open pen rides above the fill
+      expect(ids([bigFill(), open])).toEqual(["bigFill", "open"]);
+    });
+
+    it("a text with a highlight fill joins the fill tier; a plain text is a stroke", () => {
+      const hi: Shape = { id: "hi", type: "text", stroke: "#000", strokeWidth: 3, x: 0, y: 0, text: "hi", fontSize: 18, fill: "#ff0" };
+      const plain: Shape = { id: "plain", type: "text", stroke: "#000", strokeWidth: 3, x: 0, y: 0, text: "yo", fontSize: 18 };
+      expect(ids([hi, bigFill()])).toEqual(["bigFill", "hi"]); // small highlight above the big fill
+      expect(ids([plain, bigImg()])).toEqual(["bigImg", "plain"]); // plain text (stroke) above the image
+    });
+  });
 });
 
 describe("drawReducer — one-use tool clusters (arm + cycle + variant memory)", () => {
