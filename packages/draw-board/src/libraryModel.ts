@@ -62,10 +62,25 @@ export function placeElement(el: LibraryElement, at: { x: number; y: number }, n
   return clonePastedShapes(el.shapes, at.x - el.width / 2, at.y - el.height / 2, newId);
 }
 
-/** Standalone SVG preview for an element tile (data URL). Content-trimmed by
- *  the export's own crop rules; `rich: false` — a preview embeds no doc. */
+/** Fraction of an element's larger side kept as a margin around every tile
+ *  preview — a RELATIVE frame so tiles read as one padding whatever their size
+ *  (a fixed content-space pad dwarfs a small element and barely borders a big
+ *  one; see the "same relative margin" test). */
+const PREVIEW_PAD_FRAC = 0.06;
+
+/** Standalone SVG preview for an element tile (data URL). Framed with a margin
+ *  SCALED to the element (not the export's fixed pad), floored to clear stroke
+ *  half-widths and arrowheads so nothing clips; `rich: false` — a preview
+ *  embeds no doc. Shapes are normalized to (0,0)..(width,height), so a symmetric
+ *  pad centers the content. */
 export function elementPreviewUrl(el: LibraryElement): string {
-  const svg = exportSvg({ shapes: el.shapes, width: el.width, height: el.height }, { rich: false });
+  const maxStroke = el.shapes.reduce((m, s) => Math.max(m, s.strokeWidth), 0);
+  // Arrowheads jut ~(8 + strokeWidth) past the geometry the bbox measures — give
+  // arrow-bearing elements that clearance so a tight frame can't clip a head.
+  const headRoom = el.shapes.some((s) => s.type === "arrow") ? 8 + maxStroke : 0;
+  const pad = Math.max(PREVIEW_PAD_FRAC * Math.max(el.width, el.height), maxStroke / 2 + headRoom);
+  const crop = { x: -pad, y: -pad, width: el.width + pad * 2, height: el.height + pad * 2 };
+  const svg = exportSvg({ shapes: el.shapes, width: el.width, height: el.height }, { rich: false, crop });
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 

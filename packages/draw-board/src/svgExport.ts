@@ -155,6 +155,11 @@ function shapeSvg(sh: Shape, shapes: Shape[]): string {
 export interface SvgExportOptions {
   /** Embed the doc for full re-import (default true — the "rich" export). */
   rich?: boolean;
+  /** Explicit viewBox/crop (logical units) — skips the content-trim + fixed
+   *  export pad. Tile previews pass a margin scaled to the element so every
+   *  tile frames its content the same, regardless of size (see
+   *  {@link elementPreviewUrl}). */
+  crop?: { x: number; y: number; width: number; height: number };
 }
 
 /** Serialize a doc to a standalone SVG. ViewBox follows the PNG export's crop
@@ -162,11 +167,13 @@ export interface SvgExportOptions {
  *  (+pad), unclamped — the infinite plane has no edges. */
 export function exportSvg(doc: DrawDoc, opts?: SvgExportOptions): string {
   const rich = opts?.rich !== false;
-  // Annotation: the image IS the frame (doc box). Blank sketch: trim to content
-  // (+pad) unclamped; an empty board falls back to the legacy doc box.
-  const crop = doc.background
-    ? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 }
-    : contentCropLogical(doc, { clamp: false }) ?? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 };
+  // An explicit crop wins (tile previews). Else — annotation: the image IS the
+  // frame (doc box); blank sketch: trim to content (+pad) unclamped; empty board
+  // falls back to the legacy doc box.
+  const crop = opts?.crop
+    ?? (doc.background
+      ? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 }
+      : contentCropLogical(doc, { clamp: false }) ?? { x: 0, y: 0, width: doc.width || 1, height: doc.height || 1 });
   const ordered = paintOrder(doc.shapes);
   const body = ordered
     .map((sh) => shapeSvg(sh, ordered)) // fillAt wants paint order, not insertion

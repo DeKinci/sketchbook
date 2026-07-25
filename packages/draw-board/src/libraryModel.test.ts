@@ -92,11 +92,47 @@ describe("placeElement", () => {
 });
 
 describe("elementPreviewUrl", () => {
+  // The "x y w h" viewBox of a preview — the frame the tile's object-contain fits.
+  const viewBox = (el: LibraryElement) => {
+    const svg = decodeURIComponent(elementPreviewUrl(el));
+    const m = svg.match(/viewBox="([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)"/)!;
+    return { x: +m[1], y: +m[2], width: +m[3], height: +m[4] };
+  };
+  // What fraction of the frame the content spans (the larger side) — the tile's
+  // visual "fill", and inversely its padding.
+  const fillFrac = (el: LibraryElement) => Math.max(el.width, el.height) / Math.max(viewBox(el).width, viewBox(el).height);
+
   it("returns an SVG data URL", () => {
     const el = elementFromShapes([rect("a")], newId)!;
     const url = elementPreviewUrl(el);
     expect(url.startsWith("data:image/svg+xml")).toBe(true);
     expect(decodeURIComponent(url)).toContain("<svg");
+  });
+
+  it("frames every element with the SAME relative margin — tiles read as one padding, any size", () => {
+    // The same square at two very different scales. A fixed content-space margin
+    // dwarfs the small one (a speck adrift in a huge float) while barely
+    // bordering the big one, so the tiles never share a visual padding. The
+    // margin must scale WITH the element: content fills the same fraction of
+    // both frames.
+    const small = elementFromShapes([rect("s", { x: 0, y: 0, width: 20, height: 20, strokeWidth: 1 })], newId)!;
+    const big = elementFromShapes([rect("b", { x: 0, y: 0, width: 400, height: 400, strokeWidth: 1 })], newId)!;
+    expect(fillFrac(small)).toBeCloseTo(fillFrac(big), 2);
+    expect(fillFrac(big)).toBeGreaterThan(0.8); // content dominates, not lost in margin
+  });
+
+  it("holds the shared margin across aspect ratios (wide vs tall fill their frames the same)", () => {
+    const wide = elementFromShapes([rect("w", { x: 0, y: 0, width: 300, height: 40, strokeWidth: 2 })], newId)!;
+    const tall = elementFromShapes([rect("t", { x: 0, y: 0, width: 40, height: 300, strokeWidth: 2 })], newId)!;
+    expect(fillFrac(wide)).toBeCloseTo(fillFrac(tall), 2);
+  });
+
+  it("centers the content in the frame (equal margin on every side)", () => {
+    const el = elementFromShapes([rect("a", { x: 0, y: 0, width: 60, height: 40, strokeWidth: 2 })], newId)!;
+    const vb = viewBox(el);
+    // The content box (0,0,60,40) sits centered — left margin == right, top == bottom.
+    expect(vb.x).toBeCloseTo(-(vb.width - el.width) / 2, 3);
+    expect(vb.y).toBeCloseTo(-(vb.height - el.height) / 2, 3);
   });
 });
 
