@@ -1439,34 +1439,32 @@ export function toClusterVariant(sh: Shape, target: ShapeVariant | LineVariant):
   return { ...rest, type: target }; // "line" | "arrow" (no head-at-start)
 }
 
-/** Paint order for the canvas — the "nothing disappears" law, three tiers:
+/** Paint order for the canvas — the "nothing disappears" law, two tiers by what
+ *  a mark IS, not what type it is:
  *
- *  1. IMAGES at the bottom, larger lower (`clusterWeight` desc) — a small image
- *     stays visible on a big one, and every vector shape paints above every image.
- *  2. FILLED units next, larger footprint lower: an opaque fill is the one thing
+ *  1. FILLS (bottom), larger footprint lower: an opaque interior is the one thing
  *     that can bury other marks, so bigger occluders sink — a small filled badge
- *     drawn BEFORE a big filled card still shows on top of it.
- *  3. UNFILLED marks (outlines, pen, lines, text glyphs) on top, in INSERTION
- *     order — a fill never swallows a stroke.
+ *     drawn BEFORE a big filled card still shows on top of it. A mark paints a
+ *     fill when it's an IMAGE (its whole box is opaque) OR a shape/text carrying
+ *     a `fill`. So an image is just a fill: a small image sits above a big filled
+ *     card, a big image sinks below a small badge — images size-sort WITH fills,
+ *     not in a separate basement.
+ *  2. STROKES (top), in INSERTION order: unfilled outlines, pen, lines, text
+ *     glyphs — a fill never swallows a stroke.
  *
  *  Unit-grained: a group paints as ONE contiguous atom (members in insertion
- *  order) at the tier/footprint of its FILLED members' union AABB — the z sort
- *  never splits a unit (images excepted: they always drop to tier 1, grouped or
- *  not). Ties keep insertion order (stable sort). Pure: the model array is
- *  untouched (undo/paste/glue rely on its order); only the painted copy is
- *  reordered, so z tracks size LIVE as shapes resize. `fillAt` (adaptive ink)
- *  must be fed THIS order — the ground under a stroke is the paint-topmost
- *  fill, not the insertion-topmost. */
+ *  order) at the footprint of its FILL-PAINTING members' union AABB (images
+ *  included; a giant unfilled outline in a group doesn't sink its small chip).
+ *  Ties keep insertion order (stable sort). Pure: the model array is untouched
+ *  (undo/paste/glue rely on its order); only the painted copy is reordered, so z
+ *  tracks size LIVE as shapes resize. `fillAt` (adaptive ink) must be fed THIS
+ *  order — the ground under a stroke is the paint-topmost fill, not the
+ *  insertion-topmost (it samples image pixels separately, so it skips images). */
 export function paintOrder(shapes: readonly Shape[]): Shape[] {
   type Unit = { members: Shape[]; weight: number; box: { x1: number; y1: number; x2: number; y2: number } | null };
-  const images: Shape[] = [];
   const units: Unit[] = [];
   const byKey = new Map<string, Unit>();
   for (const sh of shapes) {
-    if (sh.type === "image") {
-      images.push(sh);
-      continue;
-    }
     const key = rootUnitKeyOf(sh);
     let u = byKey.get(key);
     if (!u) {
@@ -1475,9 +1473,10 @@ export function paintOrder(shapes: readonly Shape[]): Shape[] {
       units.push(u);
     }
     u.members.push(sh);
-    if ("fill" in sh && sh.fill) {
-      // Occlusion footprint: union AABB of the unit's filled members only — a
-      // giant unfilled outline in a group doesn't sink its small chip.
+    // A member joins the size-sorted FILL tier if it paints an opaque interior:
+    // an image (whole box) or a shape/text with a `fill`. Its footprint is the
+    // union AABB of those members only — a giant unfilled outline adds nothing.
+    if (sh.type === "image" || ("fill" in sh && sh.fill)) {
       const b = boundingBox(sh);
       u.box = u.box
         ? {
@@ -1490,10 +1489,9 @@ export function paintOrder(shapes: readonly Shape[]): Shape[] {
       u.weight = (u.box.x2 - u.box.x1) * (u.box.y2 - u.box.y1) || 1; // zero-area fills still occlude
     }
   }
-  images.sort((a, b) => clusterWeight(b) - clusterWeight(a));
   const filled = units.filter((u) => u.weight > 0).sort((a, b) => b.weight - a.weight);
   const unfilled = units.filter((u) => u.weight === 0);
-  return [...images, ...filled.flatMap((u) => u.members), ...unfilled.flatMap((u) => u.members)];
+  return [...filled.flatMap((u) => u.members), ...unfilled.flatMap((u) => u.members)];
 }
 
 /** Root unit key of a shape: its root group id, or its own id when loose. The

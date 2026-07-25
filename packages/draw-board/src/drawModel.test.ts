@@ -1423,18 +1423,18 @@ const image = (id: string, over: Partial<Extract<Shape, { type: "image" }>> = {}
   id, type: "image", stroke: "#000", strokeWidth: 1, x: 0, y: 0, width: 400, height: 300, dataBase64: "", mediaType: "image/png", ...over,
 });
 
-describe("paintOrder — images beneath, vector shapes on top", () => {
-  it("a small rect paints above a big image (the reported nuance)", () => {
+describe("paintOrder — unfilled marks above images, filled units size-sort", () => {
+  it("a small UNFILLED rect paints above a big image (a stroke above a fill)", () => {
     const img = image("img", { width: 400, height: 300 });
-    const small = box("r", { x: 20, y: 20, width: 40, height: 40 });
+    const small = box("r", { x: 20, y: 20, width: 40, height: 40 }); // no fill → stroke
     expect(ids([small, img])).toEqual(["img", "r"]); // rect on top whatever insertion order
     expect(ids([img, small])).toEqual(["img", "r"]);
   });
 
-  it("even a LARGE rect stays above an image", () => {
+  it("even a LARGE UNFILLED rect stays above an image (strokes never sink under a fill)", () => {
     const img = image("img", { width: 100, height: 100 });
-    const big = box("big", { width: 500, height: 500 }); // bigger than the image
-    expect(ids([img, big])).toEqual(["img", "big"]); // shape still on top
+    const big = box("big", { width: 500, height: 500 }); // bigger, but unfilled → still a stroke
+    expect(ids([img, big])).toEqual(["img", "big"]); // stroke still on top
     expect(ids([big, img])).toEqual(["img", "big"]);
   });
 
@@ -1521,6 +1521,63 @@ describe("paintOrder — images beneath, vector shapes on top", () => {
     const before = input.map((s) => s.id);
     paintOrder(input);
     expect(input.map((s) => s.id)).toEqual(before); // ["a","b"] unchanged
+  });
+});
+
+// The z-order invariant matrix. Two classes of mark decide everything:
+//   FILL   = an image (opaque box) OR a shape/text carrying a `fill`
+//   STROKE = an unfilled outline / pen / line / text
+// FILLS size-sort (bigger footprint lower, so a small fill always peeks above a
+// big one); STROKES ride on top in insertion order (a fill never buries a mark).
+// An image is JUST a fill — it size-sorts WITH filled shapes, not in a separate
+// basement. This matrix pins every cell, especially the image×fill mix the old
+// three-tier model (images always at the bottom) got wrong.
+describe("paintOrder — the fill/stroke z invariant matrix", () => {
+  const bigFill = () => box("bigFill", { x: 0, y: 0, width: 200, height: 200, fill: "#f00" }); // area 40000
+  const smallFill = () => box("smallFill", { x: 10, y: 10, width: 40, height: 40, fill: "#0f0" }); // area 1600
+  const bigImg = () => image("bigImg", { width: 200, height: 200 }); // area 40000
+  const smallImg = () => image("smallImg", { width: 40, height: 40 }); // area 1600
+  const outline = () => box("outline", { x: 0, y: 0, width: 300, height: 300 }); // unfilled → stroke
+  const pen = (id = "pen"): Shape => ({ id, type: "pen", stroke: "#000", strokeWidth: 3, points: [0, 0, 400, 400] });
+
+  describe("fills size-sort — bigger footprint paints lower, whatever the insertion order", () => {
+    it("fill vs fill", () => {
+      expect(ids([smallFill(), bigFill()])).toEqual(["bigFill", "smallFill"]);
+      expect(ids([bigFill(), smallFill()])).toEqual(["bigFill", "smallFill"]);
+    });
+    it("image vs image", () => {
+      expect(ids([smallImg(), bigImg()])).toEqual(["bigImg", "smallImg"]);
+      expect(ids([bigImg(), smallImg()])).toEqual(["bigImg", "smallImg"]);
+    });
+    it("image vs fill — an image is a fill, so a SMALL image paints above a BIG fill", () => {
+      expect(ids([smallImg(), bigFill()])).toEqual(["bigFill", "smallImg"]);
+      expect(ids([bigFill(), smallImg()])).toEqual(["bigFill", "smallImg"]);
+    });
+    it("fill vs image — a SMALL fill paints above a BIG image", () => {
+      expect(ids([smallFill(), bigImg()])).toEqual(["bigImg", "smallFill"]);
+      expect(ids([bigImg(), smallFill()])).toEqual(["bigImg", "smallFill"]);
+    });
+    it("equal-footprint fill and image tie-break by insertion order (stable)", () => {
+      const f = box("f", { width: 100, height: 100, fill: "#f00" });
+      const i = image("i", { width: 100, height: 100 }); // same area
+      expect(ids([f, i])).toEqual(["f", "i"]);
+      expect(ids([i, f])).toEqual(["i", "f"]);
+    });
+  });
+
+  describe("strokes ride on top of every fill — a fill never buries a mark", () => {
+    it("an unfilled shape sits above any fill and any image, whatever the size", () => {
+      expect(ids([outline(), bigFill()])).toEqual(["bigFill", "outline"]);
+      expect(ids([outline(), bigImg()])).toEqual(["bigImg", "outline"]);
+    });
+    it("a pen stroke sits above fills and images", () => {
+      // Both 40000-area fills sink below the pen; equal area ties to insertion order.
+      expect(ids([pen(), bigFill(), bigImg()])).toEqual(["bigFill", "bigImg", "pen"]);
+    });
+    it("strokes keep insertion order among themselves (never size-sorted)", () => {
+      expect(ids([outline(), pen("p")])).toEqual(["outline", "p"]);
+      expect(ids([pen("p"), outline()])).toEqual(["p", "outline"]);
+    });
   });
 });
 

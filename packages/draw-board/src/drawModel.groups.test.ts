@@ -925,10 +925,17 @@ describe("groupSelection — intra-group paint order (nothing disappears after �
     expect(paintOrder(s.shapes).map((sh) => sh.id)).toEqual(["big", "small"]);
   });
 
-  it("an image member sinks to the bottom of the group order", () => {
-    let s = seeded([box("v", { fill: "#f00" }), image("img", { x: 0, y: 0, width: 200, height: 200 })]);
-    s = grouped(s, ["v", "img"], "g");
-    expect(groupIds(s, "g")).toEqual(["img", "v"]); // image bottom, vector on top
+  it("an image member size-sorts within the group like any fill — a BIG image sinks", () => {
+    // An image is a fill: a big image sinks below a smaller filled member.
+    let s = seeded([box("v", { fill: "#f00" }), image("bigImg", { x: 0, y: 0, width: 200, height: 200 })]);
+    s = grouped(s, ["v", "bigImg"], "g");
+    expect(groupIds(s, "g")).toEqual(["bigImg", "v"]); // big image bottom, small fill on top
+  });
+
+  it("a SMALL image member rides ABOVE a bigger filled member (nothing disappears)", () => {
+    let s = seeded([box("card", { fill: "#f00", width: 300, height: 200 }), image("badge", { x: 0, y: 0, width: 30, height: 30 })]);
+    s = grouped(s, ["card", "badge"], "g");
+    expect(groupIds(s, "g")).toEqual(["card", "badge"]); // big fill bottom, small image on top
   });
 
   it("orders child units by footprint while keeping each subgroup's internal order intact", () => {
