@@ -59,6 +59,9 @@ import {
   isEnclosed,
   paintsFill,
   fillAt,
+  layerOf,
+  selectionLayer,
+  LAYER_SLOTS,
   selectionStrokes,
   selectionFills,
   contrastSolidOver,
@@ -1524,6 +1527,116 @@ describe("paintOrder — unfilled marks above images, filled units size-sort", (
   });
 });
 
+// The explicit LAYER is the outer key of paint order: it overrides the whole
+// fill/stroke/size law across layers, while each layer keeps that law internally.
+describe("paintOrder — explicit layers override the z-law", () => {
+  it("a lower layer sinks a stroke UNDER a fill it would normally top", () => {
+    // An unfilled outline normally paints ABOVE a filled card; on layer -1 it goes under.
+    const card = box("card", { width: 300, height: 200, fill: "#fdba74" }); // layer 0
+    const mark = box("mark", { x: 10, y: 10, width: 30, height: 30, layer: -1 }); // stroke, forced below
+    expect(ids([mark, card])).toEqual(["mark", "card"]);
+    expect(ids([card, mark])).toEqual(["mark", "card"]);
+  });
+
+  it("a higher layer lifts a BIG fill above every layer-0 mark, stroke included", () => {
+    const big = box("big", { width: 300, height: 200, fill: "#f00", layer: 1 }); // normally sinks
+    const small = box("small", { x: 10, y: 10, width: 40, height: 40, fill: "#0f0" }); // layer 0
+    const outline = box("outline", { width: 500, height: 500 }); // layer 0 stroke, normally topmost
+    expect(ids([big, small, outline])).toEqual(["small", "outline", "big"]);
+  });
+
+  it("keeps today's fill/stroke/size law WITHIN a layer", () => {
+    const card = box("card", { width: 300, height: 200, fill: "#fdba74", layer: 1 });
+    const badge = box("badge", { width: 40, height: 30, fill: "#f5a623", layer: 1 });
+    const mark = box("mark", { x: 5, y: 5, width: 20, height: 20, layer: 1 }); // stroke
+    expect(ids([badge, card, mark])).toEqual(["card", "badge", "mark"]); // big fill, small fill, stroke
+  });
+
+  it("orders three bands back → front regardless of size or fill", () => {
+    const back = image("back", { width: 20, height: 20, layer: -1 }); // tiny image, forced bottom
+    const mid = box("mid", { width: 400, height: 400, fill: "#111" }); // huge fill, layer 0
+    const front = box("front", { x: 5, y: 5, width: 10, height: 10, layer: 1 }); // tiny stroke, forced top
+    expect(ids([mid, front, back])).toEqual(["back", "mid", "front"]);
+  });
+
+  it("defaults a shape with no layer to 0", () => {
+    const a = box("a", { width: 100, height: 100, fill: "#111" }); // no layer → 0
+    const b = box("b", { x: 200, width: 100, height: 100, fill: "#222", layer: 0 }); // explicit 0
+    const up = box("up", { x: 400, width: 100, height: 100, fill: "#333", layer: 1 });
+    expect(ids([a, b, up])).toEqual(["a", "b", "up"]); // a & b share band 0; up on top
+  });
+
+  it("a group rides ONE layer as a contiguous atom above a loose layer-0 fill", () => {
+    const gid = "g";
+    const m1 = box("m1", { width: 50, height: 50, groupPath: [gid], layer: 1 });
+    const m2 = box("m2", { x: 100, width: 50, height: 50, groupPath: [gid], layer: 1 });
+    const card = box("card", { width: 400, height: 300, fill: "#fdba74" }); // loose, layer 0
+    expect(ids([m1, card, m2])).toEqual(["card", "m1", "m2"]);
+  });
+
+  it("a mixed-layer group rides its TOPMOST member's layer", () => {
+    const gid = "g";
+    const m1 = box("m1", { width: 50, height: 50, groupPath: [gid], layer: 0 });
+    const m2 = box("m2", { x: 100, width: 50, height: 50, groupPath: [gid], layer: 1 });
+    const front = box("front", { x: 5, y: 5, width: 10, height: 10, fill: "#111" }); // loose, layer 0
+    expect(ids([m1, m2, front])).toEqual(["front", "m1", "m2"]); // unit layer = max(0,1) = 1
+  });
+
+  it("fillAt honors layers: a layer-1 fill is the ground for a stroke, not a buried layer-0 fill", () => {
+    const under = box("under", { x: 0, y: 0, width: 300, height: 200, fill: "#fdba74" }); // layer 0
+    const over = box("over", { x: 0, y: 0, width: 300, height: 200, fill: "#123456", layer: 1 }); // covers, on top
+    expect(fillAt(paintOrder([under, over]), 60, 60)).toBe("#123456"); // topmost by layer
+  });
+
+  it("layerOf coerces a missing or malformed layer to 0", () => {
+    expect(layerOf(box("a"))).toBe(0);
+    expect(layerOf(box("b", { layer: 2 }))).toBe(2);
+    expect(layerOf({ ...box("c"), layer: "x" as unknown as number })).toBe(0);
+    expect(layerOf({ ...box("d"), layer: Number.NaN })).toBe(0);
+  });
+});
+
+describe("setLayer + selectionLayer", () => {
+  it("assigns the selection's layer, stores slim (drops 0), and is undoable", () => {
+    let s = seeded([box("a"), box("b", { x: 200 })]);
+    s = drawReducer(s, { type: "select", ids: ["a"] });
+    s = drawReducer(s, { type: "setLayer", layer: 1 });
+    expect(layerOf(s.shapes.find((x) => x.id === "a")!)).toBe(1);
+    expect(s.shapes.find((x) => x.id === "b")).not.toHaveProperty("layer"); // untouched
+    // Back to 0 drops the field (slim doc), not layer:0.
+    s = drawReducer(s, { type: "setLayer", layer: 0 });
+    expect(s.shapes.find((x) => x.id === "a")).not.toHaveProperty("layer");
+    // Undo restores the layer-1 assignment.
+    s = drawReducer(s, { type: "undo" });
+    expect(layerOf(s.shapes.find((x) => x.id === "a")!)).toBe(1);
+  });
+
+  it("moves a whole GROUP together (selection normalizes to the unit)", () => {
+    let s = seeded([box("m1", { groupPath: ["g"] }), box("m2", { x: 100, groupPath: ["g"] }), box("loose", { x: 300 })]);
+    s = drawReducer(s, { type: "select", ids: ["m1"] }); // expands to the whole group
+    s = drawReducer(s, { type: "setLayer", layer: -1 });
+    expect(layerOf(s.shapes.find((x) => x.id === "m1")!)).toBe(-1);
+    expect(layerOf(s.shapes.find((x) => x.id === "m2")!)).toBe(-1); // sibling moved too
+    expect(layerOf(s.shapes.find((x) => x.id === "loose")!)).toBe(0); // loose untouched
+  });
+
+  it("a no-op assign (already on that layer) adds no history step", () => {
+    let s = seeded([box("a")]);
+    s = drawReducer(s, { type: "select", ids: ["a"] });
+    const before = s;
+    s = drawReducer(s, { type: "setLayer", layer: 0 }); // already 0
+    expect(s.shapes).toBe(before.shapes); // same ref — nothing committed
+  });
+
+  it("selectionLayer reports the shared layer, null when mixed", () => {
+    const shapes = [box("a", { layer: 1 }), box("b", { x: 100, layer: 1 }), box("c", { x: 200 })];
+    expect(selectionLayer(shapes, ["a", "b"])).toBe(1); // agree
+    expect(selectionLayer(shapes, ["a", "c"])).toBeNull(); // 1 vs 0 → mixed
+    expect(selectionLayer(shapes, [])).toBeNull(); // empty
+    expect(LAYER_SLOTS).toContain(0); // the default band is offered
+  });
+});
+
 // The z-order invariant matrix. Two classes of mark decide everything:
 //   FILL   = an image (opaque box) OR a shape/text carrying a `fill`
 //   STROKE = an unfilled outline / pen / line / text
@@ -2536,7 +2649,7 @@ describe("configurable features — palette width + the opt-outs", () => {
     initialDrawState({ shapes, width: 400, height: 300 }, { features });
 
   it("resolveFeatures: defaults, clamping, and the single-color collapse", () => {
-    expect(resolveFeatures()).toEqual({ paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, shapes: SHAPE_TOOLS });
+    expect(resolveFeatures()).toEqual({ paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, layers: true, shapes: SHAPE_TOOLS });
     expect(resolveFeatures(null)).toEqual(resolveFeatures());
     expect(resolveFeatures({ paletteSize: 0 }).paletteSize).toBe(1);
     expect(resolveFeatures({ paletteSize: 99 }).paletteSize).toBe(MAX_PALETTE);
@@ -2550,8 +2663,10 @@ describe("configurable features — palette width + the opt-outs", () => {
       fills: false,
       strokeStyling: false,
       grouping: false,
+      layers: true,
       shapes: SHAPE_TOOLS,
     });
+    expect(resolveFeatures({ layers: false }).layers).toBe(false);
   });
 
   it("resolveFeatures.shapes: sanitized to known kinds in canonical order; garbage → all; explicit [] honored", () => {

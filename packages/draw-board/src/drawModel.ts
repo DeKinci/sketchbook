@@ -84,6 +84,12 @@ export interface BaseShape {
    *  Manual transformer resizes leave it alone (they change the natural size,
    *  not the control steps); group/ungroup strip it (natural rebases). */
   sizeStep?: number;
+  /** Explicit paint LAYER — the one override of the size/fill z-law. An integer
+   *  (default/absent = 0); lower layers paint entirely UNDER higher ones, while
+   *  each layer still self-sorts by the fill/stroke/size rule ({@link paintOrder}).
+   *  Stored only when non-zero (docs stay slim); {@link layerOf} reads it
+   *  defensively. A group rides on one layer (see {@link setLayer}). */
+  layer?: number;
 }
 /** Rect + ellipse + diamond share an axis-aligned bounding box {x,y,width,height}.
  *  The view converts an ellipse box to Konva's center+radii and a diamond to its
@@ -387,10 +393,12 @@ export interface DrawFeatures {
   fills: boolean;
   strokeStyling: boolean;
   grouping: boolean;
+  /** The explicit-layer assign control (the z-order override). */
+  layers: boolean;
   shapes: readonly ShapeTool[];
 }
 export const MAX_PALETTE = HUE_FAMILIES.length;
-export const DEFAULT_FEATURES: DrawFeatures = { paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, shapes: SHAPE_TOOLS };
+export const DEFAULT_FEATURES: DrawFeatures = { paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, layers: true, shapes: SHAPE_TOOLS };
 /** Resolve a host's partial config: clamp the palette to 1..MAX_PALETTE,
  *  default everything else on. Size 1 implies fills off (no lane → nothing
  *  can arm a fill), so downstream checks read one flag each. `shapes` is
@@ -412,6 +420,7 @@ export function resolveFeatures(f?: Partial<DrawFeatures> | null): DrawFeatures 
     fills: size > 1 && (f?.fills ?? DEFAULT_FEATURES.fills),
     strokeStyling: f?.strokeStyling ?? DEFAULT_FEATURES.strokeStyling,
     grouping: f?.grouping ?? DEFAULT_FEATURES.grouping,
+    layers: f?.layers ?? DEFAULT_FEATURES.layers,
     shapes,
   };
 }
@@ -1439,8 +1448,20 @@ export function toClusterVariant(sh: Shape, target: ShapeVariant | LineVariant):
   return { ...rest, type: target }; // "line" | "arrow" (no head-at-start)
 }
 
-/** Paint order for the canvas — the "nothing disappears" law, two tiers by what
- *  a mark IS, not what type it is:
+/** The explicit paint {@link BaseShape.layer} of a shape, defaulting a missing
+ *  or malformed value to 0 (docs store only non-zero layers; hand-edited docs
+ *  can't poison the sort). */
+export const layerOf = (sh: Shape): number => (typeof sh.layer === "number" && Number.isFinite(sh.layer) ? sh.layer : 0);
+
+/** The layer bands the UI offers to ASSIGN, low → high (back → front). Just a
+ *  small set for now — the model takes any integer, so widening this list (or
+ *  swapping the control for a stepper) needs no model change. */
+export const LAYER_SLOTS = [-1, 0, 1] as const;
+
+/** Paint order for the canvas — the "nothing disappears" law. An explicit LAYER
+ *  is the outer key: every unit on a lower layer paints entirely UNDER every
+ *  unit on a higher one. WITHIN a layer, the same two tiers by what a mark IS
+ *  (not its type):
  *
  *  1. FILLS (bottom), larger footprint lower: an opaque interior is the one thing
  *     that can bury other marks, so bigger occluders sink — a small filled badge
@@ -1454,25 +1475,27 @@ export function toClusterVariant(sh: Shape, target: ShapeVariant | LineVariant):
  *
  *  Unit-grained: a group paints as ONE contiguous atom (members in insertion
  *  order) at the footprint of its FILL-PAINTING members' union AABB (images
- *  included; a giant unfilled outline in a group doesn't sink its small chip).
- *  Ties keep insertion order (stable sort). Pure: the model array is untouched
+ *  included; a giant unfilled outline in a group doesn't sink its small chip),
+ *  and on ONE layer (its topmost member's — assign moves the whole unit). Ties
+ *  keep insertion order (stable sort). Pure: the model array is untouched
  *  (undo/paste/glue rely on its order); only the painted copy is reordered, so z
  *  tracks size LIVE as shapes resize. `fillAt` (adaptive ink) must be fed THIS
  *  order — the ground under a stroke is the paint-topmost fill, not the
  *  insertion-topmost (it samples image pixels separately, so it skips images). */
 export function paintOrder(shapes: readonly Shape[]): Shape[] {
-  type Unit = { members: Shape[]; weight: number; box: { x1: number; y1: number; x2: number; y2: number } | null };
+  type Unit = { members: Shape[]; weight: number; box: { x1: number; y1: number; x2: number; y2: number } | null; layer: number };
   const units: Unit[] = [];
   const byKey = new Map<string, Unit>();
   for (const sh of shapes) {
     const key = rootUnitKeyOf(sh);
     let u = byKey.get(key);
     if (!u) {
-      u = { members: [], weight: 0, box: null };
+      u = { members: [], weight: 0, box: null, layer: layerOf(sh) };
       byKey.set(key, u);
       units.push(u);
     }
     u.members.push(sh);
+    u.layer = Math.max(u.layer, layerOf(sh)); // a mixed-layer group rides its topmost member
     // A member joins the size-sorted FILL tier if it paints an opaque interior:
     // an image (whole box), or a shape that {@link paintsFill} NOW (a filled
     // box/text, or an ENCLOSED filled pen — an open pen's dormant fill doesn't
@@ -1491,9 +1514,33 @@ export function paintOrder(shapes: readonly Shape[]): Shape[] {
       u.weight = (u.box.x2 - u.box.x1) * (u.box.y2 - u.box.y1) || 1; // zero-area fills still occlude
     }
   }
-  const filled = units.filter((u) => u.weight > 0).sort((a, b) => b.weight - a.weight);
-  const unfilled = units.filter((u) => u.weight === 0);
-  return [...filled.flatMap((u) => u.members), ...unfilled.flatMap((u) => u.members)];
+  // Layers ascending (lower = lower Z); within each, fills size-sorted then
+  // strokes in insertion order — the exact per-layer law, run band by band.
+  const layers = [...new Set(units.map((u) => u.layer))].sort((a, b) => a - b);
+  const out: Shape[] = [];
+  for (const L of layers) {
+    const inLayer = units.filter((u) => u.layer === L);
+    const filled = inLayer.filter((u) => u.weight > 0).sort((a, b) => b.weight - a.weight);
+    const unfilled = inLayer.filter((u) => u.weight === 0);
+    for (const u of filled) out.push(...u.members);
+    for (const u of unfilled) out.push(...u.members);
+  }
+  return out;
+}
+
+/** The selection's shared layer for the toolbar's assign control: the common
+ *  {@link layerOf} when every selected shape agrees, else null (a mixed
+ *  selection — no band reads as active). Null too for an empty selection. */
+export function selectionLayer(shapes: Shape[], selectedIds: string[]): number | null {
+  const sel = new Set(selectedIds);
+  let seen: number | null = null;
+  for (const sh of shapes) {
+    if (!sel.has(sh.id)) continue;
+    const L = layerOf(sh);
+    if (seen === null) seen = L;
+    else if (seen !== L) return null; // mixed
+  }
+  return seen;
 }
 
 /** Root unit key of a shape: its root group id, or its own id when loose. The
@@ -2001,6 +2048,11 @@ export type DrawAction =
   | { type: "cycleShade"; level: "stroke" | "fill"; dir?: 1 | -1 }
   | { type: "setStrokeWidth"; width: number }
   | { type: "setStrokeStyle"; style: StrokeStyle }
+  // Assign the whole selection to an explicit paint LAYER (an integer; the
+  // toolbar offers {@link LAYER_SLOTS}). The one override of the size/fill z-law
+  // — lower layers paint under higher ones. Applies to every selected shape
+  // (units are pre-normalized, so a group moves together), undoable.
+  | { type: "setLayer"; layer: number }
   // The lane's end drag-handle: retune the visible palette width live
   // (features.paletteResize boards only). A pref like an unselected
   // setStrokeWidth — never history.
@@ -2543,6 +2595,22 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         return { ...commit(s, mapShapes(s.shapes, new Set(s.selectedIds), styled)), strokeStyle: a.style };
       }
       return { ...s, strokeStyle: a.style };
+    }
+    case "setLayer": {
+      // Assign the selection to an explicit layer — no ambient "draw on layer N"
+      // pref, this edits objects. Store slim (drop the field at 0) and keep the
+      // same ref on a no-op so an all-already-there set is a clean identity.
+      if (!s.selectedIds.length) return s;
+      const layer = Math.round(a.layer);
+      const withLayer = (sh: Shape): Shape => {
+        if (layerOf(sh) === layer) return sh;
+        const next = { ...sh, layer };
+        if (layer === 0) delete (next as { layer?: number }).layer;
+        return next;
+      };
+      const next = mapShapes(s.shapes, new Set(s.selectedIds), withLayer);
+      const changed = next.some((sh, i) => sh !== s.shapes[i]);
+      return changed ? commit(s, next) : s;
     }
     case "setPaletteSize": {
       // No-op where the handle can't exist: a fixed-width (paletteResize off)

@@ -20,12 +20,13 @@ import {
   ImagePlus,
   Shapes,
   Frame,
+  Layers,
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconButton } from "./IconButton.tsx";
-import { CONTRAST_INK, NO_STROKE, SHADES, GRAYS, familyOf, strokeColumnOf, fillColumnOf, visibleHueFamilies, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, sizeSlotOf, type DrawFeatures, type HueFamily, type LaneColumn, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
+import { CONTRAST_INK, NO_STROKE, SHADES, GRAYS, familyOf, strokeColumnOf, fillColumnOf, visibleHueFamilies, STROKE_WIDTHS, STROKE_STYLES, SHAPE_VARIANTS, LINE_VARIANTS, LAYER_SLOTS, sizeSlotOf, type DrawFeatures, type HueFamily, type LaneColumn, type Tool, type ShapeVariant, type LineVariant, type StrokeStyle } from "./drawModel.ts";
 
 /** The two persistent tools live in a segmented "well" that slides to whichever
  *  is armed; the one-use tools (shape / connector clusters + text) follow it. */
@@ -667,6 +668,8 @@ export function DrawToolbar({
   fillSpecial,
   strokeWidth,
   strokeStyle,
+  layer,
+  onLayer,
   sizeStep = null,
   hasSelection,
   features,
@@ -717,6 +720,11 @@ export function DrawToolbar({
   strokeWidth: number;
   /** The armed stroke style (solid/dashed/dotted) — the 4 key cycles it. */
   strokeStyle: StrokeStyle;
+  /** The selection's shared paint layer (null = mixed, or no selection) — the
+   *  layer well highlights this band. */
+  layer: number | null;
+  /** Assign the selection to a layer (the explicit z-order override). */
+  onLayer: (layer: number) => void;
   /** Scale mode: the selected group's / lone image's size-control step (0 =
    *  natural "medium"), or null for stroke mode. The dots then read the unit's
    *  position — mid resets, extremes step — instead of stroke widths. */
@@ -1083,6 +1091,44 @@ export function DrawToolbar({
             </button>
           );
         })}
+      </div>
+      )}
+
+      {/* Layer — assign the selection to an explicit paint band (LAYER_SLOTS),
+          the one z-order override; same sliding well. Only with a selection
+          (there's an object to place). Numbers, not icons, so widening
+          LAYER_SLOTS later needs no rework. */}
+      {features.layers && hasSelection && (
+      <div className="flex items-center gap-1">
+        <Layers size={14} className="shrink-0 text-ink-500" aria-hidden />
+        <div className="relative flex items-center rounded-full border border-ink-600 bg-ink-800 p-0.5">
+          {(() => {
+            const activeIdx = LAYER_SLOTS.findIndex((n) => n === layer);
+            return activeIdx < 0 ? null : (
+              <span
+                aria-hidden
+                className="pointer-events-none absolute inset-y-0.5 left-0.5 w-7 rounded-full bg-accent-600/25 ring-1 ring-inset ring-accent-500/40 [transition:transform_300ms_cubic-bezier(0.34,1.3,0.64,1)]"
+                style={{ transform: `translateX(${activeIdx * 100}%)` }}
+              />
+            );
+          })()}
+          {LAYER_SLOTS.map((n) => {
+            const name = n < 0 ? "Back" : n > 0 ? "Front" : "Default";
+            return (
+              <button
+                key={n}
+                type="button"
+                aria-label={`${name} layer (${n})`}
+                aria-pressed={layer === n}
+                title={`${name} layer (${n}) — lower layers paint under higher ones`}
+                onClick={() => onLayer(n)}
+                className="relative z-10 flex h-7 w-7 items-center justify-center rounded-full text-[11px] font-semibold tabular-nums text-ink-100"
+              >
+                {n}
+              </button>
+            );
+          })}
+        </div>
       </div>
       )}
       </div>

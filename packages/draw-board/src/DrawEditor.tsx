@@ -22,6 +22,7 @@ import {
   normalizeGroups,
   scaleStepTarget,
   selectionFills,
+  selectionLayer,
   selectionStrokes,
   slotTargetStep,
   stepStroke,
@@ -1454,6 +1455,7 @@ export function DrawEditor({
       fills={fillsBase(state)}
       strokeWidth={strokeBase(state)}
       strokeStyle={state.strokeStyle}
+      layer={selectionLayer(state.shapes, state.selectedIds)}
       sizeStep={sizeTarget ? unitSizeStep(state.shapes, sizeTarget) : null}
       strokeShades={state.strokeShades}
       fillShades={state.fillShades}
@@ -1481,6 +1483,7 @@ export function DrawEditor({
       onRefill={(from, to) => dispatch({ type: "refill", from, to })}
       onPaletteResize={(size) => dispatch({ type: "setPaletteSize", size })}
       onStrokeStyle={(style) => dispatch({ type: "setStrokeStyle", style })}
+      onLayer={(layer) => dispatch({ type: "setLayer", layer })}
       onSizeSlot={onSizeSlot}
       onUndo={() => dispatch({ type: "undo" })}
       onRedo={() => dispatch({ type: "redo" })}
