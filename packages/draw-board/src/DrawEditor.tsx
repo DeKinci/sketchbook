@@ -23,6 +23,7 @@ import {
   scaleStepTarget,
   selectionFills,
   selectionLayer,
+  isBox,
   selectionStrokes,
   slotTargetStep,
   stepStroke,
@@ -1370,6 +1371,14 @@ export function DrawEditor({
       // fall through (uncaught) so the modal closes. Capture phase + stop lets us
       // win the Esc before Radix's dismiss handler when we DO handle it.
       if (e.key === "Escape") {
+        // Point-edit is the innermost mode — Esc leaves it first (keeping the
+        // shape selected), before the tool/selection back-out steps.
+        if (stateRef.current.editingPathId) {
+          e.preventDefault();
+          e.stopPropagation();
+          dispatch({ type: "exitPathEdit" });
+          return;
+        }
         if (!isSelectable(stateRef.current.tool)) {
           e.preventDefault();
           e.stopPropagation();
@@ -1456,6 +1465,8 @@ export function DrawEditor({
       strokeWidth={strokeBase(state)}
       strokeStyle={state.strokeStyle}
       layer={selectionLayer(state.shapes, state.selectedIds)}
+      canEditPoints={state.selectedIds.length === 1 && !!state.shapes.find((sh) => sh.id === state.selectedIds[0] && isBox(sh))}
+      editingPoints={state.editingPathId !== null}
       sizeStep={sizeTarget ? unitSizeStep(state.shapes, sizeTarget) : null}
       strokeShades={state.strokeShades}
       fillShades={state.fillShades}
@@ -1484,6 +1495,8 @@ export function DrawEditor({
       onPaletteResize={(size) => dispatch({ type: "setPaletteSize", size })}
       onStrokeStyle={(style) => dispatch({ type: "setStrokeStyle", style })}
       onLayer={(layer) => dispatch({ type: "setLayer", layer })}
+      onEditPoints={() => dispatch(state.editingPathId ? { type: "exitPathEdit" } : { type: "enterPathEdit", id: state.selectedIds[0] })}
+      onResetPoints={() => dispatch({ type: "resetPath" })}
       onSizeSlot={onSizeSlot}
       onUndo={() => dispatch({ type: "undo" })}
       onRedo={() => dispatch({ type: "redo" })}

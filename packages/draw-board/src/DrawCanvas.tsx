@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
 import type { KonvaEventObject } from "konva/lib/Node.js";
-import { Stage, Layer, Rect, Ellipse, Line, Arrow, Path, Text, Image as KonvaImage, Group, Transformer } from "react-konva";
+import { Stage, Layer, Rect, Ellipse, Line, Arrow, Path, Circle, Text, Image as KonvaImage, Group, Transformer } from "react-konva";
 import { CropLayer, type CropControl } from "./CropLayer.tsx";
 import { wrapLines } from "./textMetrics.ts";
 import { BOARD_FONT_STACK } from "./boardFont.ts";
@@ -31,6 +31,8 @@ import {
   paintsFill,
   pointInPolygon,
   isDistorted,
+  isBox,
+  nodesOf,
   pathData,
   pathPolygon,
   textBgBox,
@@ -40,6 +42,7 @@ import {
   type Shape,
   type BoxShape,
   type ImageShape,
+  type PathNode,
 } from "./drawModel.ts";
 import { recolorSvg, decodeSvg, svgDataUrl } from "./svgRecolor.ts";
 import {
@@ -626,7 +629,7 @@ export function DrawCanvas({
     const tr = trRef.current;
     const stage = stageRef.current;
     if (!tr || !stage) return;
-    if (tool === "select" && soleResizable && selectedIds[0] !== editingId && !croppingId) {
+    if (tool === "select" && soleResizable && selectedIds[0] !== editingId && !croppingId && !state.editingPathId) {
       // (Anchor SET is the render prop's job — enabledAnchors set here would be
       // silently reverted by react-konva on the next unrelated re-render.)
       const node = stage.findOne<Konva.Node>(`#${selectedIds[0]}`);
@@ -638,7 +641,7 @@ export function DrawCanvas({
       tr.nodes([]);
     }
     tr.getLayer()?.batchDraw();
-  }, [selectedIds, tool, soleResizable, soleUnitKey, editing, editingId, croppingId, shapes, stageRef]);
+  }, [selectedIds, tool, soleResizable, soleUnitKey, editing, editingId, croppingId, shapes, stageRef, state.editingPathId]);
 
   const logicalPointer = (e: KonvaEventObject<unknown>) => {
     const p = e.target.getStage()?.getRelativePointerPosition();
@@ -818,6 +821,28 @@ export function DrawCanvas({
       e.evt.preventDefault();
       startPan(e as KonvaEventObject<MouseEvent>);
       return;
+    }
+    // Point-editing: a pointerdown that reaches the stage did NOT land on a
+    // handle (handles stop propagation). On/near the outline → insert an anchor
+    // and stay; inside the shape → stay (no-op); outside → end the session, then
+    // let the normal select/draw routing below handle this same click.
+    if (state.editingPathId) {
+      const es = shapes.find((s) => s.id === state.editingPathId);
+      if (es && isBox(es)) {
+        const p = logicalPointer(e);
+        const poly = pathPolygon(es);
+        let near = false;
+        for (let i = 0; i < poly.length && !near; i += 2) {
+          const j = (i + 2) % poly.length;
+          if (distToSegment(p.x, p.y, poly[i], poly[i + 1], poly[j], poly[j + 1]) <= sPx(8)) near = true;
+        }
+        if (near) {
+          dispatch({ type: "addNode", x: p.x, y: p.y });
+          return;
+        }
+        if (pointInPolygon(p.x, p.y, poly)) return; // interior click — stay in edit
+      }
+      dispatch({ type: "exitPathEdit" });
     }
     if (tool === "eraser") {
       erasing.current = true;
@@ -1924,6 +1949,77 @@ export function DrawCanvas({
             return { ...newBox, x: box.x * vs + view.x, y: box.y * vs + view.y, width: box.width * vs, height: box.height * vs };
           }}
         />
+
+        {/* Point-edit overlay: draggable anchors (square) + curvature handles
+            (round, smooth anchors only) for the shape in vector-edit mode. Handles
+            stop propagation; a click on the outline adds an anchor; anything else
+            reaching the stage exits the session (onStageDown). */}
+        {state.editingPathId &&
+          (() => {
+            const es = shapes.find((s) => s.id === state.editingPathId);
+            if (!es || !isBox(es)) return null;
+            const nodes = nodesOf(es);
+            const ax = (n: PathNode) => es.x + n.x;
+            const ay = (n: PathNode) => es.y + n.y;
+            const ar = sPx(4.5);
+            const hr = sPx(3.5);
+            const hair = sPx(1);
+            const begin = (e: KonvaEventObject<DragEvent>) => {
+              e.cancelBubble = true;
+              suppressDbl();
+              dispatch({ type: "beginGesture" });
+            };
+            const end = (e: KonvaEventObject<DragEvent>) => {
+              e.cancelBubble = true;
+              dispatch({ type: "endGesture" });
+            };
+            const stop = (e: KonvaEventObject<MouseEvent>) => {
+              e.cancelBubble = true;
+            };
+            return (
+              <Group>
+                {nodes.map((n, i) =>
+                  n.hIn || n.hOut ? (
+                    <Fragment key={`h${i}`}>
+                      {n.hIn && (
+                        <>
+                          <Line points={[ax(n), ay(n), es.x + n.hIn.x, es.y + n.hIn.y]} stroke={SELECT_COLOR} strokeWidth={hair} listening={false} />
+                          <Circle x={es.x + n.hIn.x} y={es.y + n.hIn.y} radius={hr} fill="#ffffff" stroke={SELECT_COLOR} strokeWidth={hair} draggable onMouseDown={stop} onDragStart={begin} onDragMove={(e) => dispatch({ type: "moveHandle", index: i, which: "in", x: e.target.x(), y: e.target.y() })} onDragEnd={end} />
+                        </>
+                      )}
+                      {n.hOut && (
+                        <>
+                          <Line points={[ax(n), ay(n), es.x + n.hOut.x, es.y + n.hOut.y]} stroke={SELECT_COLOR} strokeWidth={hair} listening={false} />
+                          <Circle x={es.x + n.hOut.x} y={es.y + n.hOut.y} radius={hr} fill="#ffffff" stroke={SELECT_COLOR} strokeWidth={hair} draggable onMouseDown={stop} onDragStart={begin} onDragMove={(e) => dispatch({ type: "moveHandle", index: i, which: "out", x: e.target.x(), y: e.target.y() })} onDragEnd={end} />
+                        </>
+                      )}
+                    </Fragment>
+                  ) : null
+                )}
+                {nodes.map((n, i) => (
+                  <Rect
+                    key={`a${i}`}
+                    x={ax(n) - ar}
+                    y={ay(n) - ar}
+                    width={ar * 2}
+                    height={ar * 2}
+                    fill="#ffffff"
+                    stroke={SELECT_COLOR}
+                    strokeWidth={sPx(1.5)}
+                    draggable
+                    onMouseDown={stop}
+                    onDragStart={begin}
+                    onDragMove={(e) => dispatch({ type: "moveNode", index: i, x: e.target.x() + ar, y: e.target.y() + ar })}
+                    onDragEnd={end}
+                    onDblClick={(e) => {
+                      e.cancelBubble = true;
+                      dispatch({ type: "deleteNode", index: i });
+                    }}
+                  />
+                ))}
+              </Group>
+            );
+          })()}
 
         {croppingId &&
           (() => {

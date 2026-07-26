@@ -21,6 +21,8 @@ import {
   Shapes,
   Frame,
   Layers,
+  Spline,
+  RotateCcw,
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -670,6 +672,10 @@ export function DrawToolbar({
   strokeStyle,
   layer,
   onLayer,
+  canEditPoints,
+  editingPoints,
+  onEditPoints,
+  onResetPoints,
   sizeStep = null,
   hasSelection,
   features,
@@ -725,6 +731,14 @@ export function DrawToolbar({
   layer: number | null;
   /** Assign the selection to a layer (the explicit z-order override). */
   onLayer: (layer: number) => void;
+  /** Whether the sole selection is a box shape that can be point-edited. */
+  canEditPoints: boolean;
+  /** Whether a shape is currently in point-edit (vector distortion) mode. */
+  editingPoints: boolean;
+  /** Toggle point-edit for the sole selected box (enter/exit). */
+  onEditPoints: () => void;
+  /** Reset the edited shape back to its plain parametric primitive. */
+  onResetPoints: () => void;
   /** Scale mode: the selected group's / lone image's size-control step (0 =
    *  natural "medium"), or null for stroke mode. The dots then read the unit's
    *  position — mid resets, extremes step — instead of stroke widths. */
@@ -1129,6 +1143,30 @@ export function DrawToolbar({
             );
           })}
         </div>
+      </div>
+      )}
+
+      {/* Point-edit (shape distortion): enter/exit the vector node editor for a
+          sole box selection; while editing, a reset restores the plain primitive.
+          A toolbar control (not double-click, which spawns a caption). */}
+      {features.vectorEdit && (canEditPoints || editingPoints) && (
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          aria-label={editingPoints ? "Done editing points" : "Edit points"}
+          aria-pressed={editingPoints}
+          title="Edit points — drag anchors, click an edge to add one, drag handles to curve"
+          onClick={onEditPoints}
+          className={`flex h-8 items-center gap-1 rounded-full border px-2.5 text-[11px] font-semibold ${editingPoints ? "border-accent-500/60 bg-accent-600/25 text-accent-100" : "border-ink-600 bg-ink-800 text-ink-100"}`}
+        >
+          <Spline size={14} className="shrink-0" aria-hidden />
+          {editingPoints ? "Done" : "Edit"}
+        </button>
+        {editingPoints && (
+          <IconButton label="Reset shape — drop the distortion" onClick={onResetPoints}>
+            <RotateCcw size={16} />
+          </IconButton>
+        )}
       </div>
       )}
       </div>
