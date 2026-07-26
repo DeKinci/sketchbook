@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
 import type { KonvaEventObject } from "konva/lib/Node.js";
-import { Stage, Layer, Rect, Ellipse, Line, Arrow, Text, Image as KonvaImage, Group, Transformer } from "react-konva";
+import { Stage, Layer, Rect, Ellipse, Line, Arrow, Path, Text, Image as KonvaImage, Group, Transformer } from "react-konva";
 import { CropLayer, type CropControl } from "./CropLayer.tsx";
 import { wrapLines } from "./textMetrics.ts";
 import { BOARD_FONT_STACK } from "./boardFont.ts";
@@ -30,6 +30,9 @@ import {
   isEnclosed,
   paintsFill,
   pointInPolygon,
+  isDistorted,
+  pathData,
+  pathPolygon,
   textBgBox,
   type Attach,
   type DrawAction,
@@ -660,7 +663,9 @@ export function DrawCanvas({
   };
   const inBox = (sh: Shape, pt: { x: number; y: number }) => {
     const b = boundingBox(sh);
-    return pt.x >= b.x && pt.x <= b.x + b.width && pt.y >= b.y && pt.y <= b.y + b.height;
+    if (pt.x < b.x || pt.x > b.x + b.width || pt.y < b.y || pt.y > b.y + b.height) return false;
+    // A distorted box is hit by its true (possibly concave) outline, not the bbox.
+    return isDistorted(sh) ? pointInPolygon(pt.x, pt.y, pathPolygon(sh)) : true;
   };
   const onStroke = (sh: Shape, pt: { x: number; y: number }) => {
     // ≥6 SCREEN px of slack at any zoom (a hairline stroke at 0.1× is still clickable).
@@ -1519,6 +1524,14 @@ export function DrawCanvas({
           // per style, open strokes are round-capped anyway.
           const dash = dashFor(sh.strokeStyle, sw);
           const dotCap = sh.strokeStyle === "dotted" ? ("round" as const) : undefined;
+          // A distorted box renders as ONE vector <Path> at its bbox origin (relative
+          // node coords). Id sits on the Path, so the Transformer / bake / strokedNodeOf
+          // treat it exactly like the parametric box (node.x() = b.x). Default (miter)
+          // join keeps rect/diamond corners sharp; the ellipse's curves ignore it.
+          if (isDistorted(sh)) {
+            const b = viewBox(sh);
+            return <Path key={sh.id} {...common(sh)} x={b.x} y={b.y} data={pathData(sh.nodes)} fill={sh.fill} stroke={stroke} strokeWidth={sw} dash={dash} lineCap={dotCap} />;
+          }
           switch (sh.type) {
             case "rect": {
               const b = viewBox(sh);

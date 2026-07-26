@@ -3,7 +3,7 @@
  * minimap and doc thumbnails (sidebar hover previews). Draws in LOGICAL
  * coordinates; the caller owns the transform and line width.
  */
-import { boundingBox, contentBounds, diamondPoints, isContrastInk, isEnclosed, isNoStroke, paintOrder, textBgBox, CANVAS_BG_DARK, type DrawDoc, type Shape } from "./drawModel.ts";
+import { boundingBox, contentBounds, diamondPoints, isContrastInk, isDistorted, isEnclosed, isNoStroke, paintOrder, pathPolygon, textBgBox, CANVAS_BG_DARK, type DrawDoc, type Shape } from "./drawModel.ts";
 import { fitView, padBox, type Size } from "./viewport.ts";
 
 /** Ghost color for the adaptive contrast ink (ghosts sit on a dark ground). */
@@ -28,6 +28,17 @@ export function paintShapeGhosts(ctx: CanvasRenderingContext2D, shapes: readonly
     // board doesn't show.
     const color = isContrastInk(sh.stroke) ? GHOST_INK : isNoStroke(sh.stroke) ? "transparent" : sh.stroke;
     ctx.strokeStyle = color;
+    if (isDistorted(sh)) {
+      // A distorted box's minimap/thumbnail silhouette is its true outline.
+      const poly = pathPolygon(sh);
+      ctx.beginPath();
+      ctx.moveTo(poly[0], poly[1]);
+      for (let i = 2; i < poly.length; i += 2) ctx.lineTo(poly[i], poly[i + 1]);
+      ctx.closePath();
+      if (sh.fill) wash(sh.fill, () => ctx.fill());
+      ctx.stroke();
+      continue;
+    }
     if (sh.type === "line" || sh.type === "arrow") {
       ctx.beginPath();
       ctx.moveTo(sh.points[0], sh.points[1]);

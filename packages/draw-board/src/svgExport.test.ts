@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { exportSvg, readSvgDoc } from "./svgExport.ts";
-import type { DrawDoc, Shape } from "./drawModel.ts";
+import { seedNodes } from "./drawModel.ts";
+import type { BoxShape, DrawDoc, Shape } from "./drawModel.ts";
 
 const doc = (shapes: Shape[], over: Partial<DrawDoc> = {}): DrawDoc => ({ shapes, width: 400, height: 300, ...over });
 const rect = (id: string, x = 100, y = 100): Shape => ({ id, type: "rect", stroke: "#3b82f6", strokeWidth: 3, x, y, width: 60, height: 40 });
@@ -23,6 +24,18 @@ describe("exportSvg", () => {
     expect((svg.match(/<path d="M 90 100 L|<path d="M 10 100 L/g) ?? []).length).toBe(2); // both arrowheads
     expect(svg).toContain("Q 20 10"); // pen smoothing control point
     expect(svg).toContain("hi &lt;there&gt;"); // escaping
+  });
+
+  it("exports a distorted box as its vector <path> (absolute coords; straight rect, cubic ellipse)", () => {
+    const rectShape = { id: "dr", type: "rect", stroke: "#3b82f6", strokeWidth: 3, x: 100, y: 100, width: 60, height: 40 } as BoxShape;
+    const svgRect = exportSvg(doc([{ ...rectShape, nodes: seedNodes(rectShape) } as Shape]));
+    expect(svgRect).toContain('<path d="M 100 100 L 160 100 L 160 140 L 100 140 Z"'); // absolute, all-straight
+    expect(svgRect).not.toContain('<rect x="100" y="100"'); // never the parametric primitive
+
+    const ellShape = { id: "de", type: "ellipse", stroke: "#3b82f6", strokeWidth: 3, x: 10, y: 20, width: 80, height: 80 } as BoxShape;
+    const svgEll = exportSvg(doc([{ ...ellShape, nodes: seedNodes(ellShape) } as Shape]));
+    expect(svgEll).toContain('<path d="M 50 20 C'); // top anchor abs (10+40, 20+0), cubic segments
+    expect(svgEll).not.toContain("<ellipse");
   });
 
   it("blank sketch viewBox trims to content (+30 pad), unclamped on the plane", () => {

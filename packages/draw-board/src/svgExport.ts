@@ -13,7 +13,7 @@
  * {@link SVG_META_ID}, making the file re-importable as a full board — the SVG
  * sibling of the PNG iTXt chunk.
  */
-import { boundingBox, contrastSolidOver, dashFor, diamondPoints, fillAt, isContrastInk, isEnclosed, isNoStroke, paintOrder, textBgBox, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
+import { boundingBox, contrastSolidOver, dashFor, diamondPoints, fillAt, isContrastInk, isDistorted, isEnclosed, isNoStroke, paintOrder, pathData, textBgBox, CANVAS_BG_DARK, type DrawDoc, type SegmentShape, type Shape } from "./drawModel.ts";
 import { wrapLines } from "./textMetrics.ts";
 import { BOARD_FONT_STACK } from "./boardFont.ts";
 import { contentCropLogical } from "./exportPng.ts";
@@ -79,6 +79,11 @@ function shapeSvg(sh: Shape, shapes: Shape[]): string {
   const dashArr = dashFor(sh.strokeStyle, sw);
   const dash = dashArr ? ` stroke-dasharray="${dashArr.map(num).join(" ")}"` : "";
   const boxCap = sh.strokeStyle === "dotted" ? ' stroke-linecap="round"' : "";
+  // A distorted box exports as its true vector outline (absolute coords), the same
+  // M/L/C path the canvas draws — straight for rect/diamond, cubic for the ellipse.
+  if (isDistorted(sh)) {
+    return `<path d="${pathData(sh.nodes, sh.x, sh.y)}" fill="${sh.fill ?? "none"}" stroke="${color}" stroke-width="${sw}"${dash}${boxCap}/>`;
+  }
   switch (sh.type) {
     case "rect": {
       const b = boundingBox(sh);

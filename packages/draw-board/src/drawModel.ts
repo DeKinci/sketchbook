@@ -1091,8 +1091,11 @@ export function pathData(nodes: PathNode[], ox = 0, oy = 0): string {
   for (let i = 0; i < n; i++) {
     const a = nodes[i], b = nodes[(i + 1) % n];
     const c0 = a.hOut, c1 = b.hIn;
-    if (!c0 && !c1) d += ` L ${pt(b.x, b.y)}`;
-    else d += ` C ${pt(c0?.x ?? a.x, c0?.y ?? a.y)} ${pt(c1?.x ?? b.x, c1?.y ?? b.y)} ${pt(b.x, b.y)}`;
+    // The closing segment back to the first anchor: a straight one is drawn by Z
+    // (no redundant L); a curved one still needs its cubic before the close.
+    if (!c0 && !c1) {
+      if (i < n - 1) d += ` L ${pt(b.x, b.y)}`;
+    } else d += ` C ${pt(c0?.x ?? a.x, c0?.y ?? a.y)} ${pt(c1?.x ?? b.x, c1?.y ?? b.y)} ${pt(b.x, b.y)}`;
   }
   return `${d} Z`;
 }
