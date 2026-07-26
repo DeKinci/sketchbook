@@ -66,6 +66,11 @@ describe("elementFromShapes", () => {
     expect(elementFromShapes([], newId)).toBeNull();
   });
 
+  it("normalizes layers on capture — a stamp is layer-free (like it's position-free), so it can't leak a band onto a foreign board", () => {
+    const el = elementFromShapes([rect("a", { layer: 1 }), rect("b", { x: 80, layer: 1 })], newId)!;
+    expect(el.shapes.every((s) => s.layer === undefined)).toBe(true);
+  });
+
   it("stores captured shapes in paint order — a small fill stays above a big fill", () => {
     // Array order small→big (small drawn first); on the board the footprint sort
     // paints the small fill on top. The captured element must preserve THAT look,

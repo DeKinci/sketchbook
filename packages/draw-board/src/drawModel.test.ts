@@ -1635,6 +1635,35 @@ describe("setLayer + selectionLayer", () => {
     expect(selectionLayer(shapes, [])).toBeNull(); // empty
     expect(LAYER_SLOTS).toContain(0); // the default band is offered
   });
+
+  it("expands a DEEP-selected group member to its whole unit — never splits a group across layers", () => {
+    let s = seeded([box("m1", { groupPath: ["g"] }), box("m2", { x: 100, groupPath: ["g"] })]);
+    s = drawReducer(s, { type: "select", ids: ["m1"], deep: true }); // deep = a raw member, NOT unit-expanded
+    expect(s.selectedIds).toEqual(["m1"]);
+    s = drawReducer(s, { type: "setLayer", layer: 1 });
+    expect(layerOf(s.shapes.find((x) => x.id === "m1")!)).toBe(1);
+    expect(layerOf(s.shapes.find((x) => x.id === "m2")!)).toBe(1); // sibling rode along — one layer per group
+  });
+
+  it("ignores a non-finite layer (no garbage stored, no phantom history step)", () => {
+    let s = seeded([box("a")]);
+    s = drawReducer(s, { type: "select", ids: ["a"] });
+    const before = s;
+    s = drawReducer(s, { type: "setLayer", layer: Number.NaN });
+    expect(s).toBe(before); // rejected outright
+    s = drawReducer(s, { type: "setLayer", layer: Number.POSITIVE_INFINITY });
+    expect(s.shapes.find((x) => x.id === "a")).not.toHaveProperty("layer");
+  });
+
+  it("grouping mixed-layer shapes unifies them to the unit's top layer", () => {
+    let s = seeded([box("a", { layer: 1 }), box("b", { x: 100 })]); // a front, b default
+    s = drawReducer(s, { type: "select", ids: ["a", "b"] });
+    s = drawReducer(s, { type: "groupSelection", gid: "g" });
+    expect(layerOf(s.shapes.find((x) => x.id === "a")!)).toBe(1);
+    expect(layerOf(s.shapes.find((x) => x.id === "b")!)).toBe(1); // b lifted to the group's layer
+    // selectionLayer now reads a single band for the fresh group (not "mixed").
+    expect(selectionLayer(s.shapes, s.selectedIds)).toBe(1);
+  });
 });
 
 // The z-order invariant matrix. Two classes of mark decide everything:

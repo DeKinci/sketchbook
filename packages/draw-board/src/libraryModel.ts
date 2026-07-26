@@ -49,7 +49,17 @@ export function elementFromShapes(shapes: Shape[], newId: () => string): Library
     // Store in paint order so the tile preview and every placement read like the
     // board did (a captured group is placed as a group — an atom in array order —
     // so its stored order IS its stacking; see paintOrder's "nothing disappears").
-    shapes: clonePastedShapes(paintOrder(shapes), -b.x, -b.y, newId),
+    // Strip the explicit LAYER too: an element is band-free like it's
+    // position-free (both are absolute board state that mustn't ride into a
+    // foreign drawing), and a captured group's internal look is already carried
+    // by array order, not member layers. (A loose arrangement that leaned on
+    // layers for z should be grouped to preserve it.)
+    shapes: clonePastedShapes(paintOrder(shapes), -b.x, -b.y, newId).map((sh) => {
+      if (sh.layer === undefined) return sh;
+      const c = { ...sh };
+      delete (c as { layer?: number }).layer;
+      return c;
+    }),
     width: b.width,
     height: b.height,
   };

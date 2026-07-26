@@ -2602,13 +2602,18 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       // same ref on a no-op so an all-already-there set is a clean identity.
       if (!s.selectedIds.length) return s;
       const layer = Math.round(a.layer);
+      if (!Number.isFinite(layer)) return s; // reject a NaN/Infinity host dispatch (UI only sends LAYER_SLOTS)
       const withLayer = (sh: Shape): Shape => {
         if (layerOf(sh) === layer) return sh;
         const next = { ...sh, layer };
         if (layer === 0) delete (next as { layer?: number }).layer;
         return next;
       };
-      const next = mapShapes(s.shapes, new Set(s.selectedIds), withLayer);
+      // Layer is a UNIT property (a group rides ONE layer), so expand to whole
+      // units — a deep-selected member re-layers its entire group, never
+      // splitting it (which paintOrder would then silently ride at max).
+      const target = new Set(expandIdsToUnits(s.shapes, s.selectedIds));
+      const next = mapShapes(s.shapes, target, withLayer);
       const changed = next.some((sh, i) => sh !== s.shapes[i]);
       return changed ? commit(s, next) : s;
     }
@@ -2671,10 +2676,17 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       const members = new Set(memberIds);
       const childUnits = new Set(s.shapes.filter((sh) => members.has(sh.id)).map(rootUnitKeyOf));
       if (childUnits.size < 2) return s; // incl. would-be single-member groups
+      // One layer per group: the unit rides at its top member's layer (what
+      // paintOrder already paints the atom at) — lift every member there so the
+      // stored state stays single-layer and ungroup pops them out together.
+      let groupLayer = Number.NEGATIVE_INFINITY;
+      for (const sh of s.shapes) if (members.has(sh.id)) groupLayer = Math.max(groupLayer, layerOf(sh));
       const next = mapShapes(s.shapes, members, (sh) => {
         // sizeStep resets: a fresh group is at its natural ("medium") size, and
         // any member's own control history dies with its loose life.
         const out: Shape = { ...sh, groupPath: [a.gid, ...(sh.groupPath ?? [])], sizeStep: undefined };
+        if (groupLayer === 0) delete (out as { layer?: number }).layer;
+        else out.layer = groupLayer;
         // Sever OUTWARD edges (attach + connector binds to non-members) — undo
         // restores exactly; a still-touching neighbor re-glues on the next drag.
         // Internal edges CROSSING between the forming group's child units park in
