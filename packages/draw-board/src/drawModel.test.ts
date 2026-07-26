@@ -2888,6 +2888,17 @@ describe("shape distortion — point-edit reducer", () => {
     expect([sh.x, sh.y, sh.width, sh.height]).toEqual([0, 0, 60, 50]);
   });
 
+  it("retyping a distorted box (armCluster) strips its nodes back to a clean primitive", () => {
+    let st = drawReducer(enter(), { type: "addNode", x: 20, y: 0 });
+    expect(isDistorted(st.shapes[0])).toBe(true);
+    st = drawReducer(st, { type: "exitPathEdit" });
+    st = drawReducer(st, { type: "select", ids: ["r"] });
+    st = drawReducer(st, { type: "armCluster", cluster: "shape" }); // rect → next variant, retypes
+    const sh = st.shapes[0] as BoxShape;
+    expect(sh.type).not.toBe("rect");
+    expect(sh.nodes).toBeUndefined();
+  });
+
   it("editingPathId clears when its shape leaves — delete, tool-switch, select-away, undo-removal", () => {
     expect(drawReducer(enter(), { type: "deleteSelected" }).editingPathId).toBe(null);
     expect(drawReducer(enter(), { type: "setTool", tool: "pen" }).editingPathId).toBe(null);

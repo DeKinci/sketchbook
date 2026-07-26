@@ -1635,7 +1635,13 @@ export function variantOf(sh: Shape): ShapeVariant | LineVariant | null {
  *  line/arrow/darrow swap `type` + `doubleHead` (points/bindings ride along). The
  *  caller guarantees `target` belongs to `sh`'s cluster. */
 export function toClusterVariant(sh: Shape, target: ShapeVariant | LineVariant): Shape {
-  if (target === "rect" || target === "ellipse" || target === "diamond") return { ...(sh as BoxShape), type: target };
+  if (target === "rect" || target === "ellipse" || target === "diamond") {
+    // Retype returns to the CLEAN primitive of the new kind: a distortion built
+    // for one edge style (rect's corners vs the ellipse's curves) doesn't carry.
+    const next = { ...(sh as BoxShape), type: target };
+    delete (next as { nodes?: PathNode[] }).nodes;
+    return next;
+  }
   if (target === "darrow") return { ...(sh as SegmentShape), type: "arrow", doubleHead: true };
   const { doubleHead: _drop, ...rest } = sh as SegmentShape;
   return { ...rest, type: target }; // "line" | "arrow" (no head-at-start)
