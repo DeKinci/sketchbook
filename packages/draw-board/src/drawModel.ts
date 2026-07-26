@@ -1024,6 +1024,17 @@ export function cloneNodes(nodes: PathNode[]): PathNode[] {
   return nodes.map((n) => shiftNode(n, 0, 0));
 }
 
+/** Scale a node's coords (anchor + handles) per-axis about the box origin (0,0) —
+ *  the relative-coord counterpart of scaling a box's width/height. */
+function scaleNode(n: PathNode, fx: number, fy: number): PathNode {
+  return {
+    x: n.x * fx,
+    y: n.y * fy,
+    ...(n.hIn ? { hIn: { x: n.hIn.x * fx, y: n.hIn.y * fy } } : null),
+    ...(n.hOut ? { hOut: { x: n.hOut.x * fx, y: n.hOut.y * fy } } : null),
+  };
+}
+
 /** Sample a closed node ring to a flat [x,y,…] polyline (RELATIVE coords). A
  *  straight segment (no handles) contributes just its start anchor; a curved one
  *  is subdivided. The ring is implicitly closed (no duplicate final anchor). */
@@ -2084,6 +2095,8 @@ function scaleMemberFrom(base: Shape, memberIds: Set<string>, factor: number, or
       out = { ...base, points: base.points.map((v, i) => (i % 2 === 0 ? px(v) : py(v))) };
       break;
   }
+  // A distorted box's relative nodes scale with the box (uniform factor).
+  if (isBox(base) && base.nodes) (out as BoxShape).nodes = base.nodes.map((n) => scaleNode(n, factor, factor));
   out.strokeWidth = base.strokeWidth * factor;
   if (out.attach && memberIds.has(out.attach.id)) {
     out.attach =
@@ -2115,7 +2128,9 @@ function stretchMemberFrom(base: Shape, fx: number, fy: number, origin: { x: num
     case "ellipse":
     case "diamond":
     case "image": {
-      return { ...base, x: px(base.x), y: py(base.y), width: base.width * fx, height: base.height * fy };
+      const out = { ...base, x: px(base.x), y: py(base.y), width: base.width * fx, height: base.height * fy };
+      if (isBox(base) && base.nodes) (out as BoxShape).nodes = base.nodes.map((n) => scaleNode(n, fx, fy));
+      return out;
     }
     case "text": {
       // Glyphs can't stretch, but a BOXED text's wrap box does (the lines
@@ -3251,8 +3266,16 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       return { ...s, shapes: next };
     }
     case "commitResize": {
-      // 1. Apply the patch — the resized shape (S) is final now.
-      const patched = mapShapes(s.shapes, new Set([a.id]), (sh) => ({ ...sh, ...a.patch } as Shape));
+      // 1. Apply the patch — the resized shape (S) is final now. A distorted box
+      //    also scales its relative nodes with the new box (the bake sends a
+      //    positive-clamped w/h, so the ratio is well-defined).
+      const patched = mapShapes(s.shapes, new Set([a.id]), (sh) => {
+        const next = { ...sh, ...a.patch } as Shape;
+        if (isBox(sh) && sh.nodes && isBox(next)) {
+          next.nodes = sh.nodes.map((n) => scaleNode(n, sh.width ? next.width / sh.width : 1, sh.height ? next.height / sh.height : 1));
+        }
+        return next;
+      });
       const S = patched.find((sh) => sh.id === a.id);
       if (!S) return s;
       // 2. Direction-agnostic follow (skip=S so S stays EXACTLY where the user left

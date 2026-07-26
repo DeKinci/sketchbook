@@ -2900,6 +2900,61 @@ describe("shape distortion — point-edit reducer", () => {
   });
 });
 
+describe("shape distortion — resize/scale carry the outline", () => {
+  // A rect distorted with one extra node on the TOP edge at x=20 (still 40×30).
+  const distortedRect = (over: Partial<BoxShape> = {}) => {
+    let st = drawReducer(seeded([box("r", { type: "rect", x: 0, y: 0, width: 40, height: 30, ...over })]), { type: "enterPathEdit", id: "r" });
+    st = drawReducer(st, { type: "addNode", x: 20, y: 0 });
+    return st.shapes[0] as BoxShape;
+  };
+  const hasNodeAt = (sh: BoxShape, x: number, y: number) => sh.nodes!.some((n) => Math.abs(n.x - x) < 1e-6 && Math.abs(n.y - y) < 1e-6);
+
+  it("commitResize scales a distorted shape's nodes with its box (top-edge node x:20 → 40 at ×2 width)", () => {
+    let st = seeded([distortedRect()]);
+    st = drawReducer(st, { type: "enterPathEdit", id: "r" });
+    st = drawReducer(st, { type: "beginGesture" });
+    st = drawReducer(st, { type: "commitResize", id: "r", patch: { x: 0, y: 0, width: 80, height: 30 } });
+    st = drawReducer(st, { type: "endGesture" });
+    const sh = st.shapes[0] as BoxShape;
+    expect([sh.width, sh.height]).toEqual([80, 30]);
+    expect(hasNodeAt(sh, 40, 0)).toBe(true);
+  });
+
+  it("scaleUnit (group proxy) scales a distorted member's nodes with the unit", () => {
+    const r2 = box("r2", { type: "rect", x: 60, y: 0, width: 20, height: 20, groupPath: ["g"] });
+    let st = seeded([distortedRect({ groupPath: ["g"] }), r2]);
+    st = drawReducer(st, { type: "select", ids: ["r"] }); // expands to unit g → [r, r2]
+    st = drawReducer(st, { type: "beginGesture" });
+    st = drawReducer(st, { type: "scaleUnit", ids: st.selectedIds, factor: 2, origin: { x: 0, y: 0 } });
+    st = drawReducer(st, { type: "endGesture" });
+    const sh = st.shapes.find((s) => s.id === "r") as BoxShape;
+    expect(sh.width).toBe(80);
+    expect(hasNodeAt(sh, 40, 0)).toBe(true); // (20,0) × 2
+  });
+
+  it("stretchUnit (side-anchor) scales a distorted member's nodes per-axis", () => {
+    const r2 = box("r2", { type: "rect", x: 60, y: 0, width: 20, height: 20, groupPath: ["g"] });
+    let st = seeded([distortedRect({ groupPath: ["g"] }), r2]);
+    st = drawReducer(st, { type: "select", ids: ["r"] });
+    st = drawReducer(st, { type: "beginGesture" });
+    st = drawReducer(st, { type: "stretchUnit", ids: st.selectedIds, fx: 2, fy: 1, origin: { x: 0, y: 0 } });
+    st = drawReducer(st, { type: "endGesture" });
+    const sh = st.shapes.find((s) => s.id === "r") as BoxShape;
+    expect(sh.width).toBe(80);
+    expect(hasNodeAt(sh, 40, 0)).toBe(true); // fx=2 → x:20→40, fy=1 → y stays
+  });
+
+  it("a plain MOVE carries a distorted shape's outline for free (relative nodes ride x/y)", () => {
+    let st = seeded([distortedRect()]);
+    st = drawReducer(st, { type: "translateShapes", ids: ["r"], dx: 100, dy: 50 });
+    const sh = st.shapes[0] as BoxShape;
+    expect([sh.x, sh.y]).toEqual([100, 50]);
+    // nodes unchanged (relative), absolute outline shifted by the move
+    expect(hasNodeAt(sh, 20, 0)).toBe(true);
+    expect(pathPolygon(sh).slice(0, 2)).toEqual([100, 50]);
+  });
+});
+
 describe("configurable features — palette width + the opt-outs", () => {
   const seededWith = (features: Partial<DrawFeatures>, shapes: Shape[] = []) =>
     initialDrawState({ shapes, width: 400, height: 300 }, { features });
