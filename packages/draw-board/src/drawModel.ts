@@ -1695,6 +1695,15 @@ export function toClusterVariant(sh: Shape, target: ShapeVariant | LineVariant):
  *  can't poison the sort). */
 export const layerOf = (sh: Shape): number => (typeof sh.layer === "number" && Number.isFinite(sh.layer) ? sh.layer : 0);
 
+/** Store an explicit `layer` on a shape (mutating), or DROP the field when it's the
+ *  default 0 — docs persist only non-zero layers, and a stray `layer: 0` would
+ *  poison the z-sort. The single home for the "slim layer" idiom the layer-assign,
+ *  group-lift, and doodle-merge reducers all share. */
+function stampLayer(sh: Shape, layer: number): void {
+  if (layer === 0) delete (sh as { layer?: number }).layer;
+  else sh.layer = layer;
+}
+
 /** The layer bands the UI offers to ASSIGN, low → high (back → front). Just a
  *  small set for now — the model takes any integer, so widening this list (or
  *  swapping the control for a stepper) needs no model change. */
@@ -1949,11 +1958,12 @@ const CLUSTER_EPS = 1e-6;
  *  overlap isn't double-counted (docs/groups-design.md). */
 function unitWeight(byId: Map<string, Shape>, memberIds: string[]): number {
   if (memberIds.length === 1) return clusterWeight(byId.get(memberIds[0])!);
+  const first = byId.get(memberIds[0]);
   // An AUTO doodle cluster stays MASSLESS like its member strokes: a multi-stroke
   // annotation (even one ENCIRCLING its target, so its union bbox dwarfs it) must
   // still FOLLOW the shape it's drawn on when that shape is grabbed. A manual ⌘G
   // group, by contrast, is an object with its union-AABB mass (docs/groups-design.md).
-  if (isDoodleGid(rootUnitKeyOf(byId.get(memberIds[0])!))) return 0;
+  if (first && isDoodleGid(rootUnitKeyOf(first))) return 0;
   const b = contentBounds(memberIds.map((id) => byId.get(id)!));
   return b ? b.width * b.height : 0;
 }
@@ -3006,8 +3016,8 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       if (!Number.isFinite(layer)) return s; // reject a NaN/Infinity host dispatch (UI only sends LAYER_SLOTS)
       const withLayer = (sh: Shape): Shape => {
         if (layerOf(sh) === layer) return sh;
-        const next = { ...sh, layer };
-        if (layer === 0) delete (next as { layer?: number }).layer;
+        const next = { ...sh };
+        stampLayer(next, layer);
         return next;
       };
       // Layer is a UNIT property (a group rides ONE layer), so expand to whole
@@ -3136,8 +3146,7 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         // sizeStep resets: a fresh group is at its natural ("medium") size, and
         // any member's own control history dies with its loose life.
         const out: Shape = { ...sh, groupPath: [a.gid, ...(sh.groupPath ?? [])], sizeStep: undefined };
-        if (groupLayer === 0) delete (out as { layer?: number }).layer;
-        else out.layer = groupLayer;
+        stampLayer(out, groupLayer);
         // Sever OUTWARD edges (attach + connector binds to non-members) — undo
         // restores exactly; a still-touching neighbor re-glues on the next drag.
         // Internal edges CROSSING between the forming group's child units park in
@@ -3300,24 +3309,30 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         // Doodle merge: a pencil whose START landed on an existing pen stroke joins
         // that stroke's unit — an automatic, non-ungroupable cluster (isDoodleGid).
         // A loose seed → both wrap into a fresh `doodle-<seedId>`; a seed already in
-        // a unit (doodle or ⌘G) → the draft adopts its root path. Coexists with the
-        // massless attach above; sizeStep resets so the new unit sizes as one (like
-        // groupSelection). No edge-severing ceremony — the cluster never ungroups,
-        // so there's nothing to park/restore, and the seed keeps any glue it had.
+        // a unit (doodle or ⌘G) → the draft adopts its root path. sizeStep resets so
+        // the new unit sizes as one (like groupSelection).
         if (s.features.penMerge && draft.points.length >= 2) {
           const start = { x: draft.points[0], y: draft.points[1] };
           const seed = penSeedAt(start, normalized, draft.id, PEN_MERGE_DIST * distScale);
           if (seed) {
-            const path = seed.groupPath?.length ? [...seed.groupPath] : [DOODLE_GID_PREFIX + seed.id];
-            const targets = seed.groupPath?.length ? new Set([draft.id]) : new Set([seed.id, draft.id]);
+            const seedGrouped = !!seed.groupPath?.length;
+            const path = seedGrouped ? [...seed.groupPath!] : [DOODLE_GID_PREFIX + seed.id];
+            const targets = seedGrouped ? new Set([draft.id]) : new Set([seed.id, draft.id]);
             // The draft ADOPTS the seed's layer — a doodle joins the stroke it lands
             // on, so a backgrounded seed keeps the whole cluster in back (no z-jump)
             // and the unit reads one coherent layer band (not mixed).
             const layer = layerOf(seed);
+            // Joining a MANUAL ⌘G group: that unit holds no live OUTWARD member edges
+            // (groupSelection severs them), so drop the draft's freshly-computed attach
+            // unless it targets a member of the unit. A doodle cluster is a massless
+            // follower and deliberately KEEPS its glue (it annotates & follows).
+            const unitKey = rootUnitKeyOf(seed);
+            const severOutward = seedGrouped && !isDoodleGid(unitKey);
+            const inUnit = (id: string) => normalized.some((o) => o.id === id && rootUnitKeyOf(o) === unitKey);
             normalized = mapShapes(normalized, targets, (sh) => {
               const out: Shape = { ...sh, groupPath: path, sizeStep: undefined };
-              if (layer === 0) delete (out as { layer?: number }).layer;
-              else out.layer = layer;
+              stampLayer(out, layer);
+              if (severOutward && out.attach && !inUnit(out.attach.id)) out.attach = undefined;
               return out;
             });
           }

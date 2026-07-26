@@ -3665,4 +3665,22 @@ describe("pencil-doodle merge — a pen started on a pen becomes one unit", () =
     expect(clones[0].groupPath![0]).toBe(clones[1].groupPath![0]); // one fresh shared gid
     expect(clones[0].groupPath![0]).not.toBe(shape(s, "a").groupPath![0]); // but distinct from the source
   });
+
+  it("joining a MANUAL group severs the draft's outward attach; a doodle cluster keeps it", () => {
+    const base: Shape[] = [pen("p", [0, 50, 50, 50]), box("C", { x: 200, y: 0, width: 100, height: 100 })];
+    // (a) loose seed → doodle cluster: the draft KEEPS its attach to C (a massless
+    // annotation follows the shape it's drawn against). This also proves attach fires.
+    let s = seeded(base);
+    s = drawPen(s, "d", [[25, 50], [199, 60]]); // starts on 'p', far end edge-touches C
+    expect(shape(s, "d").groupPath?.[0]).toBe(DOODLE_GID_PREFIX + "p");
+    expect((shape(s, "d") as { attach?: Attach }).attach?.id).toBe("C");
+    // (b) seed in a MANUAL ⌘G group → the draft joins 'g' but its OUTWARD attach severs
+    // (a manual group holds no live outward member edges — the groupSelection invariant).
+    let s2 = seeded([...base, pen("q", [0, 60, 50, 60])]);
+    s2 = drawReducer(s2, { type: "select", ids: ["p", "q"] });
+    s2 = drawReducer(s2, { type: "groupSelection", gid: "g" });
+    s2 = drawPen(s2, "d", [[25, 50], [199, 60]]);
+    expect(shape(s2, "d").groupPath).toEqual(["g"]);
+    expect((shape(s2, "d") as { attach?: Attach }).attach).toBeUndefined();
+  });
 });

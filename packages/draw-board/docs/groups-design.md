@@ -55,9 +55,11 @@ rewritten unit-grained. The functions being rewritten, explicitly:
   touching any member connects the two UNITS.
 - **`moveClusterIds` → unit BFS.** Seeds expand to full units; admission is
   atomic per unit; threshold compares **unit weights**. Unit weight = area of
-  the unit's union AABB (a stroke-only group is an object, not massless;
-  overlap isn't double-counted). Equal-size separability law applies at unit
-  grain. `containedIds`: a unit is contained only if ALL members are inside;
+  the unit's union AABB (a stroke-only MANUAL group is an object, not massless;
+  overlap isn't double-counted). **Exception — auto doodle clusters** (a pen
+  started on a pen, `isDoodleGid` root): massless like their member strokes, so a
+  multi-stroke annotation still follows the shape it's drawn on. Equal-size
+  separability law applies at unit grain. `containedIds`: a unit is contained only if ALL members are inside;
   a unit contains only via its members' boxes (not hull air) — v1: containment
   checks against member boxes individually, containee = whole units.
 - **`reflowAttachments` → moves UNITS rigidly.** When a follower's anchor
@@ -241,7 +243,8 @@ carries the minted `gid` in its payload (ids-from-the-view law).
 - Groups CAN initiate glue and glue to each other (unit-owned outward edge,
   max one per unit) — chosen over "glue-inert groups" to honor rule 2.
 - Unit weight = union-AABB area (not member-sum: overlap double-counts; not
-  massless-if-strokes: a group is an object).
+  massless-if-strokes: a manual group is an object). Auto doodle clusters
+  (`isDoodleGid` root) are the exception — massless, like their member strokes.
 - Grouping severs outward glue permanently (undo-only restore) — simple over
   archival restore, stated in UX copy.
 - Retype of grouped members disallowed; stroke-width edits allowed including

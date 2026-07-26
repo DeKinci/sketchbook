@@ -12,6 +12,7 @@ import {
   nearestBindableId,
   nearestEdgeBindableId,
   attachAt,
+  distToSeg,
   sideAnchor,
   boundingBox,
   contentBounds,
@@ -106,16 +107,6 @@ const GLUE_PAD = 24; // = EDGE_TOUCH, the largest of the three
  *  Centered containment gets NO chrome at all: the child is visibly inside its
  *  container, so a glow would announce the obvious. */
 type GlueGlow = { kind: "body" } | { kind: "edge"; ax: number; ay: number; box: Box } | { kind: "arc"; angle: number; box: Box };
-
-/** Distance from a point to a line segment (for stroke hit-testing). */
-function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const len2 = dx * dx + dy * dy;
-  let t = len2 ? ((px - x1) * dx + (py - y1) * dy) / len2 : 0;
-  t = Math.max(0, Math.min(1, t));
-  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
-}
 
 /** Normalized render box for a rect/ellipse/diamond (may be negative mid-draw). */
 function viewBox(b: BoxShape) {
@@ -674,12 +665,12 @@ export function DrawCanvas({
     // ≥6 SCREEN px of slack at any zoom (a hairline stroke at 0.1× is still clickable).
     const tol = Math.max(sPx(6), sh.strokeWidth) + sh.strokeWidth / 2;
     if (sh.type === "line" || sh.type === "arrow") {
-      return distToSegment(pt.x, pt.y, sh.points[0], sh.points[1], sh.points[2], sh.points[3]) <= tol;
+      return distToSeg(pt.x, pt.y, sh.points[0], sh.points[1], sh.points[2], sh.points[3]) <= tol;
     }
     if (sh.type === "pen") {
       const p = sh.points;
       for (let i = 0; i + 3 < p.length; i += 2) {
-        if (distToSegment(pt.x, pt.y, p[i], p[i + 1], p[i + 2], p[i + 3]) <= tol) return true;
+        if (distToSeg(pt.x, pt.y, p[i], p[i + 1], p[i + 2], p[i + 3]) <= tol) return true;
       }
     }
     return false;
@@ -834,7 +825,7 @@ export function DrawCanvas({
         let near = false;
         for (let i = 0; i < poly.length && !near; i += 2) {
           const j = (i + 2) % poly.length;
-          if (distToSegment(p.x, p.y, poly[i], poly[i + 1], poly[j], poly[j + 1]) <= sPx(8)) near = true;
+          if (distToSeg(p.x, p.y, poly[i], poly[i + 1], poly[j], poly[j + 1]) <= sPx(8)) near = true;
         }
         if (near) {
           dispatch({ type: "addNode", x: p.x, y: p.y });
