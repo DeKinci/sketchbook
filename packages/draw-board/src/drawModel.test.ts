@@ -69,6 +69,7 @@ import {
   pointInPolygon,
   isBox,
   isDistorted,
+  CIRCLE_KAPPA,
   layerOf,
   selectionLayer,
   LAYER_SLOTS,
@@ -2793,6 +2794,109 @@ describe("shape distortion — vector node geometry (pure)", () => {
     expect(fillAt([s], 10, 10)).toBe("#f00"); // top strip
     expect(fillAt([s], 45, 45)).toBe("#f00"); // right column
     expect(fillAt([s], 10, 45)).toBe(null); // the notch — in the bbox, outside the outline
+  });
+});
+
+describe("shape distortion — point-edit reducer", () => {
+  const rectShape = box("r", { type: "rect", x: 0, y: 0, width: 40, height: 30 });
+  const start = () => seeded([rectShape]);
+  const enter = () => drawReducer(start(), { type: "enterPathEdit", id: "r" });
+  const editing = (st: DrawState) => st.shapes.find((sh) => sh.id === st.editingPathId) as BoxShape | undefined;
+
+  it("enterPathEdit selects + arms the sub-mode; exitPathEdit clears it", () => {
+    let st = enter();
+    expect(st.editingPathId).toBe("r");
+    expect(st.selectedIds).toEqual(["r"]);
+    st = drawReducer(st, { type: "exitPathEdit" });
+    expect(st.editingPathId).toBe(null);
+  });
+
+  it("enterPathEdit no-ops off a box shape, a missing id, or a vectorEdit-off board", () => {
+    expect(drawReducer(start(), { type: "enterPathEdit", id: "nope" }).editingPathId).toBe(null);
+    expect(drawReducer(seeded([text("t")]), { type: "enterPathEdit", id: "t" }).editingPathId).toBe(null);
+    const off = initialDrawState({ shapes: [rectShape], width: 400, height: 300 }, { features: { vectorEdit: false } });
+    expect(drawReducer(off, { type: "enterPathEdit", id: "r" }).editingPathId).toBe(null);
+  });
+
+  it("moveNode seeds nodes on first edit, lands the anchor at the absolute target, re-syncs the bbox", () => {
+    const st = drawReducer(enter(), { type: "moveNode", index: 0, x: -10, y: -5 });
+    const sh = editing(st)!;
+    expect(isDistorted(sh)).toBe(true);
+    expect([sh.x, sh.y]).toEqual([-10, -5]);
+    expect([sh.width, sh.height]).toEqual([50, 35]);
+    expect(pathPolygon(sh).slice(0, 2)).toEqual([-10, -5]); // node 0 sits at the drag target
+  });
+
+  it("a node DRAG (beginGesture … moveNode×N … endGesture) is ONE undo entry; undo restores the parametric shape", () => {
+    let st = enter();
+    st = drawReducer(st, { type: "beginGesture" });
+    st = drawReducer(st, { type: "moveNode", index: 1, x: 60, y: 0 });
+    st = drawReducer(st, { type: "moveNode", index: 1, x: 80, y: 0 });
+    expect(st.past).toHaveLength(0); // history-neutral mid-gesture
+    st = drawReducer(st, { type: "endGesture" });
+    expect(st.past).toHaveLength(1); // one entry for the whole drag
+    expect(isDistorted(editing(st)!)).toBe(true);
+    st = drawReducer(st, { type: "undo" });
+    expect((st.shapes[0] as BoxShape).nodes).toBeUndefined();
+  });
+
+  it("moveHandle: a smooth anchor mirrors the opposite handle (mirror:false leaves it)", () => {
+    const ell = seeded([box("e", { type: "ellipse", x: 0, y: 0, width: 100, height: 60 })]);
+    const mirrored = drawReducer(drawReducer(ell, { type: "enterPathEdit", id: "e" }), { type: "moveHandle", index: 0, which: "out", x: 70, y: 0 });
+    const n0 = editing(mirrored)!.nodes![0];
+    expect(n0.hIn!.x).toBeCloseTo(2 * n0.x - n0.hOut!.x, 5); // point-reflected about the anchor
+    expect(n0.hIn!.y).toBeCloseTo(2 * n0.y - n0.hOut!.y, 5);
+
+    const free = drawReducer(drawReducer(ell, { type: "enterPathEdit", id: "e" }), { type: "moveHandle", index: 0, which: "out", x: 70, y: 0, mirror: false });
+    const f0 = free.shapes.find((s) => s.id === "e") as BoxShape;
+    expect(f0.nodes![0].hIn!.x).toBeCloseTo(50 - CIRCLE_KAPPA * 50, 4); // in-handle untouched
+    expect(f0.nodes![0].hOut!.x).toBeCloseTo(70, 4);
+  });
+
+  it("addNode splits the nearest edge (a straight edge stays straight, area unchanged)", () => {
+    const st = drawReducer(enter(), { type: "addNode", x: 20, y: 0 }); // midpoint of the top edge
+    const sh = editing(st)!;
+    expect(sh.nodes).toHaveLength(5);
+    const onTop = sh.nodes!.find((n) => Math.abs(n.y) < 1e-6 && Math.abs(n.x - 20) < 1e-6)!;
+    expect(onTop.hIn).toBeUndefined();
+    expect(onTop.hOut).toBeUndefined();
+    expect([sh.width, sh.height]).toEqual([40, 30]); // collinear insertion → same box
+  });
+
+  it("deleteNode removes an anchor but is floored at a 3-node ring", () => {
+    let st = drawReducer(enter(), { type: "addNode", x: 20, y: 0 }); // 5
+    st = drawReducer(st, { type: "deleteNode", index: 0 }); // 4
+    st = drawReducer(st, { type: "deleteNode", index: 0 }); // 3
+    expect(editing(st)!.nodes).toHaveLength(3);
+    const floored = drawReducer(st, { type: "deleteNode", index: 0 });
+    expect(floored).toBe(st); // no-op keeps identity
+  });
+
+  it("toggleNodeSmooth flips a corner to smooth (grows handles) and back", () => {
+    let st = drawReducer(enter(), { type: "toggleNodeSmooth", index: 0 });
+    expect(editing(st)!.nodes![0].hIn).toBeDefined();
+    expect(editing(st)!.nodes![0].hOut).toBeDefined();
+    st = drawReducer(st, { type: "toggleNodeSmooth", index: 0 });
+    expect(editing(st)!.nodes![0].hIn).toBeUndefined();
+    expect(editing(st)!.nodes![0].hOut).toBeUndefined();
+  });
+
+  it("resetPath drops nodes back to the parametric primitive, keeping the current bbox", () => {
+    const st = drawReducer(drawReducer(enter(), { type: "moveNode", index: 2, x: 60, y: 50 }), { type: "resetPath" });
+    const sh = editing(st)!;
+    expect(sh.nodes).toBeUndefined();
+    expect([sh.x, sh.y, sh.width, sh.height]).toEqual([0, 0, 60, 50]);
+  });
+
+  it("editingPathId clears when its shape leaves — delete, tool-switch, select-away, undo-removal", () => {
+    expect(drawReducer(enter(), { type: "deleteSelected" }).editingPathId).toBe(null);
+    expect(drawReducer(enter(), { type: "setTool", tool: "pen" }).editingPathId).toBe(null);
+    expect(drawReducer(enter(), { type: "select", ids: [] }).editingPathId).toBe(null);
+    let st = drawReducer(seeded([]), { type: "addShapes", shapes: [rectShape] });
+    st = drawReducer(st, { type: "enterPathEdit", id: "r" });
+    st = drawReducer(st, { type: "undo" }); // undo the add → shape gone
+    expect(st.shapes.find((sh) => sh.id === "r")).toBeUndefined();
+    expect(st.editingPathId).toBe(null);
   });
 });
 

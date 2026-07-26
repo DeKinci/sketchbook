@@ -276,6 +276,11 @@ export interface DrawState extends DrawDoc {
   features: DrawFeatures;
   /** Currently selected shapes (move/resize/delete/copy), in no particular order. */
   selectedIds: string[];
+  /** The box shape currently in point-edit (vector distortion) sub-mode, or none.
+   *  Transient UI state — never persisted (not in the doc OR the session) and never
+   *  part of history; cleared when its shape leaves (undo/redo/delete) or the
+   *  tool/selection moves off it. */
+  editingPathId: string | null;
   /** The shape being drawn/edited during an active gesture, or none. */
   draftId: string | null;
   /** Snapshot of `shapes` captured at gesture start; committed to `past` at
@@ -817,6 +822,7 @@ export function initialDrawState(
     strokeStyle: "solid",
     features,
     selectedIds: [],
+    editingPathId: null,
     draftId: null,
     gestureBase: null,
     past: [],
@@ -2269,6 +2275,26 @@ export type DrawAction =
   // shift everything (and the whole history) by half the size delta so widening
   // grows from the center and narrowing trims both sides evenly.
   | { type: "resizeCanvasCentered"; width: number; height: number }
+  // ── Shape distortion: point-edit a box shape into a vector outline ──────────
+  // Enter/exit the point-edit sub-mode for ONE box shape. Transient (never history,
+  // never persisted); entering also selects it. Node/handle edits below operate on
+  // the editing shape and re-sync its bbox ({@link normalizeNodes}).
+  | { type: "enterPathEdit"; id: string }
+  | { type: "exitPathEdit" }
+  // Move anchor `index` (with its handles) so it lands at ABSOLUTE (x,y). Move
+  // handle `which` of anchor `index` to absolute (x,y); a smooth anchor mirrors the
+  // opposite handle (kept collinear) unless `mirror:false`. History-NEUTRAL inside a
+  // drag gesture (endGesture owns the single push), else a self-contained commit.
+  | { type: "moveNode"; index: number; x: number; y: number }
+  | { type: "moveHandle"; index: number; which: "in" | "out"; x: number; y: number; mirror?: boolean }
+  // Split the outline at ABSOLUTE (x,y): insert an anchor on the nearest segment (de
+  // Casteljau split preserves a curve). Delete anchor `index` (floored at a 3-node
+  // ring). Toggle anchor `index` corner↔smooth (strip / grow tangent handles). Reset
+  // the shape to its plain parametric primitive (drop `nodes`). Each is a commit.
+  | { type: "addNode"; x: number; y: number }
+  | { type: "deleteNode"; index: number }
+  | { type: "toggleNodeSmooth"; index: number }
+  | { type: "resetPath" }
   // Gesture lifecycle (draw a new shape, or move/resize existing ones).
   | { type: "beginDraw"; shape: Shape }
   | { type: "updateDraw"; point: { x: number; y: number } }
@@ -2527,6 +2553,104 @@ function effectiveColumn(s: DrawState, level: "stroke" | "fill"): LaneColumn | n
   return level === "stroke" ? strokeColumnOf(s.color) : fillColumnOf(s.fill);
 }
 
+// ── Point-edit (shape distortion) helpers ───────────────────────────────────
+
+/** A point on the segment a→b at parameter t (line if handleless, else cubic). */
+function pointOnSegment(a: PathNode, b: PathNode, t: number): { x: number; y: number } {
+  const c0 = a.hOut, c1 = b.hIn;
+  if (!c0 && !c1) return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+  const p1x = c0?.x ?? a.x, p1y = c0?.y ?? a.y, p2x = c1?.x ?? b.x, p2y = c1?.y ?? b.y;
+  const mt = 1 - t, w0 = mt * mt * mt, w1 = 3 * mt * mt * t, w2 = 3 * mt * t * t, w3 = t * t * t;
+  return { x: w0 * a.x + w1 * p1x + w2 * p2x + w3 * b.x, y: w0 * a.y + w1 * p1y + w2 * p2y + w3 * b.y };
+}
+
+/** Split segment a→b at t: the new mid anchor plus the handle overrides its two
+ *  neighbors need so the OUTLINE is unchanged (de Casteljau for a curve; a plain
+ *  midpoint for a straight edge, leaving both sides straight). */
+function splitSegment(a: PathNode, b: PathNode, t: number): { aHOut?: { x: number; y: number }; mid: PathNode; bHIn?: { x: number; y: number } } {
+  const c0 = a.hOut, c1 = b.hIn;
+  if (!c0 && !c1) return { mid: { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t } };
+  const lerp = (u: { x: number; y: number }, v: { x: number; y: number }) => ({ x: u.x + (v.x - u.x) * t, y: u.y + (v.y - u.y) * t });
+  const p1 = c0 ?? a, p2 = c1 ?? b;
+  const q0 = lerp(a, p1), q1 = lerp(p1, p2), q2 = lerp(p2, b);
+  const r0 = lerp(q0, q1), r1 = lerp(q1, q2);
+  const mid = lerp(r0, r1);
+  return { aHOut: q0, mid: { x: mid.x, y: mid.y, hIn: r0, hOut: r1 }, bHIn: q2 };
+}
+
+/** Set anchor `n`'s in/out handle to (hx,hy); a smooth anchor (both handles)
+ *  mirrors the opposite one collinear unless `mirror:false`. Canonical key order. */
+function setHandle(n: PathNode, which: "in" | "out", hx: number, hy: number, mirror?: boolean): PathNode {
+  const dragged = { x: hx, y: hy };
+  const opp = { x: 2 * n.x - hx, y: 2 * n.y - hy };
+  const smooth = mirror !== false && !!n.hIn && !!n.hOut;
+  let hIn = n.hIn ? { ...n.hIn } : undefined;
+  let hOut = n.hOut ? { ...n.hOut } : undefined;
+  if (which === "in") { hIn = dragged; if (smooth) hOut = opp; } else { hOut = dragged; if (smooth) hIn = opp; }
+  return { x: n.x, y: n.y, ...(hIn ? { hIn } : null), ...(hOut ? { hOut } : null) };
+}
+
+/** Toggle anchor `index` between corner (no handles) and smooth (tangent handles
+ *  along the prev→next chord, a third of the way to each neighbor). */
+function toggleSmooth(nodes: PathNode[], index: number): PathNode[] {
+  const n = nodes[index];
+  if (n.hIn || n.hOut) return nodes.map((nd, i) => (i === index ? { x: nd.x, y: nd.y } : nd));
+  const len = nodes.length;
+  const prev = nodes[(index - 1 + len) % len], next = nodes[(index + 1) % len];
+  let tx = next.x - prev.x, ty = next.y - prev.y;
+  const mag = Math.hypot(tx, ty) || 1;
+  tx /= mag; ty /= mag;
+  const lIn = Math.hypot(n.x - prev.x, n.y - prev.y) / 3;
+  const lOut = Math.hypot(next.x - n.x, next.y - n.y) / 3;
+  const smooth: PathNode = { x: n.x, y: n.y, hIn: { x: n.x - tx * lIn, y: n.y - ty * lIn }, hOut: { x: n.x + tx * lOut, y: n.y + ty * lOut } };
+  return nodes.map((nd, i) => (i === index ? smooth : nd));
+}
+
+/** Insert an anchor where absolute (px,py) projects onto the nearest segment. */
+function insertNodeAt(nodes: PathNode[], px: number, py: number): PathNode[] | null {
+  const n = nodes.length;
+  let best = { seg: -1, t: 0, d: Infinity };
+  for (let i = 0; i < n; i++) {
+    const a = nodes[i], b = nodes[(i + 1) % n];
+    for (let k = 0; k <= 24; k++) {
+      const t = k / 24, p = pointOnSegment(a, b, t);
+      const d = (p.x - px) ** 2 + (p.y - py) ** 2;
+      if (d < best.d) best = { seg: i, t, d };
+    }
+  }
+  if (best.seg < 0) return null;
+  const nextI = (best.seg + 1) % n;
+  const sp = splitSegment(nodes[best.seg], nodes[nextI], best.t);
+  const out = nodes.map((nd, i) => {
+    if (i === best.seg && sp.aHOut) return { ...nd, hOut: sp.aHOut };
+    if (i === nextI && sp.bHIn) return { ...nd, hIn: sp.bHIn };
+    return nd;
+  });
+  out.splice(best.seg + 1, 0, sp.mid);
+  return out;
+}
+
+/** Apply `fn` to the editing shape's nodes, re-normalize its bbox, and return the
+ *  next `shapes` — or null when there's no valid distortable editing target or the
+ *  edit was a no-op/degenerate (caller then leaves state untouched). */
+function editNodes(s: DrawState, fn: (nodes: PathNode[], sh: BoxShape) => PathNode[] | null): Shape[] | null {
+  const id = s.editingPathId;
+  if (!id) return null;
+  const sh = s.shapes.find((o) => o.id === id);
+  if (!sh || !isBox(sh)) return null;
+  const nodes = fn(nodesOf(sh), sh);
+  if (!nodes || nodes.length < 3) return null;
+  const next = normalizeNodes({ ...sh, nodes });
+  return mapShapes(s.shapes, new Set([id]), () => next);
+}
+
+/** Commit an edit: history-neutral within a drag gesture (endGesture owns the one
+ *  push), else a standalone undoable commit. Null next = leave state untouched. */
+function commitEdit(s: DrawState, next: Shape[] | null): DrawState {
+  if (!next) return s;
+  return s.gestureBase ? { ...s, shapes: next } : commit(s, next);
+}
+
 export function drawReducer(s: DrawState, a: DrawAction): DrawState {
   switch (a.type) {
     case "setTool":
@@ -2539,6 +2663,7 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       return {
         ...s,
         tool: a.tool,
+        editingPathId: null, // switching tools ends any point-edit session
         baseTool: isSelectable(a.tool) ? a.tool : s.baseTool,
         selectedIds: a.tool === "select" ? s.selectedIds : [],
         shapeVariant: a.tool === "rect" || a.tool === "ellipse" || a.tool === "diamond" ? a.tool : s.shapeVariant,
@@ -2790,6 +2915,54 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       const changed = next.some((sh, i) => sh !== s.shapes[i]);
       return changed ? commit(s, next) : s;
     }
+    case "enterPathEdit": {
+      // Point-edit ONE box shape (feature-gated). Selects it (lane syncs like
+      // `select`) so the toolbar reflects it. No history — it's transient UI.
+      if (!s.features.vectorEdit) return s;
+      const sh = s.shapes.find((o) => o.id === a.id);
+      if (!sh || !isBox(sh)) return s;
+      return { ...s, editingPathId: a.id, selectedIds: [a.id], ...syncShadesFrom(s, [a.id]) };
+    }
+    case "exitPathEdit":
+      return s.editingPathId ? { ...s, editingPathId: null } : s;
+    case "moveNode": {
+      const next = editNodes(s, (nodes, sh) => {
+        if (a.index < 0 || a.index >= nodes.length) return null;
+        const cur = nodes[a.index];
+        const dx = a.x - sh.x - cur.x, dy = a.y - sh.y - cur.y;
+        if (dx === 0 && dy === 0) return null;
+        return nodes.map((n, i) => (i === a.index ? shiftNode(n, dx, dy) : n));
+      });
+      return commitEdit(s, next);
+    }
+    case "moveHandle": {
+      const next = editNodes(s, (nodes, sh) => {
+        if (a.index < 0 || a.index >= nodes.length) return null;
+        return nodes.map((n, i) => (i === a.index ? setHandle(n, a.which, a.x - sh.x, a.y - sh.y, a.mirror) : n));
+      });
+      return commitEdit(s, next);
+    }
+    case "addNode": {
+      const next = editNodes(s, (nodes, sh) => insertNodeAt(nodes, a.x - sh.x, a.y - sh.y));
+      return commitEdit(s, next);
+    }
+    case "deleteNode": {
+      const next = editNodes(s, (nodes) => (nodes.length <= 3 || a.index < 0 || a.index >= nodes.length ? null : nodes.filter((_, i) => i !== a.index)));
+      return commitEdit(s, next);
+    }
+    case "toggleNodeSmooth": {
+      const next = editNodes(s, (nodes) => (a.index < 0 || a.index >= nodes.length ? null : toggleSmooth(nodes, a.index)));
+      return commitEdit(s, next);
+    }
+    case "resetPath": {
+      const id = s.editingPathId;
+      if (!id) return s;
+      const sh = s.shapes.find((o) => o.id === id);
+      if (!sh || !isBox(sh) || !sh.nodes) return s;
+      const cleared = { ...sh };
+      delete (cleared as { nodes?: PathNode[] }).nodes;
+      return commit(s, mapShapes(s.shapes, new Set([id]), () => cleared));
+    }
     case "setPaletteSize": {
       // No-op where the handle can't exist: a fixed-width (paletteResize off)
       // or single-color board keeps the host's exact config. Floor 2, not 1:
@@ -2824,7 +2997,8 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       // Selecting also SYNCS the lane: the columns retune to the shades the
       // selection operates in (see syncShadesFrom).
       const ids = a.deep ? a.ids : expandIdsToUnits(s.shapes, a.ids);
-      return { ...s, selectedIds: ids, ...syncShadesFrom(s, ids) };
+      const stillEditing = s.editingPathId && ids.includes(s.editingPathId) ? s.editingPathId : null;
+      return { ...s, selectedIds: ids, editingPathId: stillEditing, ...syncShadesFrom(s, ids) };
     }
     case "toggleSelect": {
       // Unit-grained: if ANY member of the clicked unit is selected, remove ALL
@@ -2838,7 +3012,8 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       const selectedIds = anySelected
         ? s.selectedIds.filter((id) => !members.has(id))
         : [...s.selectedIds.filter((id) => !members.has(id)), ...memberIds];
-      return { ...s, selectedIds, ...syncShadesFrom(s, selectedIds) };
+      const stillEditing = s.editingPathId && selectedIds.includes(s.editingPathId) ? s.editingPathId : null;
+      return { ...s, selectedIds, editingPathId: stillEditing, ...syncShadesFrom(s, selectedIds) };
     }
     case "groupSelection": {
       // Guarded like history ops: a mid-drag ⌘G would corrupt the open gesture's
@@ -3299,7 +3474,11 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       const keys = new Set(selShapes.map(rootUnitKeyOf));
       if (keys.size === 1 && selShapes.length < s.shapes.filter((sh) => keys.has(rootUnitKeyOf(sh))).length) return s;
       const gone = new Set(expandIdsToUnits(s.shapes, s.selectedIds));
-      return { ...commit(s, reflowAll(s.shapes.filter((sh) => !gone.has(sh.id)), new Set())), selectedIds: [] };
+      return {
+        ...commit(s, reflowAll(s.shapes.filter((sh) => !gone.has(sh.id)), new Set())),
+        selectedIds: [],
+        editingPathId: s.editingPathId && !gone.has(s.editingPathId) ? s.editingPathId : null,
+      };
     }
     case "deleteShapes": {
       // Group guard: deleting/erasing any member deletes the whole group (rule 2).
@@ -3309,12 +3488,13 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       const selectedIds = s.selectedIds.filter((id) => !gone.has(id));
       // Inside a gesture (an eraser DRAG), the change rides it: endGesture pushes
       // the whole swipe as ONE history entry instead of one per erased shape.
-      if (s.gestureBase) return { ...s, shapes: next, selectedIds };
-      return { ...commit(s, next), selectedIds };
+      const editId = s.editingPathId && !gone.has(s.editingPathId) ? s.editingPathId : null;
+      if (s.gestureBase) return { ...s, shapes: next, selectedIds, editingPathId: editId };
+      return { ...commit(s, next), selectedIds, editingPathId: editId };
     }
     case "clearAll": {
       if (s.shapes.length === 0) return s;
-      return { ...commit(s, []), selectedIds: [] };
+      return { ...commit(s, []), selectedIds: [], editingPathId: null };
     }
 
     case "undo": {
@@ -3331,6 +3511,7 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         past: s.past.slice(0, -1),
         future: [s.shapes, ...s.future],
         selectedIds: keepExisting(s.selectedIds, prev),
+        editingPathId: s.editingPathId && prev.some((sh) => sh.id === s.editingPathId) ? s.editingPathId : null,
         draftId: null,
         gestureBase: null,
       };
@@ -3345,6 +3526,7 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         past: [...s.past, s.shapes],
         future: s.future.slice(1),
         selectedIds: keepExisting(s.selectedIds, next),
+        editingPathId: s.editingPathId && next.some((sh) => sh.id === s.editingPathId) ? s.editingPathId : null,
         draftId: null,
         gestureBase: null,
       };
