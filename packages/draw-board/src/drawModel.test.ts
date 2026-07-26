@@ -2748,7 +2748,7 @@ describe("shape distortion — vector node geometry (pure)", () => {
 
   it("flattenNodes: a straight ring is just its anchors; a curved ring subdivides", () => {
     expect(flattenNodes(seedNodes(rect()))).toHaveLength(4 * 2);
-    expect(flattenNodes(seedNodes(ell()))).toHaveLength(4 * 14 * 2);
+    expect(flattenNodes(seedNodes(ell()))).toHaveLength(4 * 20 * 2);
   });
 
   it("pathData: rect ring is all straight (M/L/Z); ellipse ring is cubic (C); offset shifts the start", () => {
@@ -2873,12 +2873,23 @@ describe("shape distortion — point-edit reducer", () => {
   });
 
   it("toggleNodeSmooth flips a corner to smooth (grows handles) and back", () => {
-    let st = drawReducer(enter(), { type: "toggleNodeSmooth", index: 0 });
+    // Distort first (a 5th node) so toggling one corner can't collapse to a clean primitive.
+    let st = drawReducer(enter(), { type: "addNode", x: 20, y: 30 });
+    st = drawReducer(st, { type: "toggleNodeSmooth", index: 0 });
     expect(editing(st)!.nodes![0].hIn).toBeDefined();
     expect(editing(st)!.nodes![0].hOut).toBeDefined();
     st = drawReducer(st, { type: "toggleNodeSmooth", index: 0 });
     expect(editing(st)!.nodes![0].hIn).toBeUndefined();
     expect(editing(st)!.nodes![0].hOut).toBeUndefined();
+    expect(editing(st)!.nodes).toHaveLength(5); // still distorted (the extra node remains)
+  });
+
+  it("editing a box back to its clean primitive drops nodes (stays parametric)", () => {
+    // Toggle a plain rect's corner smooth, then back → it's a clean rect again.
+    let st = drawReducer(enter(), { type: "toggleNodeSmooth", index: 0 });
+    expect(isDistorted(st.shapes[0])).toBe(true);
+    st = drawReducer(st, { type: "toggleNodeSmooth", index: 0 });
+    expect((st.shapes[0] as BoxShape).nodes).toBeUndefined();
   });
 
   it("resetPath drops nodes back to the parametric primitive, keeping the current bbox", () => {
@@ -2888,15 +2899,31 @@ describe("shape distortion — point-edit reducer", () => {
     expect([sh.x, sh.y, sh.width, sh.height]).toEqual([0, 0, 60, 50]);
   });
 
-  it("retyping a distorted box (armCluster) strips its nodes back to a clean primitive", () => {
+  it("retyping a distorted box while editing (armCluster) strips nodes AND ends the point-edit session", () => {
     let st = drawReducer(enter(), { type: "addNode", x: 20, y: 0 });
     expect(isDistorted(st.shapes[0])).toBe(true);
-    st = drawReducer(st, { type: "exitPathEdit" });
-    st = drawReducer(st, { type: "select", ids: ["r"] });
-    st = drawReducer(st, { type: "armCluster", cluster: "shape" }); // rect → next variant, retypes
+    expect(st.editingPathId).toBe("r"); // still editing
+    st = drawReducer(st, { type: "armCluster", cluster: "shape" }); // rect → next variant, retypes the selection
     const sh = st.shapes[0] as BoxShape;
     expect(sh.type).not.toBe("rect");
     expect(sh.nodes).toBeUndefined();
+    expect(st.editingPathId).toBe(null); // no editing a ghost
+  });
+
+  it("a net-zero anchor drag on a pristine shape stays parametric — no phantom history, redo preserved", () => {
+    // Seed a redo entry: distort once, then undo (redo now holds the distortion).
+    let st = drawReducer(enter(), { type: "moveNode", index: 0, x: -5, y: -5 });
+    st = drawReducer(st, { type: "undo" });
+    expect(st.future).toHaveLength(1);
+    const pastBefore = st.past.length;
+    // Drag an anchor OUT then exactly BACK within one gesture → lands on the seed.
+    st = drawReducer(st, { type: "beginGesture" });
+    st = drawReducer(st, { type: "moveNode", index: 0, x: -8, y: -8 });
+    st = drawReducer(st, { type: "moveNode", index: 0, x: 0, y: 0 });
+    st = drawReducer(st, { type: "endGesture" });
+    expect((st.shapes[0] as BoxShape).nodes).toBeUndefined(); // pristine → parametric
+    expect(st.past).toHaveLength(pastBefore); // no phantom push
+    expect(st.future).toHaveLength(1); // redo NOT wiped
   });
 
   it("editingPathId clears when its shape leaves — delete, tool-switch, select-away, undo-removal", () => {

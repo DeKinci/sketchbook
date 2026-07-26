@@ -1038,7 +1038,7 @@ function scaleNode(n: PathNode, fx: number, fy: number): PathNode {
 /** Sample a closed node ring to a flat [x,y,…] polyline (RELATIVE coords). A
  *  straight segment (no handles) contributes just its start anchor; a curved one
  *  is subdivided. The ring is implicitly closed (no duplicate final anchor). */
-export function flattenNodes(nodes: PathNode[], samples = 14): number[] {
+export function flattenNodes(nodes: PathNode[], samples = 20): number[] {
   const n = nodes.length;
   const out: number[] = [];
   for (let i = 0; i < n; i++) {
@@ -1104,7 +1104,7 @@ export function pathData(nodes: PathNode[], ox = 0, oy = 0): string {
  *  the flattened outline and re-origin the nodes to span [0,w]×[0,h], holding
  *  every ABSOLUTE position fixed. Upholds the bbox-sync invariant so all bbox
  *  readers stay correct. Pass a shape whose `.nodes` is already set. */
-export function normalizeNodes(sh: BoxShape & { nodes: PathNode[] }): BoxShape {
+export function normalizeNodes(sh: BoxShape & { nodes: PathNode[] }): BoxShape & { nodes: PathNode[] } {
   const flat = flattenNodes(sh.nodes);
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (let i = 0; i < flat.length; i += 2) {
@@ -2654,9 +2654,20 @@ function insertNodeAt(nodes: PathNode[], px: number, py: number): PathNode[] | n
   return out;
 }
 
+/** Whether a node ring is (within epsilon) the clean seed for its own box — i.e.
+ *  the shape carries `nodes` but isn't actually distorted. */
+function nodesMatchSeed(a: PathNode[], b: PathNode[]): boolean {
+  if (a.length !== b.length) return false;
+  const eq = (u?: { x: number; y: number }, v?: { x: number; y: number }) =>
+    (!u && !v) || (!!u && !!v && Math.abs(u.x - v.x) < 1e-6 && Math.abs(u.y - v.y) < 1e-6);
+  return a.every((n, i) => eq(n, b[i]) && eq(n.hIn, b[i].hIn) && eq(n.hOut, b[i].hOut));
+}
+
 /** Apply `fn` to the editing shape's nodes, re-normalize its bbox, and return the
  *  next `shapes` — or null when there's no valid distortable editing target or the
- *  edit was a no-op/degenerate (caller then leaves state untouched). */
+ *  edit was a no-op/degenerate (caller then leaves state untouched). An edit that
+ *  lands back on the clean primitive DROPS `nodes` (stays parametric), so a
+ *  net-zero drag can't leave phantom distortion or push a no-op history entry. */
 function editNodes(s: DrawState, fn: (nodes: PathNode[], sh: BoxShape) => PathNode[] | null): Shape[] | null {
   const id = s.editingPathId;
   if (!id) return null;
@@ -2665,7 +2676,13 @@ function editNodes(s: DrawState, fn: (nodes: PathNode[], sh: BoxShape) => PathNo
   const nodes = fn(nodesOf(sh), sh);
   if (!nodes || nodes.length < 3) return null;
   const next = normalizeNodes({ ...sh, nodes });
-  return mapShapes(s.shapes, new Set([id]), () => next);
+  let out: Shape = next;
+  if (nodesMatchSeed(next.nodes, seedNodes(next))) {
+    const bare = { ...next };
+    delete (bare as { nodes?: PathNode[] }).nodes;
+    out = bare;
+  }
+  return mapShapes(s.shapes, new Set([id]), () => out);
 }
 
 /** Commit an edit: history-neutral within a drag gesture (endGesture owns the one
@@ -2722,6 +2739,7 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         const retyped = reflowAll(mapShapes(s.shapes, new Set(loose.map((sh) => sh.id)), (sh) => toClusterVariant(sh, target)), new Set());
         return {
           ...commit(s, retyped),
+          editingPathId: null, // retype drops any distortion — end the point-edit session
           ...(a.cluster === "shape" ? { shapeVariant: target as ShapeVariant } : { lineVariant: target as LineVariant }),
         };
       }
@@ -2736,6 +2754,7 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         ...s,
         tool: next,
         selectedIds: [],
+        editingPathId: null,
         ...(a.cluster === "shape" ? { shapeVariant: next as ShapeVariant } : { lineVariant: next as LineVariant }),
       };
     }

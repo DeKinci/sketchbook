@@ -35,7 +35,7 @@ export function paintShapeGhosts(ctx: CanvasRenderingContext2D, shapes: readonly
       ctx.moveTo(poly[0], poly[1]);
       for (let i = 2; i < poly.length; i += 2) ctx.lineTo(poly[i], poly[i + 1]);
       ctx.closePath();
-      if (sh.fill) wash(sh.fill, () => ctx.fill());
+      if (sh.fill) wash(sh.fill, () => ctx.fill("evenodd"));
       ctx.stroke();
       continue;
     }

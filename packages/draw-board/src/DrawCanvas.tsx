@@ -1058,6 +1058,7 @@ export function DrawCanvas({
    *  the recorded DOWN (position + origin), never the up-time pointer. */
   const openDblTarget = (down: { lx: number; ly: number; onXfmr: boolean }) => {
     if (croppingId || tool !== "select") return;
+    if (state.editingPathId) return; // point-editing owns clicks — never spawn a caption / exit
     if (down.onXfmr) return;
     const p = { x: down.lx, y: down.ly };
     const hit = smallestAt(p);
@@ -1555,7 +1556,7 @@ export function DrawCanvas({
           // join keeps rect/diamond corners sharp; the ellipse's curves ignore it.
           if (isDistorted(sh)) {
             const b = viewBox(sh);
-            return <Path key={sh.id} {...common(sh)} x={b.x} y={b.y} data={pathData(sh.nodes)} fill={sh.fill} stroke={stroke} strokeWidth={sw} dash={dash} lineCap={dotCap} />;
+            return <Path key={sh.id} {...common(sh)} x={b.x} y={b.y} data={pathData(sh.nodes)} fill={sh.fill} fillRule="evenodd" stroke={stroke} strokeWidth={sw} dash={dash} lineCap={dotCap} />;
           }
           switch (sh.type) {
             case "rect": {

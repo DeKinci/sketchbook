@@ -82,7 +82,7 @@ function shapeSvg(sh: Shape, shapes: Shape[]): string {
   // A distorted box exports as its true vector outline (absolute coords), the same
   // M/L/C path the canvas draws — straight for rect/diamond, cubic for the ellipse.
   if (isDistorted(sh)) {
-    return `<path d="${pathData(sh.nodes, sh.x, sh.y)}" fill="${sh.fill ?? "none"}" stroke="${color}" stroke-width="${sw}"${dash}${boxCap}/>`;
+    return `<path d="${pathData(sh.nodes, sh.x, sh.y)}" fill="${sh.fill ?? "none"}" fill-rule="evenodd" stroke="${color}" stroke-width="${sw}"${dash}${boxCap}/>`;
   }
   switch (sh.type) {
     case "rect": {

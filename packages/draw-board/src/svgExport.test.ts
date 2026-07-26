@@ -30,6 +30,7 @@ describe("exportSvg", () => {
     const rectShape = { id: "dr", type: "rect", stroke: "#3b82f6", strokeWidth: 3, x: 100, y: 100, width: 60, height: 40 } as BoxShape;
     const svgRect = exportSvg(doc([{ ...rectShape, nodes: seedNodes(rectShape) } as Shape]));
     expect(svgRect).toContain('<path d="M 100 100 L 160 100 L 160 140 L 100 140 Z"'); // absolute, all-straight
+    expect(svgRect).toContain('fill-rule="evenodd"'); // matches the even-odd hit test
     expect(svgRect).not.toContain('<rect x="100" y="100"'); // never the parametric primitive
 
     const ellShape = { id: "de", type: "ellipse", stroke: "#3b82f6", strokeWidth: 3, x: 10, y: 20, width: 80, height: 80 } as BoxShape;
