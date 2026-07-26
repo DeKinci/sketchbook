@@ -424,10 +424,13 @@ export interface DrawFeatures {
   /** Shape distortion — point-edit a rect/ellipse/diamond into a vector outline
    *  (move/add anchors, ellipse curvature handles). */
   vectorEdit: boolean;
+  /** Pencil-doodle merge — a pen stroke STARTED on an existing pen stroke joins
+   *  its unit as an automatic, non-ungroupable cluster (see {@link isDoodleGid}). */
+  penMerge: boolean;
   shapes: readonly ShapeTool[];
 }
 export const MAX_PALETTE = HUE_FAMILIES.length;
-export const DEFAULT_FEATURES: DrawFeatures = { paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, layers: true, vectorEdit: true, shapes: SHAPE_TOOLS };
+export const DEFAULT_FEATURES: DrawFeatures = { paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, layers: true, vectorEdit: true, penMerge: true, shapes: SHAPE_TOOLS };
 /** Resolve a host's partial config: clamp the palette to 1..MAX_PALETTE,
  *  default everything else on. Size 1 implies fills off (no lane → nothing
  *  can arm a fill), so downstream checks read one flag each. `shapes` is
@@ -451,6 +454,7 @@ export function resolveFeatures(f?: Partial<DrawFeatures> | null): DrawFeatures 
     grouping: f?.grouping ?? DEFAULT_FEATURES.grouping,
     layers: f?.layers ?? DEFAULT_FEATURES.layers,
     vectorEdit: f?.vectorEdit ?? DEFAULT_FEATURES.vectorEdit,
+    penMerge: f?.penMerge ?? DEFAULT_FEATURES.penMerge,
     shapes,
   };
 }
@@ -1497,6 +1501,42 @@ export function attachAt(child: Shape, shapes: Shape[], distScale = 1): Attach |
   return { id: best.id, kind: "box", ax, ay, dx: cc.x - (b.x + ax * b.width), dy: cc.y - (b.y + ay * b.height) };
 }
 
+/** How near (screen px, scaled by distScale) a new pencil's START must land to an
+ *  existing pen stroke to merge into it (see {@link penSeedAt}). */
+export const PEN_MERGE_DIST = 12;
+
+/** Perpendicular distance from `(px,py)` to segment `(x1,y1)→(x2,y2)` (t clamped
+ *  to the segment, not the infinite line). The model's pen-proximity primitive. */
+export function distToSeg(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 ? Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / len2)) : 0;
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
+/** The existing PEN stroke that `start` lands on — nearest first, within `dist`
+ *  plus the seed's half stroke-width — i.e. the stroke a new pencil should merge
+ *  into. Pen-only by design: a doodle clusters with doodles, never with a box (the
+ *  user's "pencil doodles when started on pencil doodles"). Excludes `excludeId`
+ *  (the in-flight draft). Undefined if the start touched no stroke. */
+export function penSeedAt(start: { x: number; y: number }, shapes: Shape[], excludeId: string, dist = PEN_MERGE_DIST): Shape | undefined {
+  let best: Shape | undefined;
+  let bestD = Infinity;
+  for (const sh of shapes) {
+    if (sh.id === excludeId || sh.type !== "pen") continue;
+    const p = sh.points;
+    const tol = dist + sh.strokeWidth / 2;
+    let d = p.length >= 2 ? Math.hypot(start.x - p[0], start.y - p[1]) : Infinity;
+    for (let i = 0; i + 3 < p.length; i += 2) d = Math.min(d, distToSeg(start.x, start.y, p[i], p[i + 1], p[i + 2], p[i + 3]));
+    if (d <= tol && d < bestD) {
+      bestD = d;
+      best = sh;
+    }
+  }
+  return best;
+}
+
 /** Move every attached follower so its center tracks the parent's current anchor
  *  — following the parent on move AND resize — at ROOT-UNIT grain: when a
  *  follower's anchor fires, its ENTIRE unit moves rigidly by the same delta
@@ -1747,6 +1787,14 @@ export function selectionLayer(shapes: Shape[], selectedIds: string[]): number |
  *  a group behaves as ONE unit (docs/groups-design.md). */
 export const rootUnitKeyOf = (sh: Shape): string => sh.groupPath?.[0] ?? sh.id;
 
+/** Prefix marking a group id as an AUTOMATIC pencil-doodle cluster (a pen stroke
+ *  that started on another pen stroke, {@link penSeedAt}) — a unit the user cannot
+ *  ⌘G-ungroup, distinct from a hand-made group. Minted deterministically as
+ *  `DOODLE_GID_PREFIX + seedId` so the reducer stays pure; `normalizeGroups`'
+ *  dedupe keeps the prefix, so it survives save/reload. */
+export const DOODLE_GID_PREFIX = "doodle-";
+export const isDoodleGid = (gid: string | undefined): boolean => !!gid && gid.startsWith(DOODLE_GID_PREFIX);
+
 /** Partition shapes into root units: rootKey → member ids (singleton for loose
  *  shapes). One O(n) pass — cheap at reducer-action frequency; the VIEW uses the
  *  identity-diffed {@link UnitIndex} for per-frame queries instead. */
@@ -1789,7 +1837,9 @@ export function groupActionFor(shapes: Shape[], selectedIds: string[]): "group" 
   const key = [...keys][0];
   const members = shapes.filter((sh) => rootUnitKeyOf(sh) === key);
   if (members.length !== sel.size) return null; // proper subset — deep-select, never ungroups
-  return members[0].groupPath?.length ? "ungroup" : null; // a lone loose shape isn't a group
+  // A lone loose shape isn't a group; an AUTO doodle cluster is deliberately
+  // non-ungroupable (mimics a merged single stroke — undo, not ⌘G, unmerges it).
+  return members[0].groupPath?.length && !isDoodleGid(key) ? "ungroup" : null;
 }
 
 /** What the size controls should SCALE instead of restroke: the member ids when
@@ -3237,6 +3287,22 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
         // but never pulls). (attachAt skips the draft itself.)
         const attach = attachAt(draft, shapes, distScale);
         if (attach) normalized = mapShapes(shapes, new Set([draft.id]), (sh) => ({ ...sh, attach } as Shape));
+        // Doodle merge: a pencil whose START landed on an existing pen stroke joins
+        // that stroke's unit — an automatic, non-ungroupable cluster (isDoodleGid).
+        // A loose seed → both wrap into a fresh `doodle-<seedId>`; a seed already in
+        // a unit (doodle or ⌘G) → the draft adopts its root path. Coexists with the
+        // massless attach above; sizeStep resets so the new unit sizes as one (like
+        // groupSelection). No edge-severing ceremony — the cluster never ungroups,
+        // so there's nothing to park/restore, and the seed keeps any glue it had.
+        if (s.features.penMerge && draft.points.length >= 2) {
+          const start = { x: draft.points[0], y: draft.points[1] };
+          const seed = penSeedAt(start, normalized, draft.id, PEN_MERGE_DIST * distScale);
+          if (seed) {
+            const path = seed.groupPath?.length ? [...seed.groupPath] : [DOODLE_GID_PREFIX + seed.id];
+            const targets = seed.groupPath?.length ? new Set([draft.id]) : new Set([seed.id, draft.id]);
+            normalized = mapShapes(normalized, targets, (sh) => ({ ...sh, groupPath: path, sizeStep: undefined } as Shape));
+          }
+        }
       }
       // Pen is a persistent tool (stay in it). A one-use shape tool snaps back to
       // the last selectable — auto-selecting the new shape only if we return to

@@ -12,6 +12,13 @@ import {
   nearestBindableId,
   nearestEdgeBindableId,
   attachAt,
+  penSeedAt,
+  distToSeg,
+  PEN_MERGE_DIST,
+  isDoodleGid,
+  DOODLE_GID_PREFIX,
+  groupActionFor,
+  rootUnitKeyOf,
   growthOrigin,
   sideAnchor,
   migrateLabels,
@@ -86,6 +93,7 @@ import {
   type PathNode,
   type TextShape,
   type Shape,
+  type FreehandShape,
   type Attach,
 } from "./drawModel.ts";
 import { lineWidth } from "./textMetrics.ts";
@@ -2998,7 +3006,7 @@ describe("configurable features — palette width + the opt-outs", () => {
     initialDrawState({ shapes, width: 400, height: 300 }, { features });
 
   it("resolveFeatures: defaults, clamping, and the single-color collapse", () => {
-    expect(resolveFeatures()).toEqual({ paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, layers: true, vectorEdit: true, shapes: SHAPE_TOOLS });
+    expect(resolveFeatures()).toEqual({ paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, layers: true, vectorEdit: true, penMerge: true, shapes: SHAPE_TOOLS });
     expect(resolveFeatures(null)).toEqual(resolveFeatures());
     expect(resolveFeatures({ paletteSize: 0 }).paletteSize).toBe(1);
     expect(resolveFeatures({ paletteSize: 99 }).paletteSize).toBe(MAX_PALETTE);
@@ -3014,10 +3022,12 @@ describe("configurable features — palette width + the opt-outs", () => {
       grouping: false,
       layers: true,
       vectorEdit: true,
+      penMerge: true,
       shapes: SHAPE_TOOLS,
     });
     expect(resolveFeatures({ layers: false }).layers).toBe(false);
     expect(resolveFeatures({ vectorEdit: false }).vectorEdit).toBe(false);
+    expect(resolveFeatures({ penMerge: false }).penMerge).toBe(false);
   });
 
   it("resolveFeatures.shapes: sanitized to known kinds in canonical order; garbage → all; explicit [] honored", () => {
@@ -3416,5 +3426,199 @@ describe("cancelGesture", () => {
   it("no-ops without a live gesture", () => {
     const s = initialDrawState({ shapes: [box("a")], width: 720, height: 460 });
     expect(drawReducer(s, { type: "cancelGesture" })).toBe(s);
+  });
+});
+
+describe("pencil-doodle merge — a pen started on a pen becomes one unit", () => {
+  const pen = (id: string, points: number[], over: Partial<FreehandShape> = {}): FreehandShape => ({
+    id,
+    type: "pen",
+    stroke: "#000",
+    strokeWidth: 3,
+    points,
+    ...over,
+  });
+
+  /** Draw a pen stroke start→…→end via the REAL begin/extend/end actions (so the
+   *  merge runs exactly as it does live). distScale 1 → PEN_MERGE_DIST world px. */
+  const drawPen = (s: DrawState, id: string, pts: Array<[number, number]>): DrawState => {
+    s = drawReducer(s, { type: "beginDraw", shape: pen(id, [pts[0][0], pts[0][1]]) });
+    for (let i = 1; i < pts.length; i++) s = drawReducer(s, { type: "extendFreehand", point: { x: pts[i][0], y: pts[i][1] } });
+    return drawReducer(s, { type: "endDraw", minSize: 2, distScale: 1 });
+  };
+  const shape = (s: DrawState, id: string): Shape => s.shapes.find((x) => x.id === id)!;
+
+  // ── pure geometry ────────────────────────────────────────────────
+  it("distToSeg: zero on the segment, perpendicular off it, clamped past the ends", () => {
+    expect(distToSeg(5, 0, 0, 0, 10, 0)).toBeCloseTo(0); // on the line
+    expect(distToSeg(5, 4, 0, 0, 10, 0)).toBeCloseTo(4); // perpendicular
+    expect(distToSeg(-3, 4, 0, 0, 10, 0)).toBeCloseTo(5); // clamped to the (0,0) end → dist to (−3,4)
+    expect(distToSeg(0, 0, 4, 4, 4, 4)).toBeCloseTo(Math.hypot(4, 4)); // degenerate segment → point distance
+  });
+
+  it("isDoodleGid: only the doodle- prefix, and never undefined", () => {
+    expect(isDoodleGid(DOODLE_GID_PREFIX + "x")).toBe(true);
+    expect(isDoodleGid("g-manual")).toBe(false);
+    expect(isDoodleGid(undefined)).toBe(false);
+    expect(isDoodleGid("")).toBe(false);
+  });
+
+  // ── penSeedAt ────────────────────────────────────────────────────
+  it("penSeedAt: the pen a start lands on, pen-only, nearest wins, excludes the draft", () => {
+    const a = pen("a", [0, 0, 100, 0]); // horizontal at y=0
+    const b = pen("b", [0, 50, 100, 50]); // horizontal at y=50
+    const rect = box("r", { x: 0, y: 90, width: 100, height: 20 });
+    const shapes: Shape[] = [a, b, rect];
+    expect(penSeedAt({ x: 40, y: 1 }, shapes, "draft")?.id).toBe("a"); // on 'a'
+    expect(penSeedAt({ x: 40, y: 49 }, shapes, "draft")?.id).toBe("b"); // nearer 'b'
+    expect(penSeedAt({ x: 40, y: 25 }, shapes, "draft")).toBeUndefined(); // between, far from both
+    expect(penSeedAt({ x: 40, y: 100 }, shapes, "draft")).toBeUndefined(); // over the RECT → pen-only
+    expect(penSeedAt({ x: 40, y: 1 }, shapes, "a")).toBeUndefined(); // excludes the draft itself
+  });
+
+  it("penSeedAt: a thicker stroke is reachable from farther (half-width slack)", () => {
+    const thin = pen("thin", [0, 0, 100, 0], { strokeWidth: 2 });
+    const thick = pen("thick", [0, 0, 100, 0], { strokeWidth: 40 });
+    // 15px off: outside thin's tol (12 + 1) but inside thick's (12 + 20)
+    expect(penSeedAt({ x: 50, y: 15 }, [thin], "d", PEN_MERGE_DIST)).toBeUndefined();
+    expect(penSeedAt({ x: 50, y: 15 }, [thick], "d", PEN_MERGE_DIST)?.id).toBe("thick");
+  });
+
+  // ── the merge, via real draw actions ─────────────────────────────
+  it("a pencil started ON a loose pen wraps both into a fresh non-ungroupable doodle cluster", () => {
+    let s = seeded([]);
+    s = drawPen(s, "a", [[0, 0], [100, 0]]); // seed
+    s = drawPen(s, "b", [[50, 1], [50, 80]]); // starts on 'a' at (50,1)
+    const gid = DOODLE_GID_PREFIX + "a";
+    expect(shape(s, "a").groupPath).toEqual([gid]);
+    expect(shape(s, "b").groupPath).toEqual([gid]);
+    expect(rootUnitKeyOf(shape(s, "a"))).toBe(rootUnitKeyOf(shape(s, "b")));
+    // select one → the unit expands to both; and the unit offers NO ungroup
+    s = drawReducer(s, { type: "select", ids: ["a"] });
+    expect(new Set(s.selectedIds)).toEqual(new Set(["a", "b"]));
+    expect(groupActionFor(s.shapes, s.selectedIds)).toBeNull();
+  });
+
+  it("a pencil started FAR from every stroke stays loose", () => {
+    let s = seeded([]);
+    s = drawPen(s, "a", [[0, 0], [100, 0]]);
+    s = drawPen(s, "b", [[0, 200], [100, 200]]); // nowhere near 'a'
+    expect(shape(s, "a").groupPath).toBeUndefined();
+    expect(shape(s, "b").groupPath).toBeUndefined();
+  });
+
+  it("only the START merges — a stroke that merely ENDS on another stays loose", () => {
+    let s = seeded([]);
+    s = drawPen(s, "a", [[0, 0], [100, 0]]);
+    s = drawPen(s, "b", [[50, 200], [50, 1]]); // starts far, ends on 'a'
+    expect(shape(s, "b").groupPath).toBeUndefined();
+  });
+
+  it("a pencil started on a non-pen shape does NOT merge (pens cluster with pens)", () => {
+    let s = seeded([box("r", { x: 0, y: 0, width: 100, height: 100 })]);
+    s = drawPen(s, "b", [[50, 50], [80, 80]]); // starts inside the rect
+    expect(shape(s, "b").groupPath).toBeUndefined();
+  });
+
+  it("a degenerate tap ON a stroke joins it too", () => {
+    let s = seeded([]);
+    s = drawPen(s, "a", [[0, 0], [100, 0]]);
+    s = drawPen(s, "dot", [[50, 1]]); // a single-tap dot on 'a'
+    expect(shape(s, "dot").groupPath).toEqual([DOODLE_GID_PREFIX + "a"]);
+  });
+
+  it("a third stroke started on a doodle cluster JOINS the same gid", () => {
+    let s = seeded([]);
+    s = drawPen(s, "a", [[0, 0], [100, 0]]);
+    s = drawPen(s, "b", [[50, 1], [50, 80]]); // forms doodle-a
+    s = drawPen(s, "c", [[50, 40], [90, 40]]); // starts on 'b' (a member)
+    const gid = DOODLE_GID_PREFIX + "a";
+    for (const id of ["a", "b", "c"]) expect(shape(s, id).groupPath).toEqual([gid]);
+  });
+
+  it("a pencil started on a MANUAL group member joins that unit (adopts its root path, stays ungroupable)", () => {
+    let s = seeded([pen("a", [0, 0, 100, 0]), pen("x", [0, 40, 100, 40])]);
+    s = drawReducer(s, { type: "select", ids: ["a", "x"] });
+    s = drawReducer(s, { type: "groupSelection", gid: "g" });
+    s = drawPen(s, "b", [[50, 1], [50, 80]]); // starts on 'a' (in group g)
+    expect(shape(s, "b").groupPath).toEqual(["g"]);
+    s = drawReducer(s, { type: "select", ids: ["a"] });
+    expect(groupActionFor(s.shapes, s.selectedIds)).toBe("ungroup"); // a manual group is still ungroupable
+  });
+
+  it("features.penMerge = false disables the merge entirely", () => {
+    let s = initialDrawState({ shapes: [], width: 400, height: 300 }, { features: { penMerge: false } });
+    s = drawPen(s, "a", [[0, 0], [100, 0]]);
+    s = drawPen(s, "b", [[50, 1], [50, 80]]);
+    expect(shape(s, "a").groupPath).toBeUndefined();
+    expect(shape(s, "b").groupPath).toBeUndefined();
+  });
+
+  it("the merge is ONE history entry — undo un-merges, redo re-merges", () => {
+    let s = seeded([]);
+    s = drawPen(s, "a", [[0, 0], [100, 0]]);
+    s = drawPen(s, "b", [[50, 1], [50, 80]]);
+    expect(shape(s, "a").groupPath).toBeDefined();
+    s = drawReducer(s, { type: "undo" });
+    expect(s.shapes.map((x) => x.id)).toEqual(["a"]); // 'b' gone
+    expect(shape(s, "a").groupPath).toBeUndefined(); // 'a' loose again
+    s = drawReducer(s, { type: "redo" });
+    expect(shape(s, "a").groupPath).toEqual([DOODLE_GID_PREFIX + "a"]);
+    expect(shape(s, "b").groupPath).toEqual([DOODLE_GID_PREFIX + "a"]);
+  });
+
+  it("the cluster moves as one — dragging one member carries the other", () => {
+    let s = seeded([]);
+    s = drawPen(s, "a", [[0, 0], [100, 0]]);
+    s = drawPen(s, "b", [[50, 1], [50, 80]]);
+    const bStart = (shape(s, "b") as FreehandShape).points.slice(0, 2);
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "translateShapes", ids: ["a"], dx: 10, dy: 20 }); // grab only 'a'
+    s = drawReducer(s, { type: "endGesture" });
+    expect((shape(s, "a") as FreehandShape).points.slice(0, 2)).toEqual([10, 20]);
+    expect((shape(s, "b") as FreehandShape).points.slice(0, 2)).toEqual([bStart[0] + 10, bStart[1] + 20]);
+  });
+
+  it("deleting any member deletes the whole doodle unit (it IS one stroke)", () => {
+    let s = seeded([]);
+    s = drawPen(s, "a", [[0, 0], [100, 0]]);
+    s = drawPen(s, "b", [[50, 1], [50, 80]]);
+    s = drawReducer(s, { type: "deleteShapes", ids: ["b"] }); // erase just 'b'
+    expect(s.shapes).toEqual([]); // 'a' went too
+  });
+
+  it("the doodle cluster survives save→reload and stays non-ungroupable", () => {
+    let s = seeded([]);
+    s = drawPen(s, "a", [[0, 0], [100, 0]]);
+    s = drawPen(s, "b", [[50, 1], [50, 80]]);
+    const reloaded = initialDrawState(toDoc(s), { features: {} });
+    const gid = DOODLE_GID_PREFIX + "a";
+    expect(shape(reloaded, "a").groupPath).toEqual([gid]);
+    expect(shape(reloaded, "b").groupPath).toEqual([gid]);
+    let r = drawReducer(reloaded, { type: "select", ids: ["a"] });
+    expect(groupActionFor(r.shapes, r.selectedIds)).toBeNull();
+  });
+
+  it("a doodle cluster nests under a manual ⌘G group; ungroup peels only the manual layer", () => {
+    let s = seeded([]);
+    s = drawPen(s, "a", [[0, 0], [100, 0]]);
+    s = drawPen(s, "b", [[50, 1], [50, 80]]); // doodle-a = {a,b}
+    s = drawReducer(s, { type: "beginDraw", shape: box("r", { x: 200, y: 200, width: 40, height: 30 }) });
+    s = drawReducer(s, { type: "updateDraw", point: { x: 240, y: 230 } });
+    s = drawReducer(s, { type: "endDraw" });
+    s = drawReducer(s, { type: "select", ids: ["a", "r"] }); // expands to {a,b} + {r} = 2 units
+    s = drawReducer(s, { type: "groupSelection", gid: "g" });
+    expect(shape(s, "a").groupPath).toEqual(["g", DOODLE_GID_PREFIX + "a"]);
+    expect(shape(s, "r").groupPath).toEqual(["g"]);
+    // the manual wrapper IS ungroupable
+    s = drawReducer(s, { type: "select", ids: ["a"] });
+    expect(groupActionFor(s.shapes, s.selectedIds)).toBe("ungroup");
+    s = drawReducer(s, { type: "ungroup" });
+    // manual layer peeled; the doodle cluster is intact and non-ungroupable again
+    expect(shape(s, "a").groupPath).toEqual([DOODLE_GID_PREFIX + "a"]);
+    expect(shape(s, "b").groupPath).toEqual([DOODLE_GID_PREFIX + "a"]);
+    expect(shape(s, "r").groupPath).toBeUndefined();
+    s = drawReducer(s, { type: "select", ids: ["a"] });
+    expect(groupActionFor(s.shapes, s.selectedIds)).toBeNull();
   });
 });
