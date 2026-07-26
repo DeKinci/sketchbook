@@ -59,6 +59,16 @@ import {
   isEnclosed,
   paintsFill,
   fillAt,
+  cloneShape,
+  seedNodes,
+  nodesOf,
+  flattenNodes,
+  pathPolygon,
+  pathData,
+  normalizeNodes,
+  pointInPolygon,
+  isBox,
+  isDistorted,
   layerOf,
   selectionLayer,
   LAYER_SLOTS,
@@ -72,6 +82,7 @@ import {
   type DrawSession,
   type DrawState,
   type BoxShape,
+  type PathNode,
   type TextShape,
   type Shape,
   type Attach,
@@ -2673,12 +2684,124 @@ describe("the session slice — toSession / restore across reloads", () => {
   });
 });
 
+describe("shape distortion — vector node geometry (pure)", () => {
+  const rect = (o: Partial<BoxShape> = {}) => box("r", { type: "rect", x: 10, y: 20, width: 40, height: 30, ...o });
+  const ell = (o: Partial<BoxShape> = {}) => box("e", { type: "ellipse", x: 0, y: 0, width: 100, height: 60, ...o });
+
+  const bbox = (flat: number[]) => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (let i = 0; i < flat.length; i += 2) {
+      minX = Math.min(minX, flat[i]); maxX = Math.max(maxX, flat[i]);
+      minY = Math.min(minY, flat[i + 1]); maxY = Math.max(maxY, flat[i + 1]);
+    }
+    return { minX, minY, maxX, maxY };
+  };
+  const shoelace = (flat: number[]) => {
+    let a = 0; const m = flat.length / 2;
+    for (let i = 0, j = m - 1; i < m; j = i++) a += (flat[j * 2] + flat[i * 2]) * (flat[j * 2 + 1] - flat[i * 2 + 1]);
+    return Math.abs(a / 2);
+  };
+
+  it("isBox / isDistorted narrow correctly (a ring needs >=3 nodes)", () => {
+    expect(isBox(rect())).toBe(true);
+    expect(isBox(text("t"))).toBe(false);
+    expect(isDistorted(rect())).toBe(false); // parametric until edited
+    const d = { ...rect(), nodes: seedNodes(rect()) };
+    expect(isDistorted(d)).toBe(true);
+    expect(isDistorted({ ...d, nodes: d.nodes.slice(0, 2) })).toBe(false);
+  });
+
+  it("seedNodes rect: four handleless corners spanning [0,w]×[0,h]", () => {
+    const n = seedNodes(rect());
+    expect(n.map((p) => [p.x, p.y])).toEqual([[0, 0], [40, 0], [40, 30], [0, 30]]);
+    expect(n.every((p) => !p.hIn && !p.hOut)).toBe(true);
+  });
+
+  it("seedNodes diamond: four handleless edge-midpoints", () => {
+    const n = seedNodes(box("d", { type: "diamond", x: 0, y: 0, width: 40, height: 30 }));
+    expect(n.map((p) => [p.x, p.y])).toEqual([[20, 0], [40, 15], [20, 30], [0, 15]]);
+    expect(n.every((p) => !p.hIn && !p.hOut)).toBe(true);
+  });
+
+  it("seedNodes ellipse: four κ-handled anchors whose flattened outline IS the ellipse", () => {
+    const n = seedNodes(ell());
+    expect(n).toHaveLength(4);
+    expect(n.every((p) => p.hIn && p.hOut)).toBe(true);
+    const flat = flattenNodes(n);
+    const b = bbox(flat);
+    expect(b.minX).toBeCloseTo(0, 1);
+    expect(b.minY).toBeCloseTo(0, 1);
+    expect(b.maxX).toBeCloseTo(100, 0);
+    expect(b.maxY).toBeCloseTo(60, 0);
+    // Area of the sampled outline ≈ π·rx·ry (proves it's a real ellipse, not a diamond).
+    const exact = Math.PI * 50 * 30;
+    expect(Math.abs(shoelace(flat) - exact) / exact).toBeLessThan(0.01);
+  });
+
+  it("nodesOf returns stored nodes, else the seed", () => {
+    const s = rect();
+    expect(nodesOf(s)).toEqual(seedNodes(s));
+    const custom: PathNode[] = [{ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 5 }];
+    expect(nodesOf({ ...s, nodes: custom })).toBe(custom);
+  });
+
+  it("flattenNodes: a straight ring is just its anchors; a curved ring subdivides", () => {
+    expect(flattenNodes(seedNodes(rect()))).toHaveLength(4 * 2);
+    expect(flattenNodes(seedNodes(ell()))).toHaveLength(4 * 14 * 2);
+  });
+
+  it("pathData: rect ring is all straight (M/L/Z); ellipse ring is cubic (C); offset shifts the start", () => {
+    const rd = pathData(seedNodes(rect()));
+    expect(rd).toMatch(/^M .* L .* L .* L .* Z$/);
+    expect(rd).not.toContain("C");
+    expect(pathData(seedNodes(ell()))).toContain("C");
+    expect(pathData([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], 100, 200).startsWith("M 100 200")).toBe(true);
+  });
+
+  it("pathPolygon is ABSOLUTE (nodes offset by shape x/y)", () => {
+    const s = { ...rect(), nodes: seedNodes(rect()) }; // x=10, y=20
+    const poly = pathPolygon(s);
+    expect([poly[0], poly[1]]).toEqual([10, 20]); // first anchor (0,0) → (10,20)
+    expect(pointInPolygon(30, 35, poly)).toBe(true); // interior
+    expect(pointInPolygon(200, 200, poly)).toBe(false);
+  });
+
+  it("normalizeNodes re-origins to [0,w]×[0,h] + re-syncs x/y/w/h, holding absolute positions fixed", () => {
+    const nodes: PathNode[] = [{ x: -10, y: -5 }, { x: 40, y: 0 }, { x: 40, y: 30 }, { x: 0, y: 30 }];
+    const s = { ...rect(), x: 100, y: 100, nodes } as BoxShape & { nodes: PathNode[] };
+    const beforeAbs = pathPolygon(s).slice(0, 2); // (90, 95)
+    const out = normalizeNodes(s);
+    expect(out.nodes![0]).toMatchObject({ x: 0, y: 0 });
+    expect([out.x, out.y]).toEqual([90, 95]); // origin shifted by the (-10,-5) poke
+    expect([out.width, out.height]).toEqual([50, 35]);
+    expect(pathPolygon(out).slice(0, 2)).toEqual(beforeAbs); // first anchor didn't move on screen
+  });
+
+  it("cloneShape deep-clones nodes — mutating the clone can't reach the original", () => {
+    const s = { ...rect(), nodes: seedNodes(rect()) } as BoxShape;
+    const c = cloneShape(s) as BoxShape;
+    expect(c.nodes).not.toBe(s.nodes);
+    expect(c.nodes![0]).not.toBe(s.nodes![0]);
+    c.nodes![0].x = 999;
+    expect(s.nodes![0].x).toBe(0);
+  });
+
+  it("fillAt: a distorted CONCAVE outline rejects clicks in its bbox 'dents'", () => {
+    // An L: top strip (y 0..30, full width) + right column (x 30..60, y 30..60).
+    const nodes: PathNode[] = [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 60 }, { x: 30, y: 60 }, { x: 30, y: 30 }, { x: 0, y: 30 }];
+    const s: BoxShape = { ...box("L"), type: "rect", x: 0, y: 0, width: 60, height: 60, fill: "#f00", nodes };
+    expect(fillAt([s], 10, 10)).toBe("#f00"); // top strip
+    expect(fillAt([s], 45, 45)).toBe("#f00"); // right column
+    expect(fillAt([s], 10, 45)).toBe(null); // the notch — in the bbox, outside the outline
+  });
+});
+
 describe("configurable features — palette width + the opt-outs", () => {
   const seededWith = (features: Partial<DrawFeatures>, shapes: Shape[] = []) =>
     initialDrawState({ shapes, width: 400, height: 300 }, { features });
 
   it("resolveFeatures: defaults, clamping, and the single-color collapse", () => {
-    expect(resolveFeatures()).toEqual({ paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, layers: true, shapes: SHAPE_TOOLS });
+    expect(resolveFeatures()).toEqual({ paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, layers: true, vectorEdit: true, shapes: SHAPE_TOOLS });
     expect(resolveFeatures(null)).toEqual(resolveFeatures());
     expect(resolveFeatures({ paletteSize: 0 }).paletteSize).toBe(1);
     expect(resolveFeatures({ paletteSize: 99 }).paletteSize).toBe(MAX_PALETTE);
@@ -2693,9 +2816,11 @@ describe("configurable features — palette width + the opt-outs", () => {
       strokeStyling: false,
       grouping: false,
       layers: true,
+      vectorEdit: true,
       shapes: SHAPE_TOOLS,
     });
     expect(resolveFeatures({ layers: false }).layers).toBe(false);
+    expect(resolveFeatures({ vectorEdit: false }).vectorEdit).toBe(false);
   });
 
   it("resolveFeatures.shapes: sanitized to known kinds in canonical order; garbage → all; explicit [] honored", () => {

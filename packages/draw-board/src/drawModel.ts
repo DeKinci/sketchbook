@@ -91,6 +91,18 @@ export interface BaseShape {
    *  defensively. A group rides on one layer (see {@link setLayer}). */
   layer?: number;
 }
+/** One anchor of a distorted box shape's editable outline ({@link BoxShape.nodes}).
+ *  Coordinates are RELATIVE to the shape's box origin (absolute = `sh.x + node.x`),
+ *  so a plain move (which shifts x/y) carries the outline for free. `hOut` shapes
+ *  the cubic curve LEAVING this anchor toward the next; `hIn` the curve ARRIVING
+ *  from the previous. A segment whose two ends carry no relevant handle is a
+ *  straight line (sharp corner); a handle on either end makes it a cubic (smooth). */
+export interface PathNode {
+  x: number;
+  y: number;
+  hIn?: { x: number; y: number };
+  hOut?: { x: number; y: number };
+}
 /** Rect + ellipse + diamond share an axis-aligned bounding box {x,y,width,height}.
  *  The view converts an ellipse box to Konva's center+radii and a diamond to its
  *  four edge-midpoint vertices ({@link diamondPoints}); keeping the box form here
@@ -106,6 +118,15 @@ export interface BoxShape extends BaseShape {
    *  the adaptive contrast sentinel: contrast is stroke-only, and fills are
    *  what it contrasts AGAINST (they join the sampled background). */
   fill?: string;
+  /** Editable vector outline (shape distortion). Absent = the plain parametric
+   *  box above (backward-compatible — never written until the shape is first
+   *  point-edited). Present = the shape IS this closed ring of {@link PathNode}s
+   *  (>=3), coords RELATIVE to {x,y}; {x,y,width,height} are kept synced to the
+   *  ring's flattened bounding box ({@link normalizeNodes}) so every bbox reader
+   *  (spatial index, marquee, selection, contentBounds, boundingBox) is unaffected.
+   *  rect/diamond seed handleless corners (sharp); ellipse seeds κ bezier handles
+   *  (smooth). See {@link seedNodes}, {@link nodesOf}, {@link pathPolygon}. */
+  nodes?: PathNode[];
 }
 /** A bound endpoint, stored relative to the connection direction: `angle` is the
  *  OFFSET from the direction toward the other endpoint at bind time, and `gap` is
@@ -395,10 +416,13 @@ export interface DrawFeatures {
   grouping: boolean;
   /** The explicit-layer assign control (the z-order override). */
   layers: boolean;
+  /** Shape distortion — point-edit a rect/ellipse/diamond into a vector outline
+   *  (move/add anchors, ellipse curvature handles). */
+  vectorEdit: boolean;
   shapes: readonly ShapeTool[];
 }
 export const MAX_PALETTE = HUE_FAMILIES.length;
-export const DEFAULT_FEATURES: DrawFeatures = { paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, layers: true, shapes: SHAPE_TOOLS };
+export const DEFAULT_FEATURES: DrawFeatures = { paletteSize: 4, paletteResize: true, fills: true, strokeStyling: true, grouping: true, layers: true, vectorEdit: true, shapes: SHAPE_TOOLS };
 /** Resolve a host's partial config: clamp the palette to 1..MAX_PALETTE,
  *  default everything else on. Size 1 implies fills off (no lane → nothing
  *  can arm a fill), so downstream checks read one flag each. `shapes` is
@@ -421,6 +445,7 @@ export function resolveFeatures(f?: Partial<DrawFeatures> | null): DrawFeatures 
     strokeStyling: f?.strokeStyling ?? DEFAULT_FEATURES.strokeStyling,
     grouping: f?.grouping ?? DEFAULT_FEATURES.grouping,
     layers: f?.layers ?? DEFAULT_FEATURES.layers,
+    vectorEdit: f?.vectorEdit ?? DEFAULT_FEATURES.vectorEdit,
     shapes,
   };
 }
@@ -699,7 +724,10 @@ export function fillAt(shapes: Shape[], px: number, py: number, limit?: string):
         if (!sh.fill) continue;
         const b = sh.type === "text" ? textBgBox(sh) : boundingBox(sh);
         if (px < b.x || px > b.x + b.width || py < b.y || py > b.y + b.height) continue;
-        if (sh.type === "ellipse" || sh.type === "diamond") {
+        if (sh.type !== "text" && isDistorted(sh)) {
+          // Distorted: the true (possibly concave) outline, not the box interior.
+          if (!pointInPolygon(px, py, pathPolygon(sh))) continue;
+        } else if (sh.type === "ellipse" || sh.type === "diamond") {
           // Precise interiors — the fill doesn't reach the box corners.
           const nx = Math.abs(px - (b.x + b.width / 2)) / (b.width / 2 || 1);
           const ny = Math.abs(py - (b.y + b.height / 2)) / (b.height / 2 || 1);
@@ -903,7 +931,7 @@ export function cloneShape(sh: Shape): Shape {
     case "pen":
       return { ...sh, points: [...sh.points] };
     default:
-      return { ...sh };
+      return isBox(sh) && sh.nodes ? { ...sh, nodes: cloneNodes(sh.nodes) } : { ...sh };
   }
 }
 
@@ -922,6 +950,151 @@ export function diamondPoints(b: { x: number; y: number; width: number; height: 
   const cx = b.x + b.width / 2;
   const cy = b.y + b.height / 2;
   return [cx, b.y, b.x + b.width, cy, cx, b.y + b.height, b.x, cy];
+}
+
+// ── Shape distortion: editable vector outlines for the box shapes ────────────
+// A rect/ellipse/diamond gains `nodes` (a closed ring of anchors, coords relative
+// to its box origin) the moment it's point-edited. Handleless anchors → straight
+// edges (rect/diamond stay sharp); κ-handled anchors → cubic curves (ellipse is a
+// smooth spline). {x,y,w,h} track the flattened bbox so bbox readers are untouched.
+
+/** Circle→cubic-bezier control ratio (the four-arc unit-circle approximation). */
+export const CIRCLE_KAPPA = 0.5522847498307936;
+
+/** Rounds a coord for a path `d` string — sub-pixel is plenty and keeps it slim. */
+const cc = (v: number): number => Math.round(v * 100) / 100;
+
+/** The three box shapes (rect · ellipse · diamond). */
+export const isBox = (sh: Shape): sh is BoxShape => sh.type === "rect" || sh.type === "ellipse" || sh.type === "diamond";
+
+/** A box shape currently carrying an editable vector outline (a real ring, >=3). */
+export function isDistorted(sh: Shape): sh is BoxShape & { nodes: PathNode[] } {
+  return isBox(sh) && Array.isArray(sh.nodes) && sh.nodes.length >= 3;
+}
+
+/** Starting nodes for distorting a box — derived from its parametric geometry,
+ *  RELATIVE to the box origin (spanning [0,w]×[0,h]). rect/diamond → handleless
+ *  corners (sharp); ellipse → four κ-handled anchors reproducing it as a closed
+ *  cubic spline (top→right→bottom→left, handles tangent to the curve). Pure. */
+export function seedNodes(sh: BoxShape): PathNode[] {
+  const b = normalizeBox(sh);
+  const w = b.width, h = b.height;
+  switch (sh.type) {
+    case "rect":
+      return [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }];
+    case "diamond":
+      return [{ x: w / 2, y: 0 }, { x: w, y: h / 2 }, { x: w / 2, y: h }, { x: 0, y: h / 2 }];
+    case "ellipse": {
+      const cx = w / 2, cy = h / 2, kx = cx * CIRCLE_KAPPA, ky = cy * CIRCLE_KAPPA;
+      return [
+        { x: cx, y: 0, hIn: { x: cx - kx, y: 0 }, hOut: { x: cx + kx, y: 0 } },
+        { x: w, y: cy, hIn: { x: w, y: cy - ky }, hOut: { x: w, y: cy + ky } },
+        { x: cx, y: h, hIn: { x: cx + kx, y: h }, hOut: { x: cx - kx, y: h } },
+        { x: 0, y: cy, hIn: { x: 0, y: cy + ky }, hOut: { x: 0, y: cy - ky } },
+      ];
+    }
+  }
+}
+
+/** A box's editable nodes — its stored {@link BoxShape.nodes}, or {@link seedNodes}
+ *  derived from its parametric geometry when it hasn't been distorted yet. */
+export function nodesOf(sh: BoxShape): PathNode[] {
+  return sh.nodes ?? seedNodes(sh);
+}
+
+/** Translate one node (anchor + its handles) by (dx,dy). Canonical key order. */
+function shiftNode(n: PathNode, dx: number, dy: number): PathNode {
+  return {
+    x: n.x + dx,
+    y: n.y + dy,
+    ...(n.hIn ? { hIn: { x: n.hIn.x + dx, y: n.hIn.y + dy } } : null),
+    ...(n.hOut ? { hOut: { x: n.hOut.x + dx, y: n.hOut.y + dy } } : null),
+  };
+}
+
+/** Deep-clone a node ring (fresh anchor + handle objects) — snapshots/paste must
+ *  not alias the array or its points across undo history. */
+export function cloneNodes(nodes: PathNode[]): PathNode[] {
+  return nodes.map((n) => shiftNode(n, 0, 0));
+}
+
+/** Sample a closed node ring to a flat [x,y,…] polyline (RELATIVE coords). A
+ *  straight segment (no handles) contributes just its start anchor; a curved one
+ *  is subdivided. The ring is implicitly closed (no duplicate final anchor). */
+export function flattenNodes(nodes: PathNode[], samples = 14): number[] {
+  const n = nodes.length;
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const a = nodes[i], b = nodes[(i + 1) % n];
+    const c0 = a.hOut, c1 = b.hIn;
+    if (!c0 && !c1) {
+      out.push(a.x, a.y);
+      continue;
+    }
+    const p0x = a.x, p0y = a.y, p3x = b.x, p3y = b.y;
+    const c0x = c0?.x ?? p0x, c0y = c0?.y ?? p0y, c1x = c1?.x ?? p3x, c1y = c1?.y ?? p3y;
+    for (let s = 0; s < samples; s++) {
+      const t = s / samples, mt = 1 - t;
+      const w0 = mt * mt * mt, w1 = 3 * mt * mt * t, w2 = 3 * mt * t * t, w3 = t * t * t;
+      out.push(w0 * p0x + w1 * c0x + w2 * c1x + w3 * p3x, w0 * p0y + w1 * c0y + w2 * c1y + w3 * p3y);
+    }
+  }
+  return out;
+}
+
+// Flattened RELATIVE polyline cached on the nodes-array identity — a plain move
+// keeps the same array (only x/y re-offset), so we don't re-sample every frame.
+const flatCache = new WeakMap<PathNode[], number[]>();
+
+/** The distorted outline as an ABSOLUTE flat polygon [x,y,…] — for hit-testing,
+ *  {@link fillAt}, and bbox sync. Call only for a distorted shape. */
+export function pathPolygon(sh: BoxShape): number[] {
+  const nodes = nodesOf(sh);
+  let rel = flatCache.get(nodes);
+  if (!rel) {
+    rel = flattenNodes(nodes);
+    flatCache.set(nodes, rel);
+  }
+  const out = new Array(rel.length) as number[];
+  for (let i = 0; i < rel.length; i += 2) {
+    out[i] = rel[i] + sh.x;
+    out[i + 1] = rel[i + 1] + sh.y;
+  }
+  return out;
+}
+
+/** SVG/Konva path `data` (M/L/C/Z) for a node ring, coords offset by (ox,oy) —
+ *  (0,0) for a Konva `<Path>` positioned at the box origin, or (sh.x,sh.y) for an
+ *  absolute SVG export. Straight where a segment has no handles, cubic otherwise. */
+export function pathData(nodes: PathNode[], ox = 0, oy = 0): string {
+  const n = nodes.length;
+  if (n === 0) return "";
+  const pt = (x: number, y: number) => `${cc(x + ox)} ${cc(y + oy)}`;
+  let d = `M ${pt(nodes[0].x, nodes[0].y)}`;
+  for (let i = 0; i < n; i++) {
+    const a = nodes[i], b = nodes[(i + 1) % n];
+    const c0 = a.hOut, c1 = b.hIn;
+    if (!c0 && !c1) d += ` L ${pt(b.x, b.y)}`;
+    else d += ` C ${pt(c0?.x ?? a.x, c0?.y ?? a.y)} ${pt(c1?.x ?? b.x, c1?.y ?? b.y)} ${pt(b.x, b.y)}`;
+  }
+  return `${d} Z`;
+}
+
+/** Re-sync a distorted box after a node edit: recompute {x,y,width,height} from
+ *  the flattened outline and re-origin the nodes to span [0,w]×[0,h], holding
+ *  every ABSOLUTE position fixed. Upholds the bbox-sync invariant so all bbox
+ *  readers stay correct. Pass a shape whose `.nodes` is already set. */
+export function normalizeNodes(sh: BoxShape & { nodes: PathNode[] }): BoxShape {
+  const flat = flattenNodes(sh.nodes);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let i = 0; i < flat.length; i += 2) {
+    minX = Math.min(minX, flat[i]);
+    maxX = Math.max(maxX, flat[i]);
+    minY = Math.min(minY, flat[i + 1]);
+    maxY = Math.max(maxY, flat[i + 1]);
+  }
+  const nodes = minX !== 0 || minY !== 0 ? sh.nodes.map((n) => shiftNode(n, -minX, -minY)) : sh.nodes;
+  return { ...sh, nodes, x: sh.x + minX, y: sh.y + minY, width: maxX - minX, height: maxY - minY };
 }
 
 /** Axis-aligned bounding box of any shape (used for marquee + selection outline).
