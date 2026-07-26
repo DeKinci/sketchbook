@@ -1526,11 +1526,14 @@ export function penSeedAt(start: { x: number; y: number }, shapes: Shape[], excl
   for (const sh of shapes) {
     if (sh.id === excludeId || sh.type !== "pen") continue;
     const p = sh.points;
-    const tol = dist + sh.strokeWidth / 2;
     let d = p.length >= 2 ? Math.hypot(start.x - p[0], start.y - p[1]) : Infinity;
     for (let i = 0; i + 3 < p.length; i += 2) d = Math.min(d, distToSeg(start.x, start.y, p[i], p[i + 1], p[i + 2], p[i + 3]));
-    if (d <= tol && d < bestD) {
-      bestD = d;
+    // Gate AND rank by INK-EDGE distance (past the seed's half-width) — equivalent
+    // gate to `d ≤ dist + strokeWidth/2`, but ranking by the edge means a start on a
+    // FAT stroke's ink wins over a thin stroke whose centerline is merely nearer.
+    const edge = Math.max(0, d - sh.strokeWidth / 2);
+    if (edge <= dist && edge < bestD) {
+      bestD = edge;
       best = sh;
     }
   }
@@ -1946,6 +1949,11 @@ const CLUSTER_EPS = 1e-6;
  *  overlap isn't double-counted (docs/groups-design.md). */
 function unitWeight(byId: Map<string, Shape>, memberIds: string[]): number {
   if (memberIds.length === 1) return clusterWeight(byId.get(memberIds[0])!);
+  // An AUTO doodle cluster stays MASSLESS like its member strokes: a multi-stroke
+  // annotation (even one ENCIRCLING its target, so its union bbox dwarfs it) must
+  // still FOLLOW the shape it's drawn on when that shape is grabbed. A manual ⌘G
+  // group, by contrast, is an object with its union-AABB mass (docs/groups-design.md).
+  if (isDoodleGid(rootUnitKeyOf(byId.get(memberIds[0])!))) return 0;
   const b = contentBounds(memberIds.map((id) => byId.get(id)!));
   return b ? b.width * b.height : 0;
 }
@@ -2458,7 +2466,9 @@ export function clonePastedShapes(clipboard: Shape[], dx: number, dy: number, ne
   const gidCount = new Map<string, number>(); // members per gid in THIS batch (for singleton collapse)
   for (const sh of clipboard) {
     for (const gid of sh.groupPath ?? []) {
-      if (!gidMap.has(gid)) gidMap.set(gid, newId());
+      // Re-mint fresh, but keep the `doodle-` prefix so a pasted auto-cluster stays
+      // a non-ungroupable doodle (a copy of a merged doodle is still a merged doodle).
+      if (!gidMap.has(gid)) gidMap.set(gid, isDoodleGid(gid) ? DOODLE_GID_PREFIX + newId() : newId());
       gidCount.set(gid, (gidCount.get(gid) ?? 0) + 1);
     }
   }
@@ -3300,7 +3310,16 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
           if (seed) {
             const path = seed.groupPath?.length ? [...seed.groupPath] : [DOODLE_GID_PREFIX + seed.id];
             const targets = seed.groupPath?.length ? new Set([draft.id]) : new Set([seed.id, draft.id]);
-            normalized = mapShapes(normalized, targets, (sh) => ({ ...sh, groupPath: path, sizeStep: undefined } as Shape));
+            // The draft ADOPTS the seed's layer — a doodle joins the stroke it lands
+            // on, so a backgrounded seed keeps the whole cluster in back (no z-jump)
+            // and the unit reads one coherent layer band (not mixed).
+            const layer = layerOf(seed);
+            normalized = mapShapes(normalized, targets, (sh) => {
+              const out: Shape = { ...sh, groupPath: path, sizeStep: undefined };
+              if (layer === 0) delete (out as { layer?: number }).layer;
+              else out.layer = layer;
+              return out;
+            });
           }
         }
       }

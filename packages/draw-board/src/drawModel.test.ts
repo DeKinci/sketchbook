@@ -3621,4 +3621,48 @@ describe("pencil-doodle merge — a pen started on a pen becomes one unit", () =
     s = drawReducer(s, { type: "select", ids: ["a"] });
     expect(groupActionFor(s.shapes, s.selectedIds)).toBeNull();
   });
+
+  // ── fleet-found regressions (fixed) ──────────────────────────────
+  it("penSeedAt ranks by INK-edge — a start on a fat stroke's ink beats a nearer thin centerline", () => {
+    const fat = pen("fat", [0, 0, 100, 0], { strokeWidth: 40 }); // ink spans y∈[−20,20]
+    const thin = pen("thin", [0, 22, 100, 22], { strokeWidth: 2 });
+    // (50,19): 1px INSIDE fat's ink, but only 3px from thin's centerline
+    expect(penSeedAt({ x: 50, y: 19 }, [fat, thin], "d")?.id).toBe("fat");
+  });
+
+  it("a multi-stroke doodle annotation stays MASSLESS — grabbing its shape drags the whole scribble", () => {
+    // 'a' + 'b' ENCIRCLE R (union bbox 140×140 ≫ R's 100×100), 'a' glued to R.
+    const R = box("R", { x: 0, y: 0, width: 100, height: 100 });
+    const gid = DOODLE_GID_PREFIX + "a";
+    const at: Attach = { id: "R", kind: "box", ax: 0.5, ay: 0.5, dx: 0, dy: 0 };
+    const a = pen("a", [-20, -20, 120, -20, 120, 120], { groupPath: [gid], attach: at });
+    const b = pen("b", [120, 120, -20, 120, -20, -20], { groupPath: [gid] });
+    // Grabbing R drags the encircling annotation — a doodle unit is a follower, not
+    // an object with mass (a lone scribble already behaves this way).
+    expect(new Set(moveClusterIds([R, a, b], ["R"]))).toEqual(new Set(["R", "a", "b"]));
+    // But a MANUAL ⌘G group of the same strokes keeps its mass (unchanged design):
+    const ga = { ...a, groupPath: ["g"] };
+    const gb = { ...b, groupPath: ["g"] };
+    expect(new Set(moveClusterIds([R, ga, gb], ["R"]))).toEqual(new Set(["R"]));
+  });
+
+  it("a doodle joins the seed's LAYER — a backgrounded seed keeps the cluster in back (coherent unit)", () => {
+    let s = seeded([pen("a", [0, 0, 100, 0], { layer: -1 })]);
+    s = drawPen(s, "b", [[50, 1], [50, 80]]); // starts on 'a'
+    expect(layerOf(shape(s, "a"))).toBe(-1);
+    expect(layerOf(shape(s, "b"))).toBe(-1); // adopted the seed's layer, not left at 0
+    expect(selectionLayer(s.shapes, ["a", "b"])).toBe(-1); // one coherent band, not null(mixed)
+  });
+
+  it("pasting a doodle cluster stays a non-ungroupable doodle unit (prefix survives the re-mint)", () => {
+    let s = seeded([]);
+    s = drawPen(s, "a", [[0, 0], [100, 0]]);
+    s = drawPen(s, "b", [[50, 1], [50, 80]]);
+    let n = 0;
+    const clones = clonePastedShapes([shape(s, "a"), shape(s, "b")], 20, 20, () => `paste${n++}`);
+    expect(clones[0].groupPath).toBeDefined();
+    expect(isDoodleGid(clones[0].groupPath![0])).toBe(true); // still a doodle gid
+    expect(clones[0].groupPath![0]).toBe(clones[1].groupPath![0]); // one fresh shared gid
+    expect(clones[0].groupPath![0]).not.toBe(shape(s, "a").groupPath![0]); // but distinct from the source
+  });
 });
