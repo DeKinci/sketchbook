@@ -34,6 +34,9 @@ test.beforeAll(async ({ browser }) => {
     configFile: false,
     plugins: [react()],
     logLevel: "silent",
+    // Own dep cache: sharing node_modules/.vite with the app's dev server (or a
+    // sibling suite) means a cold re-bundle mid-run and a blown budget.
+    cacheDir: path.join(APP_ROOT, "node_modules/.vite-sketchbook-browser"),
     css: {
       postcss: {
         plugins: [
@@ -67,6 +70,13 @@ async function open(page: Page, query = "") {
 /** The persisted drawings list, straight from the app's localStorage. */
 const stored = (page: Page) =>
   page.evaluate(() => JSON.parse(window.localStorage.getItem("sketchbook:drawings") ?? "[]") as { name: string; doc: { shapes: unknown[] } }[]);
+
+/** Collapse the text field's mount-time select-all so typing APPENDS instead of
+ *  replacing the value. ⌃End — the obvious "caret to the end" press — is NOT a
+ *  caret shortcut on macOS Chromium: it left the whole value selected, so the
+ *  next keystroke ate it (that's what committed a 2-line block where 3 were
+ *  typed). ArrowRight collapses a selection to its end on every platform. */
+const collapseSelectAll = (page: Page) => page.keyboard.press("ArrowRight");
 
 async function drawStroke(page: Page, from: { x: number; y: number }, to: { x: number; y: number }) {
   const box = (await page.locator(".konvajs-content canvas").first().boundingBox())!;
@@ -692,7 +702,7 @@ test("edit overlay and committed canvas text render IDENTICAL ink — density pa
   const mid = toScreen({ x: 160, y: 136 });
   await page.mouse.dblclick(mid.x, mid.y); // text → edit
   await page.waitForSelector(".draw-text-input");
-  await page.keyboard.press("Control+End"); // collapse the select-all highlight
+  await collapseSelectAll(page); // typing must APPEND, not replace the value
   await page.waitForTimeout(120);
   const editing = await inkBox(await page.screenshot({ clip }));
 
@@ -759,7 +769,7 @@ test("wrapped CYRILLIC text breaks at the SAME points committed and editing — 
   const mid = toScreen({ x: 150, y: 110 }); // inside the block's first line
   await page.mouse.dblclick(mid.x, mid.y);
   await page.waitForSelector(".draw-text-input");
-  await page.keyboard.press("Control+End"); // collapse the select-all highlight
+  await collapseSelectAll(page); // typing must APPEND, not replace the value
   await page.waitForTimeout(120);
   const editing = await inkBox(await page.screenshot({ clip }));
 
@@ -792,7 +802,7 @@ test("a text glued ABOVE a shape grows UPWARD — the edit field live, the commi
   await page.mouse.dblclick(mid.x, mid.y);
   const ta = page.locator(".draw-text-input");
   await ta.waitFor();
-  await page.keyboard.press("Control+End"); // collapse the select-all highlight
+  await collapseSelectAll(page); // typing must APPEND, not replace the value
   const before = (await ta.boundingBox())!;
 
   // Two more lines: the field's BOTTOM must hold (bond-pinned) while its top
@@ -1333,6 +1343,22 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
   const doc = async (page: Page) => (await stored(page))[0].doc as { shapes: Record<string, any>[] };
   const shape = async (page: Page, id: string) => (await doc(page)).shapes.find((sh) => sh.id === id)!;
 
+  /** Paste whatever the SYSTEM clipboard currently holds, as a real paste event.
+   *  Playwright's ⌘V only delivers the keydown in headless Chromium — the browser
+   *  synthesizes no `paste` event at all (traced: `keydown v ctrl=true` arrives,
+   *  zero paste events), so no clipboardData ever reached the board and ⌘V was a
+   *  no-op. Dispatching at the active element reproduces the real thing: it
+   *  bubbles to the board's focused root, where onPaste lives (same helper as
+   *  apps/web's drawViewport clipboard suite). */
+  const pasteSystem = (page: Page) =>
+    page.evaluate(async () => {
+      const dt = new DataTransfer();
+      dt.setData("text/plain", await navigator.clipboard.readText());
+      (document.activeElement ?? document.body).dispatchEvent(
+        new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true })
+      );
+    });
+
   test("group → drag whole → glue in → scale via proxy (inbound re-judged) → deep-edit → paste remap → ungroup", async ({ page }) => {
     test.setTimeout(60_000);
     await openSeeded(page, [rect("r1", 100, 100), rect("r2", 220, 100), rect("out", 400, 320, 60, 40)]);
@@ -1398,7 +1424,7 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     const click1 = await toScreen(page, { x: s1now.x + 10, y: s1now.y + 10 });
     await page.mouse.click(click1.x, click1.y); // plain click → whole unit
     await page.keyboard.press("Control+c");
-    await page.keyboard.press("Control+v");
+    await pasteSystem(page);
     await expect.poll(async () => (await doc(page)).shapes.length).toBe(5);
     const pasted = (await doc(page)).shapes.filter((sh) => !["r1", "r2", "out"].includes(sh.id as string));
     expect(pasted).toHaveLength(2);
@@ -1653,7 +1679,8 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     // Older external content sits on the system clipboard, and the board's own
     // ⌘C clipboard write is ASYNC — a fast ⌘V can read the clipboard before the
     // envelope lands. Simulate the lost race deterministically: pin writeText
-    // to a no-op so ⌘C's system write never arrives.
+    // to a no-op so ⌘C's system write never arrives — the paste then carries the
+    // OLDER text, exactly what the lost race hands the board.
     await page.evaluate(async () => {
       await navigator.clipboard.writeText("older external text");
       (navigator.clipboard as { writeText: (t: string) => Promise<void> }).writeText = () => Promise.resolve();
@@ -1661,7 +1688,7 @@ test.describe("shape grouping (⌘G end-to-end)", () => {
     const p = await toScreen(page, { x: 140, y: 130 });
     await page.mouse.click(p.x, p.y);
     await page.keyboard.press("Control+c");
-    await page.keyboard.press("Control+v");
+    await pasteSystem(page);
     await expect.poll(async () => (await doc(page)).shapes.length).toBe(2);
     // The COPY pasted — not a text shape minted from the stale clipboard text.
     const pasted = (await doc(page)).shapes.find((sh) => sh.id !== "r")!;
@@ -2054,7 +2081,7 @@ test("text background highlight: amber chip behind DARK adaptive glyphs, live in
   // Live edit: the field paints the same chip (bg + pad) around the glyphs.
   await page.mouse.dblclick(S({ x: 120, y: 112 }).x, S({ x: 120, y: 112 }).y);
   await page.waitForSelector(".draw-text-input");
-  await page.keyboard.press("Control+End");
+  await collapseSelectAll(page);
   await page.waitForTimeout(120);
   const liveChip = await probePixel(page, S({ x: 99, y: 99 }).x, S({ x: 99, y: 99 }).y);
   expect(isAmber(liveChip), `live edit bg should stay amber, got ${JSON.stringify(liveChip)}`).toBe(true);
