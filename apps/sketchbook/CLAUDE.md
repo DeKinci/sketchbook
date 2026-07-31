@@ -38,7 +38,7 @@ Rich PNG and rich SVG embed the full document (`draw-board`'s `boardFile.ts`/`pn
 
 ## Tests
 - `src/lib/drawings.test.ts` — the pure list ops and the `localStorage` round-trip (corrupt/absent → empty, name uniquing, newest-first `displayOrder`).
-- `src/sketchbook.browser.test.ts` — the Playwright suite (~15 tests, the bulk of the app's real coverage; ~2m). It boots **its own** vite server on a pid-derived port with an isolated cache dir (`.vite-sketchbook-browser`) and inline Tailwind/PostCSS, no watch. It exercises what jsdom cannot prove: stroke styles reaching the SVG export, z-order paint law, text kerning/wrap parity between the edit overlay and the committed canvas (ASCII **and** Cyrillic), glue previews, bond-aware upward text growth, and the rich-PNG export → re-import loop.
+- `src/sketchbook.browser.test.ts` — the Playwright suite (59 tests across 9 describes — the bulk of this app's real coverage; ~2m). It boots **its own** vite server on a pid-derived port with an isolated cache dir (`.vite-sketchbook-browser`) and inline Tailwind/PostCSS, no watch. It exercises what jsdom cannot prove: stroke styles reaching the SVG export, z-order paint law, text kerning/wrap parity between the edit overlay and the committed canvas (ASCII **and** Cyrillic), glue previews, bond-aware upward text growth, and the rich-PNG export → re-import loop.
 
 `vitest.config.ts` excludes `**/*.browser.test.ts` by design — Playwright owns those. Don't pull them into the vitest run.
 
