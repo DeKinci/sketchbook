@@ -1,13 +1,13 @@
-# Sketchbook (`@operator/sketchbook`)
+# Sketchbook (`@dorodango/sketchbook`)
 
-A standalone drawings app: a sidebar of named boards, each embedding `@operator/draw-board`. **No server, no API, no auth** — everything persists to `localStorage`. It exists for two reasons: it's a useful scratch surface, and it's the honest test of whether `draw-board` is genuinely host-agnostic (a second host with entirely different persistence, chrome and lifecycle from `apps/web`). See the root `CLAUDE.md` for monorepo-wide rules.
+A standalone drawings app: a sidebar of named boards, each embedding `@dorodango/draw-board`. **No server, no API, no auth** — everything persists to `localStorage`. It exists for two reasons: it's a useful scratch surface, and it's the honest test of whether `draw-board` is genuinely host-agnostic (a second host with entirely different persistence, chrome and lifecycle from `apps/web`). See the root `CLAUDE.md` for monorepo-wide rules.
 
 ## Commands
-- Dev: `pnpm --filter @operator/sketchbook dev`
-- Build / preview: `pnpm --filter @operator/sketchbook build` · `… preview`
-- Typecheck: `pnpm --filter @operator/sketchbook typecheck`
-- Unit tests (vitest, jsdom): `pnpm --filter @operator/sketchbook test`
-- **Real-browser tests: `pnpm --filter @operator/sketchbook test:browser`** (= `pnpm exec playwright test`; also the second half of the root `pnpm test:browser`)
+- Dev: `pnpm --filter @dorodango/sketchbook dev`
+- Build / preview: `pnpm --filter @dorodango/sketchbook build` · `… preview`
+- Typecheck: `pnpm --filter @dorodango/sketchbook typecheck`
+- Unit tests (vitest, jsdom): `pnpm --filter @dorodango/sketchbook test`
+- **Real-browser tests: `pnpm --filter @dorodango/sketchbook test:browser`** (= `pnpm exec playwright test`; also the second half of the root `pnpm test:browser`)
 
 Both test scripts pass `NODE_OPTIONS=--no-experimental-webstorage` — Node's experimental `localStorage` global otherwise **shadows jsdom's real store** and every persistence test goes quiet-green against a store nothing reads. `src/lib/drawings.ts` reaches `window.localStorage` explicitly rather than the bare global for the same reason. Don't drop either.
 
@@ -46,4 +46,4 @@ Rich PNG and rich SVG embed the full document (`draw-board`'s `boardFile.ts`/`pn
 - The two `localStorage` keys are unscoped. Two Operator instances served from the same origin share them.
 - The URL feature harness (`?palette=N`, `&fills=0`, `&grouping=0`, `&shapes=pen,rect,text`, …) is read **once** at load; the board freezes its feature set at mount and nothing in the UI toggles it.
 - Hover thumbnails render through `renderDocThumbnail` into a fixed-position popover — fixed positioning is what stops the sidebar's scroll container clipping it.
-- `watchWorkspacePackages()` (root `vite.watchPackages.ts`) is in the plugin list because `@operator/draw-board` is imported as out-of-root source and every Operator land replaces files wholesale; per-file watches go deaf on that, dir-level coverage keeps HMR alive.
+- `watchWorkspacePackages()` (root `vite.watchPackages.ts`) is in the plugin list because `@dorodango/draw-board` is imported as out-of-root source and every Operator land replaces files wholesale; per-file watches go deaf on that, dir-level coverage keeps HMR alive.

@@ -1,5 +1,5 @@
 {
-  "name": "@operator/draw-board",
+  "name": "@dorodango/draw-board",
   "version": "0.1.0",
   "private": true,
   "type": "module",

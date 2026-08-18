@@ -4,7 +4,7 @@
  * fully client-side). Pure functions are exported separately so they unit-test
  * without a DOM.
  */
-import type { DrawDoc, DrawSession } from "@operator/draw-board";
+import type { DrawDoc, DrawSession } from "@dorodango/draw-board";
 
 export interface Drawing {
   id: string;

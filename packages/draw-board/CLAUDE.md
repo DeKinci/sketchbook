@@ -1,13 +1,13 @@
-# Draw board (`@operator/draw-board`)
+# Draw board (`@dorodango/draw-board`)
 
 The standalone drawing/annotation board: a **pure reducer** over a document of shapes, a **pan/zoom camera**, and a Konva/`react-konva` rendering layer. Self-contained by design — it knows nothing about Operator, its server, or its board. Two hosts embed it: `apps/web` (the sketch viewport inside a task) and `apps/sketchbook` (the standalone drawings app). See the root `CLAUDE.md` for monorepo-wide rules.
 
-**No build step.** `exports` points `.` straight at `src/index.ts` and `./theme` at `src/theme.ts`, so consumers resolve to source over `workspace:*` — same arrangement as `@operator/shared`. Everything React/Konva is a **peer** dependency (`konva >=10`, `react`/`react-dom` `>=18`, `react-konva >=18`, `lucide-react >=1`); the host owns those versions, this package never bundles them.
+**No build step.** `exports` points `.` straight at `src/index.ts` and `./theme` at `src/theme.ts`, so consumers resolve to source over `workspace:*` — same arrangement as `@dorodango/shared`. Everything React/Konva is a **peer** dependency (`konva >=10`, `react`/`react-dom` `>=18`, `react-konva >=18`, `lucide-react >=1`); the host owns those versions, this package never bundles them.
 
 ## Commands
-- Typecheck: `pnpm --filter @operator/draw-board typecheck`
-- Test: `pnpm --filter @operator/draw-board test` (vitest; 15 `*.test.ts` files next to the code)
-- Coverage: `pnpm --filter @operator/draw-board coverage`
+- Typecheck: `pnpm --filter @dorodango/draw-board typecheck`
+- Test: `pnpm --filter @dorodango/draw-board test` (vitest; 15 `*.test.ts` files next to the code)
+- Coverage: `pnpm --filter @dorodango/draw-board coverage`
 
 `vitest.config.ts` runs `environment: "node"` with `pool: "forks"` / `singleFork` — **deliberate, don't "upgrade" it**. The suite covers the PURE core (reducer, camera math, export geometry, PNG/SVG round-trips) with no DOM and no Konva; the comment records why single-fork (restricted-CPU sandboxes can resolve tinypool's `minThreads` above its computed `maxThreads` and kill the run before a test executes). Component behavior is proven elsewhere — `apps/web/src/components/drawViewport.browser.test.ts` and `apps/sketchbook/src/sketchbook.browser.test.ts` mount the real editor in a real browser.
 
@@ -18,7 +18,7 @@ The board takes its capabilities as props rather than importing them, which is w
 - `features` (`DrawFeatures`) — which tools/palette/grouping/layers are enabled. **Frozen at mount**; there is no dynamic toggling.
 - `library`, `session`/`onSessionChange`, `doc`/`onChange` — the host owns persistence; the board holds no storage of its own.
 
-Theme is the same story: `@operator/draw-board/theme` exports `boardColors` (the `ink`/`accent` scales), and a host **must** extend its Tailwind theme with them *and* add `../../packages/draw-board/src/**/*.{ts,tsx}` to its `content` globs — otherwise the board renders unstyled because Tailwind never generates the utilities its components name.
+Theme is the same story: `@dorodango/draw-board/theme` exports `boardColors` (the `ink`/`accent` scales), and a host **must** extend its Tailwind theme with them *and* add `../../packages/draw-board/src/**/*.{ts,tsx}` to its `content` globs — otherwise the board renders unstyled because Tailwind never generates the utilities its components name.
 
 ## State model
 `drawModel.ts` is the whole domain: the shape union (`BoxShape` rect/ellipse/diamond, `SegmentShape` line/arrow, `FreehandShape`, `TextShape`, `ImageShape`), the `DrawDoc` (`shapes`, `width`, `height`, optional raster `background`), and `drawReducer` — **pure and deterministic, no side effects**, with `past`/`future` undo stacks in `DrawState`. `useDrawing.ts` is a thin `useReducer` wrapper. Roughly 45 action kinds span tools, paint, style, selection, transform, path edit, gesture lifecycle, content and history.

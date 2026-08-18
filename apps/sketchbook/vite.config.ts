@@ -17,7 +17,7 @@ const port = Number(
 );
 
 export default defineConfig({
-  // watchWorkspacePackages: `@operator/draw-board` is imported as out-of-root source,
+  // watchWorkspacePackages: `@dorodango/draw-board` is imported as out-of-root source,
   // which vite watches per-file — a mode chokidar 4 permanently loses on git file
   // replaces (every Operator land). Dir-level coverage keeps HMR alive; see the plugin.
   plugins: [react(), watchWorkspacePackages()],

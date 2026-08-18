@@ -1,5 +1,5 @@
 {
-  "name": "@operator/sketchbook",
+  "name": "@dorodango/sketchbook",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,7 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@operator/draw-board": "workspace:*",
+    "@dorodango/draw-board": "workspace:*",
     "konva": "^10.3.0",
     "lucide-react": "^1.17.0",
     "react": "^19.2.7",
