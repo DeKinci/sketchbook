@@ -1,6 +1,6 @@
 # Draw board (`@dorodango/draw-board`)
 
-The standalone drawing/annotation board: a **pure reducer** over a document of shapes, a **pan/zoom camera**, and a Konva/`react-konva` rendering layer. Self-contained by design — it knows nothing about Operator, its server, or its board. Two hosts embed it: `apps/web` (the sketch viewport inside a task) and `apps/sketchbook` (the standalone drawings app). See the root `CLAUDE.md` for monorepo-wide rules.
+The standalone drawing/annotation board: a **pure reducer** over a document of shapes, a **pan/zoom camera**, and a Konva/`react-konva` rendering layer. Self-contained by design — it knows nothing about Dorodango, its server, or its board. Two hosts embed it: `apps/web` (the sketch viewport inside a task) and `apps/sketchbook` (the standalone drawings app). See the root `CLAUDE.md` for monorepo-wide rules.
 
 **No build step.** `exports` points `.` straight at `src/index.ts` and `./theme` at `src/theme.ts`, so consumers resolve to source over `workspace:*` — same arrangement as `@dorodango/shared`. Everything React/Konva is a **peer** dependency (`konva >=10`, `react`/`react-dom` `>=18`, `react-konva >=18`, `lucide-react >=1`); the host owns those versions, this package never bundles them.
 

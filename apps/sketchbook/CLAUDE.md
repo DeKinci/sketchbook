@@ -14,9 +14,9 @@ Both test scripts pass `NODE_OPTIONS=--no-experimental-webstorage` — Node's ex
 ## Port wiring
 `vite.config.ts` resolves, in order: `DORO_WEB_PORT` → `SKETCHBOOK_PORT` → `DORO_DEV_PORT_BASE + 1` → `5199`.
 
-The first entry is load-bearing and the comment in the file spells out why: Operator guesses a run's preview URL on `DORO_WEB_PORT`, so a frontend dev server **must** bind it or its URL is classified as an off-web-port backend URL, hidden, and the preview never routes. **Never bind `DORO_SERVICE_SKETCHBOOK_PORT`** — that's the service's *backend* port for cross-service discovery (`= DORO_PORT`, one below the web port); binding it is exactly what once made the preview read as "forbidden". `allowedHosts: [".ts.net"]` keeps the dev server reachable at its Tailscale Serve origin.
+The first entry is load-bearing and the comment in the file spells out why: Dorodango guesses a run's preview URL on `DORO_WEB_PORT`, so a frontend dev server **must** bind it or its URL is classified as an off-web-port backend URL, hidden, and the preview never routes. **Never bind `DORO_SERVICE_SKETCHBOOK_PORT`** — that's the service's *backend* port for cross-service discovery (`= DORO_PORT`, one below the web port); binding it is exactly what once made the preview read as "forbidden". `allowedHosts: [".ts.net"]` keeps the dev server reachable at its Tailscale Serve origin.
 
-The devtools overlay needs no wiring here — Operator's preview proxy injects it into every tracked run.
+The devtools overlay needs no wiring here — Dorodango's preview proxy injects it into every tracked run.
 
 ## Structure
 - `src/App.tsx` — the shell: drawings list, active drawing, rename state, library state, toasts, and the `DrawEditor` mount.
@@ -43,7 +43,7 @@ Rich PNG and rich SVG embed the full document (`draw-board`'s `boardFile.ts`/`pn
 `vitest.config.ts` excludes `**/*.browser.test.ts` by design — Playwright owns those. Don't pull them into the vitest run.
 
 ## Gotchas
-- The two `localStorage` keys are unscoped. Two Operator instances served from the same origin share them.
+- The two `localStorage` keys are unscoped. Two Dorodango instances served from the same origin share them.
 - The URL feature harness (`?palette=N`, `&fills=0`, `&grouping=0`, `&shapes=pen,rect,text`, …) is read **once** at load; the board freezes its feature set at mount and nothing in the UI toggles it.
 - Hover thumbnails render through `renderDocThumbnail` into a fixed-position popover — fixed positioning is what stops the sidebar's scroll container clipping it.
-- `watchWorkspacePackages()` (root `vite.watchPackages.ts`) is in the plugin list because `@dorodango/draw-board` is imported as out-of-root source and every Operator land replaces files wholesale; per-file watches go deaf on that, dir-level coverage keeps HMR alive.
+- `watchWorkspacePackages()` (root `vite.watchPackages.ts`) is in the plugin list because `@dorodango/draw-board` is imported as out-of-root source and every Dorodango land replaces files wholesale; per-file watches go deaf on that, dir-level coverage keeps HMR alive.
