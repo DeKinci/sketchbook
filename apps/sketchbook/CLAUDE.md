@@ -12,9 +12,9 @@ A standalone drawings app: a sidebar of named boards, each embedding `@dorodango
 Both test scripts pass `NODE_OPTIONS=--no-experimental-webstorage` — Node's experimental `localStorage` global otherwise **shadows jsdom's real store** and every persistence test goes quiet-green against a store nothing reads. `src/lib/drawings.ts` reaches `window.localStorage` explicitly rather than the bare global for the same reason. Don't drop either.
 
 ## Port wiring
-`vite.config.ts` resolves, in order: `OPERATOR_WEB_PORT` → `SKETCHBOOK_PORT` → `OPERATOR_DEV_PORT_BASE + 1` → `5199`.
+`vite.config.ts` resolves, in order: `DORO_WEB_PORT` → `SKETCHBOOK_PORT` → `DORO_DEV_PORT_BASE + 1` → `5199`.
 
-The first entry is load-bearing and the comment in the file spells out why: Operator guesses a run's preview URL on `OPERATOR_WEB_PORT`, so a frontend dev server **must** bind it or its URL is classified as an off-web-port backend URL, hidden, and the preview never routes. **Never bind `OPERATOR_SERVICE_SKETCHBOOK_PORT`** — that's the service's *backend* port for cross-service discovery (`= OPERATOR_PORT`, one below the web port); binding it is exactly what once made the preview read as "forbidden". `allowedHosts: [".ts.net"]` keeps the dev server reachable at its Tailscale Serve origin.
+The first entry is load-bearing and the comment in the file spells out why: Operator guesses a run's preview URL on `DORO_WEB_PORT`, so a frontend dev server **must** bind it or its URL is classified as an off-web-port backend URL, hidden, and the preview never routes. **Never bind `DORO_SERVICE_SKETCHBOOK_PORT`** — that's the service's *backend* port for cross-service discovery (`= DORO_PORT`, one below the web port); binding it is exactly what once made the preview read as "forbidden". `allowedHosts: [".ts.net"]` keeps the dev server reachable at its Tailscale Serve origin.
 
 The devtools overlay needs no wiring here — Operator's preview proxy injects it into every tracked run.
 
