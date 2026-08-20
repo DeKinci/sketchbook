@@ -3,7 +3,7 @@
  * file (PNG iTXt chunk / SVG <metadata>), and any pasted/dropped file can be
  * probed for one — a rich file re-imports as a complete editable board.
  *
- * All OPT-IN capability: hosts that never call these (Operator's dock) ship
+ * All OPT-IN capability: hosts that never call these (Dorodango's dock) ship
  * plain flattened PNGs exactly as before.
  */
 import type Konva from "konva";

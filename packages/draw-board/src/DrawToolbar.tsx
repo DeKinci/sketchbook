@@ -791,7 +791,7 @@ export function DrawToolbar({
   /** Flatten + export the drawing (the attachment flow). Omit to hide. */
   onAdd?: () => void;
   /** Host-supplied controls rendered at the FAR RIGHT of the actions cluster
-   *  (e.g. the standalone app's export buttons). Operator passes nothing. */
+   *  (e.g. the standalone app's export buttons). Dorodango passes nothing. */
   extra?: React.ReactNode;
   /** Element library panel state: open/closed shows the RIGHTMOST toggle;
    *  null/undefined = the feature is off and no toggle renders at all. */
@@ -826,10 +826,10 @@ export function DrawToolbar({
   // fit them; otherwise they fall in flow and flex-wrap stacks a second row
   // (overlap impossible by construction). A fixed breakpoint lies for some
   // capability config — the full board's row needs ~72rem, the reduced
-  // Operator dock ~54rem, so the constant tuned to one wraps the other into a
+  // Dorodango dock ~54rem, so the constant tuned to one wraps the other into a
   // needless second row. Viewport (md:) breakpoints are wrong the same way:
   // the board panel is routinely narrower than the viewport (sketchbook's
-  // sidebar, Operator's chat dock), and viewport-keyed pinning let the
+  // sidebar, Dorodango's chat dock), and viewport-keyed pinning let the
   // centered pills slide UNDER the absolute history cluster (the undo button
   // ate the style pill's clicks).
   const rootRef = useRef<HTMLDivElement>(null);

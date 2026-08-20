@@ -2,7 +2,7 @@
  * The color scales the board's components reference as tailwind utilities
  * (`bg-ink-800`, `text-accent-300`, …). A host app feeds these into its
  * tailwind config (`theme.extend.colors`) — or supplies its own values under
- * the same names to restyle the board. Values mirror Operator's graphite +
+ * the same names to restyle the board. Values mirror Dorodango's graphite +
  * heather-violet palette so the board looks right out of the box.
  */
 export const BOARD_INK = {
