@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Copy, Download } from "lucide-react";
-import { boardPayloadText, type BoardHandle } from "@operator/draw-board";
+import { boardPayloadText, type BoardHandle } from "@dorodango/draw-board";
 
 /** Trigger a browser download for a File. */
 function download(file: File): void {

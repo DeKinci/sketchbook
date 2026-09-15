@@ -126,7 +126,7 @@ function defaultImageToData(file: File): Promise<BoardImageData> {
 
 /** Imperative surface for host-level export UI (the standalone app's toolbar
  *  buttons). Everything here is OPT-IN — hosts that never take the ref (the
- *  Operator dock) get the unchanged attachment flow. */
+ *  Dorodango dock) get the unchanged attachment flow. */
 export interface BoardHandle {
   /** Flatten to PNG; `rich` (default true) embeds the doc for re-import. */
   exportPng(opts?: { rich?: boolean }): Promise<File | null>;
@@ -272,7 +272,7 @@ export function DrawEditor({
   toolbarExtra?: React.ReactNode;
   /** When set, pasted/dropped image files are probed for an embedded board doc
    *  (rich PNG/SVG) FIRST — a board file always imports as a board, never as a
-   *  placed image, wherever it lands. Absent (Operator): no probing at all. */
+   *  placed image, wherever it lands. Absent (Dorodango): no probing at all. */
   onImportBoard?: (doc: DrawDoc) => void;
   /** Element library (opt-in; absent = feature off, no panel, no toolbar
    *  toggle). The host OWNS the entries — they are shared across drawings and
@@ -286,7 +286,7 @@ export function DrawEditor({
     onOpenChange?: (open: boolean) => void;
   } | null;
 }) {
-  // Operator is dark-only. The primary ink is adaptive (CONTRAST_INK) — the
+  // Dorodango is dark-only. The primary ink is adaptive (CONTRAST_INK) — the
   // canvas resolves it to a bright/dark solid contrasting the BACKGROUND
   // sampled under each shape (paper, images, and fills — never strokes).
   const bgColor = bgImage ? "transparent" : CANVAS_BG_DARK;

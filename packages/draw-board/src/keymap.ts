@@ -1,6 +1,6 @@
 /**
  * The board's keyboard shortcuts as DATA — the reference a host can render in
- * its own shortcut list (Operator's Settings → Shortcuts merges this).
+ * its own shortcut list (Dorodango's Settings → Shortcuts merges this).
  *
  * Dispatch does NOT read this table: the real handlers live on the board's
  * focused root in DrawEditor.tsx (`onKeyDown` + the paste listener), where the

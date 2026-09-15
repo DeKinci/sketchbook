@@ -352,7 +352,7 @@ export const INK_COLORS = [
   "#ad7f58", // brown
 ] as const;
 
-/** Operator is dark-only — a blank sketch canvas is this dark surface. */
+/** Dorodango is dark-only — a blank sketch canvas is this dark surface. */
 export const CANVAS_BG_DARK = "#1a1a1e";
 /** The "adaptive" primary ink — a sentinel STROKE value. Renderers resolve it
  *  to a solid bright/dark ink contrasting the BACKGROUND sampled under the
