@@ -221,8 +221,10 @@ export function DrawCanvas({
   newId: () => string;
   /** Live select+move gesture feed (set at drag start, null when it settles).
    *  A drop target outside the stage (the library panel — a mouseup out there
-   *  never reaches Konva) consumes it: `cancel()` aborts the move in place
-   *  (shapes snap back, no history) instead of letting re-entry commit it. */
+   *  reaches no Konva handler) consumes it: `cancel()` aborts the move in place
+   *  (shapes snap back, no history). This is why the stage must never CAPTURE
+   *  the pointer — see the window watcher by {@link settleGesture}, which runs
+   *  in the bubble phase so this drop target gets the release first. */
   onMoveGesture?: (g: { ids: string[]; cancel: () => void } | null) => void;
 }) {
   const trRef = useRef<Konva.Transformer>(null);
@@ -790,6 +792,83 @@ export function DrawCanvas({
     if (state.draftId) dispatch({ type: "endDraw", minSize: sPx(2), distScale: sPx(1) });
   };
 
+  // ── Gesture completion beyond the stage ─────────────────────────────────────
+  // Konva only ever hears what lands ON the stage, so an ending that happens
+  // anywhere else used to not happen at all: a release over the toolbar left the
+  // draft/marquee/move live (it resumed the moment the pointer came back with a
+  // button down), and a touchcancel — which has no `touchend` after it — left
+  // `pinchRef` set forever, so every later single touch early-returned and the
+  // board stopped drawing until it remounted.
+  //
+  // Pointer CAPTURE is this package's usual answer (LibraryPanel/DrawToolbar/
+  // Minimap all capture on a stable element) and is the wrong tool HERE: a
+  // select+move drag is deliberately finishable outside the stage — the library
+  // panel consumes that mouseup as a drop (see `onMoveGesture`) — and capture
+  // retargets pointer AND compatibility mouse events to the capture element,
+  // which would silently kill it. (Konva's own `setPointerCapture` is internal
+  // bookkeeping; it never calls the DOM API, so it settles nothing.)
+  //
+  // So the canvas WATCHES for the end instead of stealing it: window listeners
+  // in the BUBBLE phase, so the real target — the library panel, the host's own
+  // chrome — handles the event first and we only clean up whatever it left live.
+  // They are registered once and dropped on unmount, never preventDefault or
+  // stop anything, and no-op unless one of THIS board's gestures is running, so
+  // an embedding host is unaffected (keys stay on the board's focused root).
+  const endOutside = () => {
+    if (pinchRef.current) {
+      pinchRef.current = null;
+      setCamGesture(false);
+      breakClickPair();
+      return;
+    }
+    if (panRef.current) {
+      endPan();
+      return;
+    }
+    if (!erasing.current && !moveRef.current && !marqueeStart.current && !state.draftId) return;
+    breakClickPair(); // a gesture that ended off-stage (or was cancelled) is no click
+    settleGesture();
+  };
+  // Handlers are rebuilt every render (they read live state); the listeners call
+  // through this ref instead of re-subscribing.
+  const endOutsideRef = useRef(endOutside);
+  endOutsideRef.current = endOutside;
+  useEffect(() => {
+    // An `up` INSIDE the stage is Konva's — `onStageUp` already ran. Cancels are
+    // never skipped that way: Konva routes `touchcancel` to a shape-only
+    // `pointerup` that the stage's own handlers never see.
+    const onUp = (e: Event) => {
+      const content = stageRef.current?.content;
+      const target = e.target;
+      if (content && target instanceof Node && content.contains(target)) return;
+      endOutsideRef.current();
+    };
+    const onCancel = () => endOutsideRef.current();
+    // `mouseup`, NOT `pointerup` — and that is load-bearing, not taste. The
+    // browser fires pointerup BEFORE mouseup, so a pointerup watcher would
+    // settle (i.e. COMMIT) a move drag before the library panel's own
+    // `onMouseUp` could consume it as a drop, and the shapes would never snap
+    // back. Touch needs no `up` here at all: a touchend is delivered to the
+    // element the touch STARTED on, so it always reaches the stage.
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("touchcancel", onCancel);
+    return () => {
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("touchcancel", onCancel);
+      // Unmounting mid-gesture is an ending too: close the history gesture (the
+      // reducer lives in the editor, which outlives this canvas — the container
+      // collapsing to zero unmounts it alone) and hand the host back its state,
+      // or the library panel stays an armed drop target holding a dead `cancel`
+      // (settleGesture's move branch is what returns it) and the editor's ⌘G
+      // gate stays blocked on a camera gesture that is gone.
+      endOutsideRef.current();
+      if (camBusyRef) camBusyRef.current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const onStageDown = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
     // Before any early-return: even a click that only blurs an editor or lands
     // during crop is half of a potential click pair.
@@ -930,10 +1009,11 @@ export function DrawCanvas({
 
   const onStageMove = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
     if (croppingId) return;
-    // A mouseup outside the stage never reaches us: for MOUSE events, moving
-    // with no buttons down means whatever gesture was live already ended —
-    // settle it instead of letting it run under bare hover (an armed eraser
-    // would otherwise delete everything it touches).
+    // Backstop under the window watcher above: for MOUSE events, moving with no
+    // buttons down means whatever gesture was live already ended — settle it
+    // instead of letting it run under bare hover (an armed eraser would
+    // otherwise delete everything it touches). Cheap, and it covers a release
+    // the page was never told about at all (a drag out of a browser TAB).
     if ("buttons" in e.evt && e.evt.buttons === 0) {
       if (panRef.current) {
         endPan();
