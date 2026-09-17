@@ -558,7 +558,7 @@ export function DrawCanvas({
       bgLumRef.current = null;
     }
     setLumEpoch((e) => e + 1); // adaptive ink resamples → cached elements stale
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   }, [bgImage, imgEls, imgSig, fillSig, state.width, state.height]);
 
   // fillAt reads "below" in PAINT order (filled units z-sort by footprint) —
@@ -1378,7 +1378,7 @@ export function DrawCanvas({
       for (const sh of shapes) if (sh.groupPath && !inWindow.has(sh) && want.has(sh.groupPath[0])) inWindow.add(sh);
     }
     return shapes.filter((sh) => inWindow.has(sh));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   }, [shapes, cullKey]);
 
   // ── Gesture layer split ──────────────────────────────────────────────────────
@@ -1409,7 +1409,7 @@ export function DrawCanvas({
     };
     splitRef.current = out;
     return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   }, [renderShapes, contentGesture, baseSet, selectedIds]);
 
   // Bitmap-cache management, imperative and conservative: caching costs a full
@@ -1455,7 +1455,7 @@ export function DrawCanvas({
     layer.cache({ x: region.x, y: region.y, width: region.width, height: region.height, pixelRatio: vs * dpr });
     cacheState.current = { region, scale: vs, at: performance.now(), content: staticShapes };
     layer.batchDraw();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   }, [camGesture, contentGesture, view.x, view.y, vs, renderAll, croppingId, staticShapes]);
   // Unmount: leave no dangling bitmap.
   useEffect(() => {
@@ -1523,7 +1523,7 @@ export function DrawCanvas({
   // Mid-gesture camera pans/zooms don't touch elements at all (live values
   // read through refs; widths are model units the stage scales natively).
   const shapeElCache = useRef(new WeakMap<Shape, React.ReactElement | null>());
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   useMemo(() => {
     shapeElCache.current = new WeakMap();
   }, [imgEls, imgSig, bgImage, editingId, croppingId, lumEpoch, floorVs]);
@@ -1663,9 +1663,9 @@ export function DrawCanvas({
       return el;
     });
   };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   const staticShapeNodes = useMemo(() => nodesFor(staticShapes), [staticShapes, imgEls, editingId, croppingId, floorVs]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   const dynamicShapeNodes = useMemo(() => nodesFor(dynamicShapes), [dynamicShapes, imgEls, editingId, croppingId, floorVs]);
   return (
     <Stage

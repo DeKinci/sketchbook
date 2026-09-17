@@ -147,7 +147,7 @@ export function elementSignature(shapes: Shape[]): string {
   const gid = (g: string) => gidOrdinal.get(g) ?? -1;
 
   const canon = shapes.map((s) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // `any` deliberate here — @typescript-eslint/no-explicit-any is not enabled (eslint.config.js)
     const c: any = { ...s };
     delete c.id;
     if (s.groupPath) c.groupPath = s.groupPath.map(gid);
@@ -155,7 +155,7 @@ export function elementSignature(shapes: Shape[]): string {
     if (c.bindStart) c.bindStart = { ...c.bindStart, id: ref(c.bindStart.id) };
     if (c.bindEnd) c.bindEnd = { ...c.bindEnd, id: ref(c.bindEnd.id) };
     if (c.dormant) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      // `any` deliberate here — @typescript-eslint/no-explicit-any is not enabled (eslint.config.js)
       c.dormant = c.dormant.map((d: any) => ({
         ...d,
         gid: gid(d.gid),
