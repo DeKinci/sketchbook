@@ -866,7 +866,8 @@ export function DrawCanvas({
       endOutsideRef.current();
       if (camBusyRef) camBusyRef.current = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // deps deliberately empty — mount/unmount only; react-hooks/exhaustive-deps is not
+    // enabled (eslint.config.js)
   }, []);
 
   const onStageDown = (e: KonvaEventObject<MouseEvent | TouchEvent>) => {
