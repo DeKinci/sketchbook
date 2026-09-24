@@ -1,49 +1,28 @@
 # Sketchbook (`@dorodango/sketchbook`)
 
-A standalone drawings app: a sidebar of named boards, each embedding `@dorodango/draw-board`. **No server, no API, no auth** — everything persists to `localStorage`. It exists for two reasons: it's a useful scratch surface, and it's the honest test of whether `draw-board` is genuinely host-agnostic (a second host with entirely different persistence, chrome and lifecycle from `apps/web`). See the root `CLAUDE.md` for monorepo-wide rules.
+Standalone drawings app: sidebar of named boards, each embedding `@dorodango/draw-board`. **No server, no API, no auth** — `localStorage` only. Exists as a scratch surface AND as the honest host-agnosticism test for `draw-board`.
 
 ## Commands
-- Dev: `pnpm --filter @dorodango/sketchbook dev`
-- Build / preview: `pnpm --filter @dorodango/sketchbook build` · `… preview`
-- Typecheck: `pnpm --filter @dorodango/sketchbook typecheck`
-- Unit tests (vitest, jsdom): `pnpm --filter @dorodango/sketchbook test`
-- **Real-browser tests: `pnpm --filter @dorodango/sketchbook test:browser`** (= `pnpm exec playwright test`; also the second half of the root `pnpm test:browser`)
+`pnpm --filter @dorodango/sketchbook dev` · `build` · `preview` · `typecheck` · `test` (vitest, jsdom) · **`test:browser`** (Playwright; the second half of root `pnpm test:browser`).
 
-Both test scripts pass `NODE_OPTIONS=--no-experimental-webstorage` — Node's experimental `localStorage` global otherwise **shadows jsdom's real store** and every persistence test goes quiet-green against a store nothing reads. `src/lib/drawings.ts` reaches `window.localStorage` explicitly rather than the bare global for the same reason. Don't drop either.
+Both test scripts pass `NODE_OPTIONS=--no-experimental-webstorage` — else Node's experimental `localStorage` shadows jsdom's store and persistence tests go quiet-green; `src/lib/drawings.ts` reaches `window.localStorage` explicitly for the same reason. Don't drop either.
 
-## Port wiring
-`vite.config.ts` resolves, in order: `DORO_WEB_PORT` → `SKETCHBOOK_PORT` → `DORO_DEV_PORT_BASE + 1` → `5199`.
-
-The first entry is load-bearing and the comment in the file spells out why: Dorodango guesses a run's preview URL on `DORO_WEB_PORT`, so a frontend dev server **must** bind it or its URL is classified as an off-web-port backend URL, hidden, and the preview never routes. **Never bind `DORO_SERVICE_SKETCHBOOK_PORT`** — that's the service's *backend* port for cross-service discovery (`= DORO_PORT`, one below the web port); binding it is exactly what once made the preview read as "forbidden". `allowedHosts: [".ts.net"]` keeps the dev server reachable at its Tailscale Serve origin.
-
-The devtools overlay needs no wiring here — Dorodango's preview proxy injects it into every tracked run.
+## Ports
+`vite.config.ts` resolves: `DORO_WEB_PORT` → `SKETCHBOOK_PORT` → `DORO_DEV_PORT_BASE + 1` → `5199`. First entry load-bearing: a frontend MUST bind `DORO_WEB_PORT` or its preview URL is classified backend and never routes. **Never bind `DORO_SERVICE_SKETCHBOOK_PORT`** (the backend port — binding it once read as "forbidden" preview). `allowedHosts: [".ts.net"]`. Overlay injected by the preview proxy, no wiring.
 
 ## Structure
-- `src/App.tsx` — the shell: drawings list, active drawing, rename state, library state, toasts, and the `DrawEditor` mount.
-- `src/lib/drawings.ts` — pure list ops (`createDrawing`, `renameDrawing`, `updateDoc`, `updateSession`, `importDrawing`, `displayOrder`, `nextName`) **plus** the `localStorage` I/O. Key: `sketchbook:drawings`.
-- `src/lib/library.ts` — the element library (entries + open flag), **shared across every drawing**, not per-board. Key: `sketchbook:library`.
-- `src/ExportCluster.tsx` — the toolbar export controls, injected into the board via `toolbarExtra`.
+`src/App.tsx` (shell: list, active drawing, rename, library, toasts, `DrawEditor` mount) · `src/lib/drawings.ts` (pure list ops + storage I/O, key `sketchbook:drawings`) · `src/lib/library.ts` (element library, **shared across drawings**, key `sketchbook:library`) · `src/ExportCluster.tsx` (toolbar exports via `toolbarExtra`).
 
-A `Drawing` is `{ id, name, doc, createdAt, session? }`. `doc` is `draw-board`'s `DrawDoc`; `session` is the board's toolbar/selection state, optional so records written before it existed still load. **There is no schema version and no migration path** — loaders defensively filter records missing `id`/`doc` and treat corrupt JSON as empty. If you change the stored shape, that guard is the entire safety net; add a version key rather than widening the filter.
+`Drawing = { id, name, doc, createdAt, session? }`. **No schema version, no migration** — loaders filter records missing `id`/`doc`, corrupt JSON = empty. Changing the stored shape ⇒ add a version key, don't widen the filter.
 
-## What the board gets injected
-`<DrawEditor>` receives `doc`/`onChange`, `session`/`onSessionChange`, `features` (parsed once from the URL by `featuresFromUrl()`), `onNotify` (the toast host), `library`, `boardRef`, `toolbarExtra`, `onImportBoard`, and `autoFocus`. Two subtleties:
-- `key={active.id}` forces a **full remount** when the active drawing changes — no React reuse across boards. Session state survives only because it round-trips through `onSessionChange`.
-- `autoFocus={renamingId === null}`. A freshly created drawing opens in rename mode, and the board would otherwise steal the first keystrokes out of the rename input.
-
-Mutations route through a `useRef`'d callback so the board's **unmount flush** (which runs after the render that owned its `onChange`) still lands. Nothing is explicitly saved — there is no save button and no revert.
+## Board embedding
+`<DrawEditor>` gets `doc`/`onChange`, `session`/`onSessionChange`, `features` (from URL once via `featuresFromUrl()` — frozen at mount), `onNotify`, `library`, `boardRef`, `toolbarExtra`, `onImportBoard`, `autoFocus`. Subtleties: `key={active.id}` forces FULL remount per drawing (session survives only via `onSessionChange` round-trip); `autoFocus={renamingId === null}` (else the board steals the rename input's first keystrokes); mutations route through a `useRef`'d callback so the board's unmount flush still lands. No save button, no revert.
 
 ## Import / export
-Rich PNG and rich SVG embed the full document (`draw-board`'s `boardFile.ts`/`pngMeta.ts`), so an exported rich PNG drops back in as a live board; slim variants are pixels only. Copy-as-PNG writes a `ClipboardItem` pairing `image/png` with the `text/plain` board payload and **falls back to download** when the clipboard is unavailable (insecure LAN origin, partial Firefox `ClipboardItem`, denied permission) — keep that fallback. Drops are handled by a global capture-phase `dragover`: `.drawlib` files merge into the library, board files import as a new drawing, and a plain image dropped on the sidebar becomes a new drawing's background.
+Rich PNG/SVG embed the full doc (`boardFile.ts`/`pngMeta.ts`) — a rich PNG re-imports as a live board; slim = pixels. Copy-as-PNG pairs `image/png` + `text/plain` board payload and **falls back to download** (insecure origin / partial Firefox / denied permission) — keep the fallback. Global capture-phase `dragover`: `.drawlib` → library merge, board file → new drawing, image on sidebar → background.
 
-## Tests
-- `src/lib/drawings.test.ts` — the pure list ops and the `localStorage` round-trip (corrupt/absent → empty, name uniquing, newest-first `displayOrder`).
-- `src/sketchbook.browser.test.ts` — the Playwright suite (59 tests across 9 describes — the bulk of this app's real coverage; ~2m). It boots **its own** vite server on a pid-derived port with an isolated cache dir (`.vite-sketchbook-browser`) and inline Tailwind/PostCSS, no watch. It exercises what jsdom cannot prove: stroke styles reaching the SVG export, z-order paint law, text kerning/wrap parity between the edit overlay and the committed canvas (ASCII **and** Cyrillic), glue previews, bond-aware upward text growth, and the rich-PNG export → re-import loop.
-
-`vitest.config.ts` excludes `**/*.browser.test.ts` by design — Playwright owns those. Don't pull them into the vitest run.
-
-## Gotchas
-- The two `localStorage` keys are unscoped. Two Dorodango instances served from the same origin share them.
-- The URL feature harness (`?palette=N`, `&fills=0`, `&grouping=0`, `&shapes=pen,rect,text`, …) is read **once** at load; the board freezes its feature set at mount and nothing in the UI toggles it.
-- Hover thumbnails render through `renderDocThumbnail` into a fixed-position popover — fixed positioning is what stops the sidebar's scroll container clipping it.
-- `watchWorkspacePackages()` (root `vite.watchPackages.ts`) is in the plugin list because `@dorodango/draw-board` is imported as out-of-root source and every Dorodango land replaces files wholesale; per-file watches go deaf on that, dir-level coverage keeps HMR alive.
+## Tests & gotchas
+- `src/lib/drawings.test.ts` — pure ops + storage round-trip. `src/sketchbook.browser.test.ts` — the Playwright suite (bulk of real coverage; own vite server on pid-derived port, isolated cache dir, no watch): SVG-export styles, z-order paint law, text kerning/wrap parity (ASCII + Cyrillic), glue previews, bond-aware text growth, rich-PNG round-trip. `vitest.config.ts` excludes `*.browser.test.ts` — Playwright owns them.
+- Storage keys are unscoped — two instances on one origin share them.
+- Hover thumbnails: `renderDocThumbnail` into a fixed-position popover (fixed = escapes the sidebar's scroll clip).
+- `watchWorkspacePackages()` (root `vite.watchPackages.ts`) in plugins — `draw-board` is out-of-root source and lands replace files wholesale; per-file watches go deaf, dir-level keeps HMR alive.

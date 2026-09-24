@@ -11,6 +11,10 @@
     "./theme": {
       "types": "./src/theme.ts",
       "default": "./src/theme.ts"
+    },
+    "./keymap": {
+      "types": "./src/keymap.ts",
+      "default": "./src/keymap.ts"
     }
   },
   "scripts": {

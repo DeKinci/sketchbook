@@ -110,7 +110,7 @@ export function Minimap({
         redrawTimer.current = null;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   }, []);
 
   // ── Interaction ─────────────────────────────────────────────────────────────

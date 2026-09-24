@@ -1,47 +1,45 @@
 # Draw board (`@dorodango/draw-board`)
 
-The standalone drawing/annotation board: a **pure reducer** over a document of shapes, a **pan/zoom camera**, and a Konva/`react-konva` rendering layer. Self-contained by design — it knows nothing about Dorodango, its server, or its board. Two hosts embed it: `apps/web` (the sketch viewport inside a task) and `apps/sketchbook` (the standalone drawings app). See the root `CLAUDE.md` for monorepo-wide rules.
+Pure-reducer shape doc + pan/zoom camera + Konva/`react-konva` rendering; self-contained. Hosts: `apps/web` + `apps/sketchbook`.
 
-**No build step.** `exports` points `.` straight at `src/index.ts` and `./theme` at `src/theme.ts`, so consumers resolve to source over `workspace:*` — same arrangement as `@dorodango/shared`. Everything React/Konva is a **peer** dependency (`konva >=10`, `react`/`react-dom` `>=18`, `react-konva >=18`, `lucide-react >=1`); the host owns those versions, this package never bundles them.
+**No build step**: `exports` `.` → `src/index.ts`, `./theme` → `src/theme.ts` (consumers resolve to source). Peers: `konva >=10`, `react`/`react-dom` `>=18`, `react-konva >=18`, `lucide-react >=1` — the host owns versions.
 
 ## Commands
-- Typecheck: `pnpm --filter @dorodango/draw-board typecheck`
-- Test: `pnpm --filter @dorodango/draw-board test` (vitest; 15 `*.test.ts` files next to the code)
-- Coverage: `pnpm --filter @dorodango/draw-board coverage`
+`pnpm --filter @dorodango/draw-board typecheck` · `test` (vitest; 15 `*.test.ts`) · `coverage`
 
-`vitest.config.ts` runs `environment: "node"` with `pool: "forks"` / `singleFork` — **deliberate, don't "upgrade" it**. The suite covers the PURE core (reducer, camera math, export geometry, PNG/SVG round-trips) with no DOM and no Konva; the comment records why single-fork (restricted-CPU sandboxes can resolve tinypool's `minThreads` above its computed `maxThreads` and kill the run before a test executes). Component behavior is proven elsewhere — `apps/web/src/components/drawViewport.browser.test.ts` and `apps/sketchbook/src/sketchbook.browser.test.ts` mount the real editor in a real browser.
+`vitest.config.ts`: `environment: "node"`, `pool: "forks"`/`singleFork` — **deliberate, don't "upgrade"** (restricted-CPU sandboxes: tinypool `minThreads` > `maxThreads` kills runs). Pure core only; component behavior: `apps/web/src/components/drawViewport.browser.test.ts` + `apps/sketchbook/src/sketchbook.browser.test.ts`.
 
-## Hosts inject services — the package asks, never reaches
-The board takes its capabilities as props rather than importing them, which is what keeps it embeddable in two very different shells:
-- `onNotify` — how a refusal or status message reaches the user (each host wires its own toast).
-- `imageToData` — the host's file→raster reader; a host may refuse a file here and report via `onNotify`.
-- `features` (`DrawFeatures`) — which tools/palette/grouping/layers are enabled. **Frozen at mount**; there is no dynamic toggling.
-- `library`, `session`/`onSessionChange`, `doc`/`onChange` — the host owns persistence; the board holds no storage of its own.
+## Injected services (props, never imports)
+`onNotify` (host toast), `imageToData` (file→raster; may refuse via `onNotify`), `features` (`DrawFeatures`, **frozen at mount**), `library`, `session`/`onSessionChange`, `doc`/`onChange` — the host owns persistence, the board holds none.
 
-Theme is the same story: `@dorodango/draw-board/theme` exports `boardColors` (the `ink`/`accent` scales), and a host **must** extend its Tailwind theme with them *and* add `../../packages/draw-board/src/**/*.{ts,tsx}` to its `content` globs — otherwise the board renders unstyled because Tailwind never generates the utilities its components name.
+Theme: `boardColors` (`ink`/`accent`) from `@dorodango/draw-board/theme`; hosts MUST extend Tailwind with them AND add `../../packages/draw-board/src/**/*.{ts,tsx}` to `content` globs — else unstyled.
 
-## State model
-`drawModel.ts` is the whole domain: the shape union (`BoxShape` rect/ellipse/diamond, `SegmentShape` line/arrow, `FreehandShape`, `TextShape`, `ImageShape`), the `DrawDoc` (`shapes`, `width`, `height`, optional raster `background`), and `drawReducer` — **pure and deterministic, no side effects**, with `past`/`future` undo stacks in `DrawState`. `useDrawing.ts` is a thin `useReducer` wrapper. Roughly 45 action kinds span tools, paint, style, selection, transform, path edit, gesture lifecycle, content and history.
+## State
+`drawModel.ts` = the domain: `BoxShape` (rect/ellipse/diamond), `SegmentShape` (line/arrow), `FreehandShape`, `TextShape`, `ImageShape`; `DrawDoc` (`shapes`, `width`, `height`, optional raster `background`); `drawReducer` pure + deterministic, `past`/`future` undo in `DrawState`, ~45 action kinds. `useDrawing.ts` = thin `useReducer` wrapper.
 
-Grouping is the subtle part and has its own design doc — **read `docs/groups-design.md` before touching it.** The short version: there are **no group objects**. Each shape carries a root-first `groupPath` ancestry array; `unitIndex.ts` derives the unit graph from it. Glue (attach/bind) is **unit-grained**, not per-shape — the smallest dragged unit wins, one outward edge per unit. Edges that end up internal to a new group are stashed in a level-keyed `dormant` array and restored on ungroup. Selection normalizes to whole units except under deep-select (⌘-click), which permits only restricted edits (colour, width, text — never move/resize).
+Grouping — **read `docs/groups-design.md` first.** No group objects; shapes carry a root-first `groupPath`; `unitIndex.ts` derives units. Glue is unit-grained (smallest dragged unit wins; one outward edge per unit); edges internal to a new group stash in level-keyed `dormant`, restored on ungroup. Selection = whole units; deep-select (⌘-click) = colour/width/text only, never move/resize.
 
-## Camera & hit-testing
-`viewport.ts` is pure camera math over `Viewport { x, y, scale }` (`screen = logical * scale + offset`): `screenToLogical`/`logicalToScreen`, `zoomAt` (zoom about a fixed screen point), `panBy`, `fitScale`, `visibleLogicalRect`, `clampBounded`. Scale clamps to `[0.02, 40]`. Three policies: `infinite`, `bounded` (clamped to the doc box), `fixed` (no gestures, fit to container). `spatialIndex.ts` holds the bounding-box index behind marquee selection, attach detection and pointer hit-tests; `snapGuides.ts` the alignment guides.
+## Camera
+`viewport.ts` = pure math over `Viewport {x, y, scale}` (`screen = logical*scale + offset`): `screenToLogical`/`logicalToScreen`, `zoomAt`, `panBy`, `fitScale`, `visibleLogicalRect`, `clampBounded`; scale `[0.02, 40]`; policies `infinite` / `bounded` (doc box) / `fixed` (no gestures, fit). `spatialIndex.ts` = bbox index (marquee/attach/hit-tests); `snapGuides.ts` = guides.
 
 ## Keys live on the board's focused root — LAW
-`DrawEditor.tsx` renders its root `<div ref={rootRef} tabIndex={0} onKeyDown onKeyUp>`; key **and paste** handlers hang there, never on `window` and never on the host's hotkey manager. Any pointer-down inside claims focus (the Konva canvas isn't focusable on its own), and opening the editor claims it too, so the first keystroke or paste lands on the board the user just opened. This is what lets `apps/web` run its own global hotkey dispatcher without the two fighting.
+`DrawEditor.tsx` root `<div ref={rootRef} tabIndex={0} onKeyDown onKeyUp>` — key AND paste handlers there, never on `window` or the host hotkey manager. Pointer-down inside or opening the editor claims focus (Konva canvas isn't focusable). Carve-outs (live-popover dismissal ONLY; don't grow): `DrawToolbar.tsx` capture `document` `pointerdown`/`keydown` while a strip is open; `LibraryPanel.tsx` capture `window` `keydown` while open; both unregister on close. New shortcuts: root `onKeyDown` + `DRAW_KEYMAP` (`keymap.ts` = docs, not dispatcher — `apps/web`'s `HotkeyList` renders it; binding = `DrawEditor.tsx` `onKeyDown`, kept in step by hand; `` ` `` matches `e.code` not `e.key` — macOS dead keys).
 
-The only carve-outs are **transient-popover dismissal**, and they are scoped to a live popover: `DrawToolbar.tsx` registers capture-phase `document` `pointerdown`/`keydown` while a toolbar strip is open, and `LibraryPanel.tsx` a capture-phase `window` `keydown` while the panel is open. Both unregister on close. Don't grow that set — a new board shortcut belongs in `onKeyDown` on the root, and in `DRAW_KEYMAP` so hosts can list it.
+## Gestures must be able to end off-stage
+Konva binds DOM listeners on `Stage.content` (`_bindContentEvents`) ⇒ the stage never hears an off-stage ending (off-stage release left gestures live/resuming; `touchcancel` — never followed by `touchend` — left `pinchRef` set, board dead till remount). `DrawCanvas.tsx` registers `mouseup`/`pointercancel`/`touchcancel` on `window` for the canvas lifetime; all — plus unmount — funnel through `settleGesture()`.
+- **Not pointer capture** (though `LibraryPanel.tsx:362` captures its tile drags): board→library drops finish off-stage (`LibraryPanel` consumes the `mouseup` as the drop; `onMoveGesture` `cancel()` snaps shapes back); capture retargets pointer + compatibility mouse events ⇒ deletes the feature; Konva's `setPointerCapture` never touches the DOM API.
+- **Bubble, not capture** — the real target handles first; the canvas only cleans up.
+- **`mouseup`, never `pointerup`** — `pointerup` fires first, committing the drag before the panel's `onMouseUp` cancels; touch needs no `up` listener (`touchend` delivers to the start element).
 
-`keymap.ts` publishes `DRAW_KEYMAP` purely so hosts can render the shortcut reference (`apps/web`'s `HotkeyList`). **It is documentation, not the dispatcher** — adding an entry there does not bind anything; the binding lives in `DrawEditor.tsx`'s `onKeyDown`, and the two must be kept in step by hand. Note `` ` `` is matched on `e.code`, not `e.key`, for macOS dead-key layouts.
+Listeners never `preventDefault`/`stopPropagation`, no-op unless this board's gesture is live, removed on unmount (finisher runs once more). Pinned: 4 tests in `apps/web/src/components/drawViewport.browser.test.ts` (re-entry with button held — the `buttons === 0` backstop in `onStageMove` can't save — + `touchcancel` mid-pinch).
 
-## Export & serialization
-- `boardFile.ts` — the round-trip: `exportBoardPng`/`exportBoardSvg`, `parseBoardFile`/`parseBoardPayload`, `readBoardDocFromPngBytes`. A **rich** PNG carries the full document inside a PNG text chunk (`pngMeta.ts`: `embedPngText`/`readPngText`, `BOARD_KEYWORD`), so a rich PNG re-imports as a live board while staying an ordinary image everywhere else. A **slim** export is pixels only.
-- `svgExport.ts` / `svgRecolor.ts` — SVG round-trip and palette remapping of imported SVG fills/strokes.
-- `exportPng.ts` — stage capture, content crop, export scale.
-- `ghostPainter.ts` — off-screen rendering (`renderDocThumbnail`) with no Konva stage, which is how hosts draw list thumbnails.
+**Fourth path — unmount mid-gesture — no seam; review-held (measured, `mto6ry4x`).** `DrawEditor.tsx:1555` gates `<DrawCanvas>` on `avail && view && fontReady`; none goes falsy once true (collapsed container ⇒ truthy `{w:0,h:0}`) ⇒ never unmounts; a test seam = the encapsulation hole this package avoids. The `useEffect` cleanup (`endOutsideRef.current()` + `camBusyRef.current = false`) is the same settle teardown; only review catches a refactor dropping it.
+
+## Export
+- `boardFile.ts` — `exportBoardPng`/`exportBoardSvg`, `parseBoardFile`/`parseBoardPayload`, `readBoardDocFromPngBytes`; a rich PNG embeds the doc in a text chunk (`pngMeta.ts`: `embedPngText`/`readPngText`, `BOARD_KEYWORD`) ⇒ re-imports as a live board; slim = pixels only.
+- `svgExport.ts`/`svgRecolor.ts` — SVG round-trip + palette remap; `exportPng.ts` — capture/crop/scale; `ghostPainter.ts` — off-screen `renderDocThumbnail` (list thumbnails, no stage).
 
 ## Gotchas
-- **The reducer must stay pure.** Undo/redo, the browser test suites and the node-environment unit tests all depend on it; a stray `Date.now()`/`crypto` call inside an action handler breaks determinism. `newShapeId()` (`crypto.randomUUID`) is called by *callers*, not the reducer.
-- The package is `private: true` and unversioned in practice — it is a workspace-internal package, not published. `packages/devtools` is the one publishable package here.
-- Changing the exported types ripples into both hosts at once (they import source); `pnpm -r typecheck` is the check that catches it.
+- **The reducer stays pure** — a stray `Date.now()`/`crypto` in a handler breaks determinism; `newShapeId()` (`crypto.randomUUID`) is called by CALLERS.
+- `private: true`, workspace-internal, unpublished.
+- Exported types ripple into both hosts (source imports) — `pnpm -r typecheck`.

@@ -331,7 +331,7 @@ export function DrawEditor({
   }, []);
   useEffect(() => {
     if (autoFocus) rootRef.current?.focus({ preventScroll: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   }, []);
 
   // ── Persist the live doc (debounced + unmount flush) ────────────────────────
@@ -382,7 +382,7 @@ export function DrawEditor({
       onChangeRef.current?.(toDoc(stateRef.current));
       onSessionChangeRef.current?.(toSession(stateRef.current));
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   }, []);
 
   // ── Paste target: the cursor's spot on the plane ────────────────────────────
@@ -438,7 +438,7 @@ export function DrawEditor({
     // 1:1 with the logical origin at the top-left — the blank-board look.
     const content = contentBounds(state.shapes);
     setCamera(content ? fitView(padBox(content, 60), avail, { maxScale: 1 }) : { x: 0, y: 0, scale: 1 });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   }, [avail, camera, policy]);
   // A container resize re-clamps a bounded camera (the fit floor moved).
   useEffect(() => {
@@ -630,7 +630,7 @@ export function DrawEditor({
       } else dispatch({ type: "deleteShapes", ids: [cur.id] });
     }
     setSession(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // deps deliberately partial — react-hooks/exhaustive-deps is not enabled (eslint.config.js)
   }, [dispatch]);
   const cancelEdit = useCallback(() => {
     sessionRef.current = null;
