@@ -10,8 +10,9 @@
  * Requirements from the host:
  *  - `konva` / `react-konva` / `lucide-react` peer deps;
  *  - tailwind utilities for the `ink`/`accent` scales (see `./theme`) — feed
- *    them into the host's tailwind config and include this package's `src` in
- *    its `content` globs.
+ *    them into the host's tailwind config and include this package's files in
+ *    its `content` globs (the published `dist/` JS files for the
+ *    published package; `src/` inside this repo). See README.md.
  */
 export { DrawEditor, type BoardImageData, type BoardHandle } from "./DrawEditor.tsx";
 export { DrawCanvas } from "./DrawCanvas.tsx";
