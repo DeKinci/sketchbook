@@ -1,14 +1,14 @@
 # Sketchbook (`sketchbook`)
 
-Standalone drawings app: sidebar of named boards, each embedding `markup-board`. **No server, no API, no auth** — `localStorage` only. Exists as a scratch surface AND as the honest host-agnosticism test for `draw-board`.
+Standalone drawings app: sidebar of named boards, each embedding `markup-board`. **No server, no API, no auth** — `localStorage` only. Exists as a scratch surface AND as the honest host-agnosticism test for `markup-board`. Deployed to draw.mar.so (`infra/sketchbook/README.md`).
 
 ## Commands
-`pnpm --filter sketchbook dev` · `build` · `preview` · `typecheck` · `test` (vitest, jsdom) · **`test:browser`** (Playwright; the second half of root `pnpm test:browser`).
+`pnpm --filter sketchbook dev` · `build` · `preview` · `typecheck` · `test` (vitest, jsdom) · **`test:browser`** (Playwright; root `pnpm test:browser`). First run: `pnpm --filter sketchbook exec playwright install chromium`.
 
-Both test scripts pass `NODE_OPTIONS=--no-experimental-webstorage` — else Node's experimental `localStorage` shadows jsdom's store and persistence tests go quiet-green; `src/lib/drawings.ts` reaches `window.localStorage` explicitly for the same reason. Don't drop either.
+The `test` script passes `NODE_OPTIONS=--no-experimental-webstorage` (and `vitest.jsdomStorage.ts` covers a bare `vitest run`) — else Node's experimental `localStorage` shadows jsdom's store and persistence tests go quiet-green; `src/lib/drawings.ts` reaches `window.localStorage` explicitly for the same reason. Don't drop either.
 
 ## Ports
-`vite.config.ts` resolves: `DORO_WEB_PORT` → `SKETCHBOOK_PORT` → `DORO_DEV_PORT_BASE + 1` → `5199`. First entry load-bearing: a frontend MUST bind `DORO_WEB_PORT` or its preview URL is classified backend and never routes. **Never bind `DORO_SERVICE_SKETCHBOOK_PORT`** (the backend port — binding it once read as "forbidden" preview). `allowedHosts: [".ts.net"]`. Overlay injected by the preview proxy, no wiring.
+`vite.config.ts` resolves: `DORO_WEB_PORT` → `SKETCHBOOK_PORT` → `DORO_DEV_PORT_BASE + 1` → `5199`. First entry load-bearing: a frontend MUST bind `DORO_WEB_PORT` or its preview URL is classified backend and never routes. **Never bind `DORO_SERVICE_SKETCHBOOK_PORT`** (the backend port — binding it once read as "forbidden" preview). `allowedHosts: [".ts.net"]`. The `DORO_*` names come from the Dorodango harness that develops this repo; standalone, `pnpm dev` binds 5199.
 
 ## Structure
 `src/App.tsx` (shell: list, active drawing, rename, library, toasts, `DrawEditor` mount) · `src/lib/drawings.ts` (pure list ops + storage I/O, key `sketchbook:drawings`) · `src/lib/library.ts` (element library, **shared across drawings**, key `sketchbook:library`) · `src/ExportCluster.tsx` (toolbar exports via `toolbarExtra`).
@@ -25,4 +25,4 @@ Rich PNG/SVG embed the full doc (`boardFile.ts`/`pngMeta.ts`) — a rich PNG re-
 - `src/lib/drawings.test.ts` — pure ops + storage round-trip. `src/sketchbook.browser.test.ts` — the Playwright suite (bulk of real coverage; own vite server on pid-derived port, isolated cache dir, no watch): SVG-export styles, z-order paint law, text kerning/wrap parity (ASCII + Cyrillic), glue previews, bond-aware text growth, rich-PNG round-trip. `vitest.config.ts` excludes `*.browser.test.ts` — Playwright owns them.
 - Storage keys are unscoped — two instances on one origin share them.
 - Hover thumbnails: `renderDocThumbnail` into a fixed-position popover (fixed = escapes the sidebar's scroll clip).
-- `watchWorkspacePackages()` (root `vite.watchPackages.ts`) in plugins — `draw-board` is out-of-root source and lands replace files wholesale; per-file watches go deaf, dir-level keeps HMR alive.
+- `watchWorkspacePackages()` (`vite.watchPackages.ts`) in plugins — `markup-board` is out-of-root source and git replaces files wholesale; per-file watches go deaf, dir-level keeps HMR alive.

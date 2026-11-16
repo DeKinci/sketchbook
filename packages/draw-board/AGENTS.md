@@ -1,18 +1,18 @@
 # Draw board (`markup-board`)
 
-Pure-reducer shape doc + pan/zoom camera + Konva/`react-konva` rendering; self-contained. Hosts: `apps/web` + `apps/sketchbook`.
+Pure-reducer shape doc + pan/zoom camera + Konva/`react-konva` rendering; self-contained. Hosts: `apps/sketchbook` (this repo, source) + Dorodango's web app and any npm consumer (the published package).
 
-**No build step**: `exports` `.` → `src/index.ts`, `./theme` → `src/theme.ts` (consumers resolve to source). Peers: `konva >=10`, `react`/`react-dom` `>=18`, `react-konva >=18`, `lucide-react >=1` — the host owns versions.
+**Two shapes, one package.** In this repo `exports` `.`/`./theme`/`./keymap` → `src/*.ts` (the workspace app consumes source, no build). Published: `publishConfig.exports` → `dist/*.js` + `.d.ts` (`tsc -p tsconfig.build.json`, per-module ESM; only pnpm's pack applies `publishConfig`, so never `npm pack`/`npm publish` the directory — `scripts/publish.mjs` packs with pnpm). A new subpath goes in BOTH maps and in `scripts/check-pack.mjs`. Peers: `konva >=10`, `react`/`react-dom` `>=18`, `react-konva >=18`, `lucide-react >=1` — the host owns versions.
 
 ## Commands
-`pnpm --filter markup-board typecheck` · `test` (vitest; 15 `*.test.ts`) · `coverage`
+`pnpm --filter markup-board typecheck` · `test` (vitest; 15 `*.test.ts`) · `coverage` · `build` (→ `dist/`). Release: root `node scripts/check-pack.mjs`; version bumps via Changesets (`.changeset/README.md`).
 
-`vitest.config.ts`: `environment: "node"`, `pool: "forks"`/`singleFork` — **deliberate, don't "upgrade"** (restricted-CPU sandboxes: tinypool `minThreads` > `maxThreads` kills runs). Pure core only; component behavior: `apps/web/src/components/drawViewport.browser.test.ts` + `apps/sketchbook/src/sketchbook.browser.test.ts`.
+`vitest.config.ts`: `environment: "node"`, `pool: "forks"`/`singleFork` — **deliberate, don't "upgrade"** (restricted-CPU sandboxes: tinypool `minThreads` > `maxThreads` kills runs). Pure core only; component behavior: `apps/sketchbook/src/sketchbook.browser.test.ts` (and Dorodango's `drawViewport.browser.test.ts`, out of repo).
 
 ## Injected services (props, never imports)
 `onNotify` (host toast), `imageToData` (file→raster; may refuse via `onNotify`), `features` (`DrawFeatures`, **frozen at mount**), `library`, `session`/`onSessionChange`, `doc`/`onChange` — the host owns persistence, the board holds none.
 
-Theme: `boardColors` (`ink`/`accent`) from `markup-board/theme`; hosts MUST extend Tailwind with them AND add `../../packages/draw-board/src/**/*.{ts,tsx}` to `content` globs — else unstyled.
+Theme: `boardColors` (`ink`/`accent`) from `markup-board/theme`; hosts MUST extend Tailwind with them AND scan the board's files in `content` (`packages/draw-board/src/**/*.{ts,tsx}` in-repo; `node_modules/markup-board/dist/**/*.js` for npm consumers — README) — else unstyled.
 
 ## State
 `drawModel.ts` = the domain: `BoxShape` (rect/ellipse/diamond), `SegmentShape` (line/arrow), `FreehandShape`, `TextShape`, `ImageShape`; `DrawDoc` (`shapes`, `width`, `height`, optional raster `background`); `drawReducer` pure + deterministic, `past`/`future` undo in `DrawState`, ~45 action kinds. `useDrawing.ts` = thin `useReducer` wrapper.
@@ -23,7 +23,7 @@ Grouping — **read `docs/groups-design.md` first.** No group objects; shapes ca
 `viewport.ts` = pure math over `Viewport {x, y, scale}` (`screen = logical*scale + offset`): `screenToLogical`/`logicalToScreen`, `zoomAt`, `panBy`, `fitScale`, `visibleLogicalRect`, `clampBounded`; scale `[0.02, 40]`; policies `infinite` / `bounded` (doc box) / `fixed` (no gestures, fit). `spatialIndex.ts` = bbox index (marquee/attach/hit-tests); `snapGuides.ts` = guides.
 
 ## Keys live on the board's focused root — LAW
-`DrawEditor.tsx` root `<div ref={rootRef} tabIndex={0} onKeyDown onKeyUp>` — key AND paste handlers there, never on `window` or the host hotkey manager. Pointer-down inside or opening the editor claims focus (Konva canvas isn't focusable). Carve-outs (live-popover dismissal ONLY; don't grow): `DrawToolbar.tsx` capture `document` `pointerdown`/`keydown` while a strip is open; `LibraryPanel.tsx` capture `window` `keydown` while open; both unregister on close. New shortcuts: root `onKeyDown` + `DRAW_KEYMAP` (`keymap.ts` = docs, not dispatcher — `apps/web`'s `HotkeyList` renders it; binding = `DrawEditor.tsx` `onKeyDown`, kept in step by hand; `` ` `` matches `e.code` not `e.key` — macOS dead keys).
+`DrawEditor.tsx` root `<div ref={rootRef} tabIndex={0} onKeyDown onKeyUp>` — key AND paste handlers there, never on `window` or the host hotkey manager. Pointer-down inside or opening the editor claims focus (Konva canvas isn't focusable). Carve-outs (live-popover dismissal ONLY; don't grow): `DrawToolbar.tsx` capture `document` `pointerdown`/`keydown` while a strip is open; `LibraryPanel.tsx` capture `window` `keydown` while open; both unregister on close. New shortcuts: root `onKeyDown` + `DRAW_KEYMAP` (`keymap.ts` = docs, not dispatcher — a host's shortcut help renders it (Dorodango's `HotkeyList`); binding = `DrawEditor.tsx` `onKeyDown`, kept in step by hand; `` ` `` matches `e.code` not `e.key` — macOS dead keys).
 
 ## Gestures must be able to end off-stage
 Konva binds DOM listeners on `Stage.content` (`_bindContentEvents`) ⇒ the stage never hears an off-stage ending (off-stage release left gestures live/resuming; `touchcancel` — never followed by `touchend` — left `pinchRef` set, board dead till remount). `DrawCanvas.tsx` registers `mouseup`/`pointercancel`/`touchcancel` on `window` for the canvas lifetime; all — plus unmount — funnel through `settleGesture()`.
@@ -31,7 +31,7 @@ Konva binds DOM listeners on `Stage.content` (`_bindContentEvents`) ⇒ the stag
 - **Bubble, not capture** — the real target handles first; the canvas only cleans up.
 - **`mouseup`, never `pointerup`** — `pointerup` fires first, committing the drag before the panel's `onMouseUp` cancels; touch needs no `up` listener (`touchend` delivers to the start element).
 
-Listeners never `preventDefault`/`stopPropagation`, no-op unless this board's gesture is live, removed on unmount (finisher runs once more). Pinned: 4 tests in `apps/web/src/components/drawViewport.browser.test.ts` (re-entry with button held — the `buttons === 0` backstop in `onStageMove` can't save — + `touchcancel` mid-pinch).
+Listeners never `preventDefault`/`stopPropagation`, no-op unless this board's gesture is live, removed on unmount (finisher runs once more). Pinned: 4 tests in Dorodango's `apps/web/src/components/drawViewport.browser.test.ts` (out of repo) (re-entry with button held — the `buttons === 0` backstop in `onStageMove` can't save — + `touchcancel` mid-pinch).
 
 **Fourth path — unmount mid-gesture — no seam; review-held (measured, `mto6ry4x`).** `DrawEditor.tsx:1555` gates `<DrawCanvas>` on `avail && view && fontReady`; none goes falsy once true (collapsed container ⇒ truthy `{w:0,h:0}`) ⇒ never unmounts; a test seam = the encapsulation hole this package avoids. The `useEffect` cleanup (`endOutsideRef.current()` + `camBusyRef.current = false`) is the same settle teardown; only review catches a refactor dropping it.
 
@@ -41,5 +41,5 @@ Listeners never `preventDefault`/`stopPropagation`, no-op unless this board's ge
 
 ## Gotchas
 - **The reducer stays pure** — a stray `Date.now()`/`crypto` in a handler breaks determinism; `newShapeId()` (`crypto.randomUUID`) is called by CALLERS.
-- `private: true`, workspace-internal, unpublished.
-- Exported types ripple into both hosts (source imports) — `pnpm -r typecheck`.
+- **Public npm package** (`markup-board`, MIT): an exported-API change is a semver change — add a changeset and bump in the same commit.
+- Exported types ripple into `apps/sketchbook` (source imports) — `pnpm -r typecheck`.
