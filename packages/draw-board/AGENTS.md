@@ -1,18 +1,18 @@
-# Draw board (`@dorodango/draw-board`)
+# Draw board (`markup-board`)
 
 Pure-reducer shape doc + pan/zoom camera + Konva/`react-konva` rendering; self-contained. Hosts: `apps/web` + `apps/sketchbook`.
 
 **No build step**: `exports` `.` → `src/index.ts`, `./theme` → `src/theme.ts` (consumers resolve to source). Peers: `konva >=10`, `react`/`react-dom` `>=18`, `react-konva >=18`, `lucide-react >=1` — the host owns versions.
 
 ## Commands
-`pnpm --filter @dorodango/draw-board typecheck` · `test` (vitest; 15 `*.test.ts`) · `coverage`
+`pnpm --filter markup-board typecheck` · `test` (vitest; 15 `*.test.ts`) · `coverage`
 
 `vitest.config.ts`: `environment: "node"`, `pool: "forks"`/`singleFork` — **deliberate, don't "upgrade"** (restricted-CPU sandboxes: tinypool `minThreads` > `maxThreads` kills runs). Pure core only; component behavior: `apps/web/src/components/drawViewport.browser.test.ts` + `apps/sketchbook/src/sketchbook.browser.test.ts`.
 
 ## Injected services (props, never imports)
 `onNotify` (host toast), `imageToData` (file→raster; may refuse via `onNotify`), `features` (`DrawFeatures`, **frozen at mount**), `library`, `session`/`onSessionChange`, `doc`/`onChange` — the host owns persistence, the board holds none.
 
-Theme: `boardColors` (`ink`/`accent`) from `@dorodango/draw-board/theme`; hosts MUST extend Tailwind with them AND add `../../packages/draw-board/src/**/*.{ts,tsx}` to `content` globs — else unstyled.
+Theme: `boardColors` (`ink`/`accent`) from `markup-board/theme`; hosts MUST extend Tailwind with them AND add `../../packages/draw-board/src/**/*.{ts,tsx}` to `content` globs — else unstyled.
 
 ## State
 `drawModel.ts` = the domain: `BoxShape` (rect/ellipse/diamond), `SegmentShape` (line/arrow), `FreehandShape`, `TextShape`, `ImageShape`; `DrawDoc` (`shapes`, `width`, `height`, optional raster `background`); `drawReducer` pure + deterministic, `past`/`future` undo in `DrawState`, ~45 action kinds. `useDrawing.ts` = thin `useReducer` wrapper.

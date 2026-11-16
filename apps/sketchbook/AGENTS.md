@@ -1,9 +1,9 @@
-# Sketchbook (`@dorodango/sketchbook`)
+# Sketchbook (`sketchbook`)
 
-Standalone drawings app: sidebar of named boards, each embedding `@dorodango/draw-board`. **No server, no API, no auth** — `localStorage` only. Exists as a scratch surface AND as the honest host-agnosticism test for `draw-board`.
+Standalone drawings app: sidebar of named boards, each embedding `markup-board`. **No server, no API, no auth** — `localStorage` only. Exists as a scratch surface AND as the honest host-agnosticism test for `draw-board`.
 
 ## Commands
-`pnpm --filter @dorodango/sketchbook dev` · `build` · `preview` · `typecheck` · `test` (vitest, jsdom) · **`test:browser`** (Playwright; the second half of root `pnpm test:browser`).
+`pnpm --filter sketchbook dev` · `build` · `preview` · `typecheck` · `test` (vitest, jsdom) · **`test:browser`** (Playwright; the second half of root `pnpm test:browser`).
 
 Both test scripts pass `NODE_OPTIONS=--no-experimental-webstorage` — else Node's experimental `localStorage` shadows jsdom's store and persistence tests go quiet-green; `src/lib/drawings.ts` reaches `window.localStorage` explicitly for the same reason. Don't drop either.
 

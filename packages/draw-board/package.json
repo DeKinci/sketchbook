@@ -1,7 +1,27 @@
 {
-  "name": "@dorodango/draw-board",
+  "name": "markup-board",
   "version": "0.1.0",
-  "private": true,
+  "description": "A React + Konva drawing and annotation board: freehand, shapes, text, images, groups, pan/zoom, PNG/SVG export with embedded editable source.",
+  "license": "MIT",
+  "author": "Nick Marso",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DeKinci/sketchbook.git",
+    "directory": "packages/draw-board"
+  },
+  "homepage": "https://github.com/DeKinci/sketchbook/tree/develop/packages/draw-board#readme",
+  "bugs": {
+    "url": "https://github.com/DeKinci/sketchbook/issues"
+  },
+  "keywords": [
+    "react",
+    "konva",
+    "drawing",
+    "whiteboard",
+    "annotation",
+    "canvas",
+    "sketch"
+  ],
   "type": "module",
   "exports": {
     ".": {
@@ -17,10 +37,33 @@
       "default": "./src/keymap.ts"
     }
   },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "./theme": {
+        "types": "./dist/theme.d.ts",
+        "default": "./dist/theme.js"
+      },
+      "./keymap": {
+        "types": "./dist/keymap.d.ts",
+        "default": "./dist/keymap.js"
+      },
+      "./package.json": "./package.json"
+    }
+  },
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "coverage": "vitest run --coverage"
+    "coverage": "vitest run --coverage",
+    "prepack": "pnpm build"
   },
   "peerDependencies": {
     "konva": ">=10",

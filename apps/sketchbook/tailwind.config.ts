@@ -1,5 +1,5 @@
 import type { Config } from "tailwindcss";
-import { boardColors } from "@dorodango/draw-board/theme";
+import { boardColors } from "markup-board/theme";
 
 export default {
   // The board's components reference ink/accent utilities — its src must be in

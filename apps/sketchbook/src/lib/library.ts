@@ -4,7 +4,7 @@
  * its own localStorage key beside the drawings. The panel's open/closed state
  * rides along so the sidebar stays put across page switches and reloads.
  */
-import type { LibraryEntry } from "@dorodango/draw-board";
+import type { LibraryEntry } from "markup-board";
 
 export interface LibraryState {
   open: boolean;

@@ -1,5 +1,5 @@
 /**
- * @dorodango/draw-board — the standalone drawing/annotation board.
+ * markup-board — the standalone drawing/annotation board.
  *
  * A self-contained React component set: an infinite-canvas (or bounded/fixed)
  * pan-zoom drawing surface over Konva, with a pure reducer model, PNG export,

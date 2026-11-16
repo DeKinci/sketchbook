@@ -1,5 +1,5 @@
 {
-  "name": "@dorodango/sketchbook",
+  "name": "sketchbook",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,14 +12,16 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@dorodango/draw-board": "workspace:*",
     "konva": "^10.3.0",
     "lucide-react": "^1.17.0",
+    "markup-board": "workspace:*",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-konva": "^19.2.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^22.20.5",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.3.4",

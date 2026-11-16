@@ -1,0 +1,7 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+# Build-script allowlist: a clean pnpm (CI, Docker) errors with ERR_PNPM_IGNORED_BUILDS
+# on any dependency install script not decided here.
+allowBuilds:
+  esbuild: true

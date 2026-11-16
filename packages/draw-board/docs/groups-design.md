@@ -2,7 +2,7 @@
 
 Status: two hostile review rounds folded in (26 + 17 findings); round 2 verdict:
 architecture sound, remaining items were spec pins — all pinned below. Scope:
-`@dorodango/draw-board` model + editor semantics. Perf follow-up (group-as-
+`markup-board` model + editor semantics. Perf follow-up (group-as-
 render-cache) is out of scope for v1.
 
 ## Rules (product)

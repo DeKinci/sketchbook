@@ -14,13 +14,13 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import fs from "node:fs";
-import { readBoardDocFromPngBytes, readSvgDoc } from "@dorodango/draw-board";
+import { readBoardDocFromPngBytes, readSvgDoc } from "markup-board";
 import { createServer, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "tailwindcss";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { boardColors } from "@dorodango/draw-board/theme";
+import { boardColors } from "markup-board/theme";
 
 const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PKG_SRC = path.resolve(APP_ROOT, "../../packages/draw-board/src");

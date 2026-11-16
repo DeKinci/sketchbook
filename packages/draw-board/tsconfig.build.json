@@ -1,0 +1,16 @@
+{
+  // Emits the published package: per-module ESM + .d.ts into dist/. The repo itself
+  // consumes src/ through package.json `exports`; `publishConfig.exports` swaps in
+  // dist/ on pack/publish.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": true,
+    "sourceMap": false,
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}

@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { watchWorkspacePackages } from "../../vite.watchPackages.ts";
+import { watchWorkspacePackages } from "./vite.watchPackages.ts";
 
 // Port precedence: the injected web port (Dorodango guesses a run's preview URL on
 // DORO_WEB_PORT — a frontend dev server MUST bind it or its URL is treated as an
@@ -17,7 +17,7 @@ const port = Number(
 );
 
 export default defineConfig({
-  // watchWorkspacePackages: `@dorodango/draw-board` is imported as out-of-root source,
+  // watchWorkspacePackages: `markup-board` is imported as out-of-root source,
   // which vite watches per-file — a mode chokidar 4 permanently loses on git file
   // replaces (every Dorodango land). Dir-level coverage keeps HMR alive; see the plugin.
   plugins: [react(), watchWorkspacePackages()],

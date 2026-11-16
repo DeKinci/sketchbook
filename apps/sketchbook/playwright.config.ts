@@ -1,5 +1,5 @@
 import { defineConfig } from "@playwright/test";
-import { workerCap } from "../../playwright.workers.ts";
+import { workerCap } from "./playwright.workers.ts";
 
 // The mirror of vitest.config's exclude: Playwright owns ONLY *.browser.test.ts,
 // so a bare `playwright test` never sweeps vitest unit files into its runner

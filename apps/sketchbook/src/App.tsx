@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Plus } from "lucide-react";
-import { DrawEditor, isLibraryFileName, mergeLibrary, parseBoardFile, parseLibraryFile, renderDocThumbnail, type BoardHandle, type DrawDoc, type DrawFeatures } from "@dorodango/draw-board";
+import { DrawEditor, isLibraryFileName, mergeLibrary, parseBoardFile, parseLibraryFile, renderDocThumbnail, type BoardHandle, type DrawDoc, type DrawFeatures } from "markup-board";
 import { ExportCluster } from "./ExportCluster.tsx";
 import {
   createDrawing,
