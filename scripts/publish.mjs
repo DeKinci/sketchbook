@@ -16,18 +16,26 @@ const PKG_DIR = "packages/draw-board";
 const { name, version } = JSON.parse(readFileSync(path.join(PKG_DIR, "package.json"), "utf8"));
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: "inherit", ...opts });
 
-function published() {
+/** `npm view <spec> version` → the version string, or null on E404 (does not exist). */
+function view(spec) {
   try {
-    const out = execFileSync("npm", ["view", `${name}@${version}`, "version"], { encoding: "utf8" });
-    return out.trim() === version;
+    return execFileSync("npm", ["view", spec, "version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim() || null;
   } catch (err) {
-    // E404: the package (or this version) does not exist yet. Anything else is a real error.
-    if (String(err.stderr ?? "").includes("E404")) return false;
-    throw err;
+    if (String(err.stderr ?? "").includes("E404")) return null;
+    throw err; // anything but "not found" is a real error
   }
 }
 
-if (published()) {
+const dryRun = process.argv.includes("--dry-run");
+
+// npm only lets a trusted publisher be configured on a package that already exists, so
+// CI cannot make the very first publish — that one is manual (.changeset/README.md § The first publish).
+// Skip loudly rather than fail on an auth error nobody can fix from CI.
+if (!dryRun && view(name) === null) {
+  console.log(`::warning::${name} is not on npm yet — the first publish is manual (see .changeset/README.md). Skipping.`);
+  process.exit(0);
+}
+if (view(`${name}@${version}`) === version) {
   console.log(`${name}@${version} is already on npm — nothing to publish.`);
   process.exit(0);
 }
@@ -37,7 +45,6 @@ run("pnpm", ["pack", "--pack-destination", out], { cwd: PKG_DIR });
 const tgz = readdirSync(out).find((f) => f.endsWith(".tgz"));
 if (!tgz) throw new Error(`pnpm pack produced no tarball in ${out}`);
 
-const dryRun = process.argv.includes("--dry-run");
 run("npm", ["publish", path.join(out, tgz), "--access", "public", ...(dryRun ? ["--dry-run"] : ["--provenance"])]);
 if (dryRun) process.exit(0);
 
