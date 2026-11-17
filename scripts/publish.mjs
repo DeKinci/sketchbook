@@ -6,9 +6,10 @@
 // applies `publishConfig.exports` (src/ → dist/), so pnpm packs and npm publishes the
 // tarball. Changesets still owns the version bump (see .changeset/README.md).
 //
-// It also makes sure the release tag `markup-board@<version>` exists on origin — checked
-// separately from npm, so a run whose publish succeeded but whose tag push failed is
-// repaired by the next run instead of leaving the version untagged forever.
+// After a publish it tags HEAD (the commit just published) `markup-board@<version>` and
+// pushes the tag. A version already on npm is never tagged here — HEAD may be a later
+// commit than the one that shipped — but a missing tag is reported as a warning so a
+// failed tag push can't go unnoticed (tag the published commit by hand).
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,14 +32,8 @@ function view(spec) {
 const dryRun = process.argv.includes("--dry-run");
 const tag = `${name}@${version}`;
 
-/** Create and push `tag` at HEAD unless origin already has it. */
-function ensureTag() {
-  const remote = execFileSync("git", ["ls-remote", "--tags", "origin", `refs/tags/${tag}`], { encoding: "utf8" }).trim();
-  if (remote) return;
-  const local = execFileSync("git", ["tag", "--list", tag], { encoding: "utf8" }).trim();
-  if (!local) run("git", ["tag", tag]);
-  run("git", ["push", "origin", `refs/tags/${tag}`]);
-}
+const tagOnOrigin = () =>
+  execFileSync("git", ["ls-remote", "--tags", "origin", `refs/tags/${tag}`], { encoding: "utf8" }).trim() !== "";
 
 // npm only lets a trusted publisher be configured on a package that already exists, so
 // CI cannot make the very first publish — that one was manual (.changeset/README.md § Trusted publishing).
@@ -49,7 +44,9 @@ if (!dryRun && view(name) === null) {
 }
 if (view(tag) === version) {
   console.log(`${tag} is already on npm — nothing to publish.`);
-  if (!dryRun) ensureTag();
+  if (!dryRun && !tagOnOrigin()) {
+    console.log(`::warning::${tag} is published but origin has no tag ${tag} — tag the published commit by hand.`);
+  }
   process.exit(0);
 }
 
@@ -61,5 +58,6 @@ if (!tgz) throw new Error(`pnpm pack produced no tarball in ${out}`);
 run("npm", ["publish", path.join(out, tgz), "--access", "public", ...(dryRun ? ["--dry-run"] : ["--provenance"])]);
 if (dryRun) process.exit(0);
 
-ensureTag();
+run("git", ["tag", tag]);
+run("git", ["push", "origin", `refs/tags/${tag}`]);
 console.log(`Published ${tag}.`);
