@@ -1,6 +1,6 @@
 {
   "name": "markup-board",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A React + Konva drawing and annotation board: freehand, shapes, text, images, groups, pan/zoom, PNG/SVG export with embedded editable source.",
   "license": "MIT",
   "author": "Nick Marso",

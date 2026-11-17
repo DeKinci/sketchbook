@@ -2400,6 +2400,10 @@ export type DrawAction =
   | { type: "cancelDraw" }
   | { type: "beginGesture" }
   | { type: "patchShape"; id: string; patch: Partial<Shape> }
+  /** Move ONE end of a line/arrow to a point and rebind that end to whatever
+   *  area shape it now sits on (unbound in empty space). History-neutral — the
+   *  handle drag wraps it in beginGesture/endGesture (one undo step). */
+  | { type: "moveEndpoint"; id: string; end: "start" | "end"; x: number; y: number; distScale?: number }
   // Bake a Transformer resize into geometry: apply `patch` to the resized shape,
   // then drag its direction-agnostic neighbors (§2.5) and refresh its own anchor.
   // History-NEUTRAL — the surrounding gesture's endGesture owns the single push.
@@ -3364,6 +3368,25 @@ export function drawReducer(s: DrawState, a: DrawAction): DrawState {
       return { ...s, gestureBase: s.shapes };
     case "patchShape":
       return { ...s, shapes: reflowAll(mapShapes(s.shapes, new Set([a.id]), (sh) => ({ ...sh, ...a.patch } as Shape)), new Set()) };
+    case "moveEndpoint": {
+      const sh = s.shapes.find((o) => o.id === a.id);
+      if (!sh || (sh.type !== "line" && sh.type !== "arrow")) return s;
+      const start = a.end === "start";
+      const points = [...sh.points] as [number, number, number, number];
+      const i = start ? 0 : 2;
+      points[i] = a.x;
+      points[i + 1] = a.y;
+      // Capture the bind against the SAME reference reflowBindings re-clings from
+      // (the other end's bound shape center, else the other point) so the end
+      // stays exactly under the pointer — and a new bind replaces the old one, so
+      // a bound end dragged off its shape never snaps back.
+      const otherBind = start ? sh.bindEnd : sh.bindStart;
+      const otherShape = otherBind && s.shapes.find((o) => o.id === otherBind.id);
+      const ref = otherShape ? shapeCenter(otherShape) : { x: points[2 - i], y: points[3 - i] };
+      const bind = bindAt({ x: a.x, y: a.y }, ref, s.shapes, sh.id, BIND_DISTANCE * (a.distScale ?? 1));
+      const next = { ...sh, points, ...(start ? { bindStart: bind } : { bindEnd: bind }) } as Shape;
+      return { ...s, shapes: reflowAll(mapShapes(s.shapes, new Set([a.id]), () => next), new Set()) };
+    }
     case "translateShapes": {
       // Group guard: a partial-unit id set EXPANDS to full units — members are
       // never translated individually (never partial-translate, never drop).

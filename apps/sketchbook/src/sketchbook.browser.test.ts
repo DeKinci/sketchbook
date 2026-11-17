@@ -546,6 +546,57 @@ test("glue preview is bond-specific: the pinned edge lights up, an ellipse arcs,
   }).toBe(0);
 });
 
+test("a selected arrow's endpoint handles re-aim one end and rebind it (glow while dragging, one undo step); the body still moves whole", async ({ page }) => {
+  await openSeeded(page, [
+    rect("B", 400, 100, 120, 80),
+    { id: "L", type: "arrow", stroke: "#e5484d", strokeWidth: 3, points: [250, 300, 450, 300] },
+  ]);
+  const box = (await page.locator(".konvajs-content").boundingBox())!;
+  const cam = await page.evaluate(() => {
+    const s = (window as unknown as { Konva: { stages: { x(): number; y(): number; scaleX(): number }[] } }).Konva.stages.at(-1)!;
+    return { x: s.x(), y: s.y(), scale: s.scaleX() };
+  });
+  const toScreen = (pt: { x: number; y: number }) => ({ x: box.x + cam.x + pt.x * cam.scale, y: box.y + cam.y + pt.y * cam.scale });
+  const drag = async (from: { x: number; y: number }, to: { x: number; y: number }) => {
+    const a = toScreen(from);
+    const b = toScreen(to);
+    await page.mouse.move(a.x, a.y);
+    await page.mouse.down();
+    await page.mouse.move(b.x, b.y, { steps: 5 });
+  };
+  const count = (sel: string) =>
+    page.evaluate((q) => (window as unknown as { Konva: { stages: { find(sel: string): unknown[] }[] } }).Konva.stages.at(-1)!.find(q).length, sel);
+  type Seg = { id: string; points: number[]; bindEnd?: { id: string } };
+  const arrowStored = async () => ((await stored(page))[0].doc.shapes as Seg[]).find((sh) => sh.id === "L")!;
+
+  // Selecting the arrow shows a handle at each end.
+  const mid = toScreen({ x: 350, y: 300 });
+  await page.mouse.click(mid.x, mid.y);
+  await expect.poll(() => count(".endpoint-start")).toBe(1);
+  expect(await count(".endpoint-end")).toBe(1);
+
+  // Dragging the BODY still moves the whole arrow.
+  await drag({ x: 350, y: 300 }, { x: 350, y: 340 });
+  await page.mouse.up();
+  await expect.poll(async () => (await arrowStored()).points.map(Math.round)).toEqual([250, 340, 450, 340]);
+
+  // Dragging the END handle into B: B glows while dragging, the end binds on
+  // release, and the start never moves.
+  await drag({ x: 450, y: 340 }, { x: 460, y: 140 });
+  await expect.poll(() => count(".glue-body")).toBe(1);
+  await page.mouse.up();
+  await expect.poll(async () => (await arrowStored()).bindEnd?.id).toBe("B");
+  const moved = (await arrowStored()).points;
+  expect(moved.slice(0, 2).map(Math.round)).toEqual([250, 340]);
+  expect(Math.abs(moved[2] - 460)).toBeLessThanOrEqual(2);
+  expect(Math.abs(moved[3] - 140)).toBeLessThanOrEqual(2);
+
+  // One undo restores the pre-drag end (one drag = one step), unbound.
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await arrowStored()).points.map(Math.round)).toEqual([250, 340, 450, 340]);
+  expect((await arrowStored()).bindEnd).toBeUndefined();
+});
+
 test("dblclick on a shape spawns a FREE caption inside it — or engages the existing one, never a duplicate", async ({ page }) => {
   await openSeeded(page, [rect("R", 100, 100, 200, 120)]);
   const box = (await page.locator(".konvajs-content").boundingBox())!;

@@ -79,7 +79,8 @@ function imageSrc(sh: ImageShape): string {
 }
 
 /** Shapes whose scale can be baked into geometry (the Transformer attaches to a
- *  lone one of these). Lines/pen strokes are move-only in v1. */
+ *  lone one of these). Lines/arrows get per-endpoint handles instead (the
+ *  endpoint overlay); pen strokes are move-only. */
 const RESIZABLE = new Set(["rect", "ellipse", "diamond", "text", "image"]);
 /** Node id of the synthetic proxy rect the Transformer scales a whole GROUP
  *  through (members' own nodes never get handles). Reserved — never a shape id. */
@@ -248,6 +249,8 @@ export function DrawCanvas({
     targets: Box[];
     applied: { dx: number; dy: number };
   } | null>(null);
+  // The line/arrow endpoint being dragged by its handle (drives the bind glow).
+  const endpointDragRef = useRef<{ id: string; end: "start" | "end" } | null>(null);
   // Snap candidates for the in-flight RESIZE (the box of every non-resized unit),
   // captured at transform start and read by the Transformer's boundBoxFunc.
   const resizeTargetsRef = useRef<Box[] | null>(null);
@@ -599,6 +602,12 @@ export function DrawCanvas({
   // handles (members can't be individually resized; the group scales whole).
   const soleSel = selectedIds.length === 1 ? shapes.find((s) => s.id === selectedIds[0]) : undefined;
   const soleResizable = !!soleSel && RESIZABLE.has(soleSel.type) && !soleSel.groupPath;
+  // A lone UNGROUPED line/arrow gets a round handle at each end (the endpoint
+  // overlay) instead of a dashed bounding box.
+  const soleSegment =
+    tool === "select" && soleSel && (soleSel.type === "line" || soleSel.type === "arrow") && !soleSel.groupPath && soleSel.id !== editingId && !state.editingPathId && !state.draftId
+      ? soleSel
+      : null;
 
   // The selection is EXACTLY one multi-member group unit → the Transformer
   // attaches to a synthetic proxy rect over the unit bounds (keepRatio forced,
@@ -1390,6 +1399,14 @@ export function DrawCanvas({
     }
     if (best) bindHighlights.set(best.id, best.glow);
   }
+  // While an endpoint handle is dragged, glow the shape that end is bound to
+  // (moveEndpoint rebinds live, so the glow is exactly the drop's bind).
+  if (endpointDragRef.current) {
+    const { id, end } = endpointDragRef.current;
+    const sh = shapes.find((s) => s.id === id);
+    const b = sh && (sh.type === "line" || sh.type === "arrow") ? (end === "start" ? sh.bindStart : sh.bindEnd) : undefined;
+    if (b) bindHighlights.set(b.id, { kind: "body" });
+  }
 
   const cursor = panActive
     ? "grabbing"
@@ -1868,6 +1885,7 @@ export function DrawCanvas({
             subset gets its own outline plus a SUBDUED unit outline for context. */}
         {!soleResizable &&
           !soleUnitKey &&
+          !soleSegment &&
           (() => {
             const byUnit = new Map<string, string[]>();
             for (const id of selectedIds) {
@@ -2090,6 +2108,63 @@ export function DrawCanvas({
                     }}
                   />
                 ))}
+              </Group>
+            );
+          })()}
+
+        {/* Endpoint overlay: a lone ungrouped line/arrow gets a round handle at
+            each end. Dragging one moves only that end and rebinds it to the shape
+            it's dropped on (one gesture = one undo step); the body still drags
+            the whole connector. Handles stop propagation like the point-edit ones. */}
+        {soleSegment &&
+          (() => {
+            const seg = soleSegment;
+            const handle = (end: "start" | "end") => {
+              const i = end === "start" ? 0 : 2;
+              return (
+                <Circle
+                  key={end}
+                  name={`endpoint-${end}`}
+                  x={seg.points[i]}
+                  y={seg.points[i + 1]}
+                  radius={sPx(5)}
+                  fill="#ffffff"
+                  stroke={SELECT_COLOR}
+                  strokeWidth={sPx(2)}
+                  hitStrokeWidth={sPx(10)}
+                  shadowColor="#000000"
+                  shadowOpacity={0.18}
+                  shadowBlur={sPx(3)}
+                  shadowOffsetY={sPx(1)}
+                  draggable
+                  onMouseDown={(e) => {
+                    e.cancelBubble = true;
+                  }}
+                  onTouchStart={(e) => {
+                    e.cancelBubble = true;
+                  }}
+                  onDragStart={(e) => {
+                    e.cancelBubble = true;
+                    suppressDbl();
+                    endpointDragRef.current = { id: seg.id, end };
+                    dispatch({ type: "beginGesture" });
+                  }}
+                  onDragMove={(e) => {
+                    e.cancelBubble = true;
+                    dispatch({ type: "moveEndpoint", id: seg.id, end, x: e.target.x(), y: e.target.y(), distScale: sPx(1) });
+                  }}
+                  onDragEnd={(e) => {
+                    e.cancelBubble = true;
+                    endpointDragRef.current = null;
+                    dispatch({ type: "endGesture" });
+                  }}
+                />
+              );
+            };
+            return (
+              <Group>
+                {handle("start")}
+                {handle("end")}
               </Group>
             );
           })()}

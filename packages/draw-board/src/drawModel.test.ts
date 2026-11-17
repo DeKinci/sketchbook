@@ -804,6 +804,36 @@ describe("bindings (arrow/line cling to shapes) + containment", () => {
     expect(seg.points[2]).toBeCloseTo(260);
   });
 
+  it("moveEndpoint re-aims one end: rebinds onto a new shape, unbinds in empty space, one undo step", () => {
+    const r1 = box("r1", { x: 100, y: 100, width: 50, height: 50 });
+    const r2 = box("r2", { x: 400, y: 100, width: 50, height: 50 });
+    const b = bindAt({ x: 160, y: 125 }, { x: 300, y: 125 }, [r1], "a1")!;
+    const a = arrow("a1", [300, 125, 160, 125], { bindEnd: b });
+    const pts = (st: DrawState) => (st.shapes.find((x) => x.id === "a1") as Shape & { points: number[]; bindStart?: { id: string }; bindEnd?: { id: string } });
+    let s = seeded([r1, r2, a]);
+    s = drawReducer(s, { type: "beginGesture" });
+    // Drag the bound END off r1 onto r2 — it binds to r2 and stays under the pointer.
+    s = drawReducer(s, { type: "moveEndpoint", id: "a1", end: "end", x: 420, y: 160 });
+    expect(pts(s).bindEnd?.id).toBe("r2");
+    expect(pts(s).points).toEqual([300, 125, expect.closeTo(420), expect.closeTo(160)]);
+    // …then on into empty space: unbound, and moving r1 never snaps it back.
+    s = drawReducer(s, { type: "moveEndpoint", id: "a1", end: "end", x: 250, y: 300 });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(pts(s).bindEnd).toBeUndefined();
+    s = drawReducer(s, { type: "translateShapes", ids: ["r1"], dx: 5, dy: 0 });
+    expect(pts(s).points).toEqual([300, 125, 250, 300]);
+    // The START end binds onto r1 with the other end untouched.
+    s = drawReducer(s, { type: "beginGesture" });
+    s = drawReducer(s, { type: "moveEndpoint", id: "a1", end: "start", x: 110, y: 110 });
+    s = drawReducer(s, { type: "endGesture" });
+    expect(pts(s).bindStart?.id).toBe("r1");
+    expect(pts(s).points).toEqual([expect.closeTo(110), expect.closeTo(110), 250, 300]);
+    // Each handle drag is one undo step: two undos restore the original binding.
+    s = drawReducer(drawReducer(s, { type: "undo" }), { type: "undo" });
+    expect(pts(s).points).toEqual([300, 125, 160, 125]);
+    expect(pts(s).bindEnd?.id).toBe("r1");
+  });
+
   it("containedIds returns shapes fully inside a container (area shapes only)", () => {
     const big = box("big", { x: 0, y: 0, width: 200, height: 200 });
     const small = box("small", { x: 20, y: 20, width: 30, height: 30 });
