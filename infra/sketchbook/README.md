@@ -42,14 +42,15 @@ domain — and its dev-server `port`/`allowedHosts` block is absent from `vite b
 - A DNS record for `draw.mar.so` pointing at that server (it already resolves through the
   `*.mar.so` wildcard on the current server — setting the Domains field is the whole of
   the DNS work).
-- This repository. It is **public**, so Coolify's *Public Repository* source needs no
-  GitHub App or deploy key. No registry login, no environment variables, no secrets.
+- Coolify's GitHub App with access to this repository (here: `coolify-personal-dekinci`). It
+  delivers push events, so a push to the branch deploys. No registry login, no environment
+  variables, no secrets.
 
 ## Runbook
 
-**1. Create (or repoint) the resource.** In the Coolify project: **+ New** → **Application**
-→ **Public Repository** → `https://github.com/DeKinci/sketchbook`, branch `develop`, with
-the **Dockerfile** build pack:
+**1. Create the resource.** In the Coolify project: **+ New** → **Application** → **Private
+Repository (with GitHub App)** → `DeKinci/sketchbook`, branch `develop`, with the
+**Dockerfile** build pack:
 
 | field | value |
 | --- | --- |
@@ -72,8 +73,10 @@ suffix is needed.
 **4. Deploy.** A root `pnpm install` plus a vite build — a couple of minutes cold. Then run
 § Verifying against the live domain.
 
-**Branch.** `develop` is this repo's trunk. Coolify only sees what is pushed to GitHub, so a
-deploy reflects the last *push* of `develop`, not the last local commit.
+**Branch and auto-deploy.** `develop` is this repo's trunk. Every push to it deploys: the
+GitHub App delivers the push and the app's *Auto Deploy* is on. A Coolify app's source type
+can't be changed in place (the API refuses `github_app_uuid` on a deploy-key app), so moving
+to another source means creating a new app and moving the domain over.
 
 ## As deployed
 
@@ -82,7 +85,8 @@ deploy reflects the last *push* of `develop`, not the last local commit.
 | Coolify | `https://app.coolify.io` (Coolify Cloud) |
 | server | `hetzner-eu-01` — `s4o00cck4wok4cw8c04gs8os` |
 | project / environment | `SmallThings` / `production` |
-| application uuid | `numsgjfpde754ydg8xa9jr40` |
+| application uuid | `38ombcw5x7cme9er1kjyl95c` |
+| source | GitHub App `coolify-personal-dekinci` → `DeKinci/sketchbook`, branch `develop`, auto-deploy on push |
 
 None of these values is a secret — the API token is, and it never enters git.
 
@@ -91,7 +95,7 @@ None of these values is a secret — the API token is, and it never enters git.
 does nothing.
 
 ```bash
-curl -sX POST "https://app.coolify.io/api/v1/deploy?uuid=numsgjfpde754ydg8xa9jr40" \
+curl -sX POST "https://app.coolify.io/api/v1/deploy?uuid=38ombcw5x7cme9er1kjyl95c" \
   -H "Authorization: Bearer $COOLIFY_TOKEN"
 ```
 
