@@ -45,7 +45,10 @@ if (!dryRun && view(name) === null) {
 if (view(tag) === version) {
   console.log(`${tag} is already on npm — nothing to publish.`);
   if (!dryRun && !tagOnOrigin()) {
-    console.log(`::warning::${tag} is published but origin has no tag ${tag} — tag the published commit by hand.`);
+    console.log(
+      `::warning::${tag} is published but origin has no such tag. Tag the commit it was built from ` +
+        `(its npm provenance names it — npmjs.com → ${name} → Versions → ${version}), never HEAD.`
+    );
   }
   process.exit(0);
 }
