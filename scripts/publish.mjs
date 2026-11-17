@@ -29,7 +29,7 @@ function view(spec) {
 const dryRun = process.argv.includes("--dry-run");
 
 // npm only lets a trusted publisher be configured on a package that already exists, so
-// CI cannot make the very first publish — that one is manual (.changeset/README.md § The first publish).
+// CI cannot make the very first publish — that one was manual (.changeset/README.md § Trusted publishing).
 // Skip loudly rather than fail on an auth error nobody can fix from CI.
 if (!dryRun && view(name) === null) {
   console.log(`::warning::${name} is not on npm yet — the first publish is manual (see .changeset/README.md). Skipping.`);

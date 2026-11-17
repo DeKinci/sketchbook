@@ -14,19 +14,12 @@ git add -A .changeset packages/draw-board && git commit
 CI (`.github/workflows/ci.yml`, job `publish`) publishes any `markup-board` version that
 is not yet on npm, once that commit reaches `develop` on GitHub.
 
-## The first publish (once, by hand)
+## Trusted publishing
 
-npm can only attach a trusted publisher to a package that already exists, so until
-`markup-board` is on npm the CI publish job skips with a warning. The first version is
-published from a maintainer's machine:
-
-```sh
-pnpm install
-cd packages/draw-board
-npm login
-pnpm publish --access public    # pnpm, not npm: only pnpm applies publishConfig (dist exports)
-```
-
-Then on npmjs.com → `markup-board` → **Settings** → **Trusted publishing** → GitHub Actions:
-organization/user `DeKinci`, repository `sketchbook`, workflow filename `ci.yml`, no
-environment. From then on CI publishes every new version, with provenance, and no token.
+`markup-board` 0.1.0 was published by hand (npm can only attach a trusted publisher to a
+package that already exists). Its trusted publisher is GitHub Actions, `DeKinci/sketchbook`,
+workflow `ci.yml`, with publish allowed. So CI's `publish` job publishes every later version,
+with provenance and no token. If that configuration is ever removed, CI fails at
+`npm publish` with an auth error. Re-add it on npmjs.com (`markup-board` → Settings →
+Trusted publishing), or run
+`npm trust github markup-board --file ci.yml --repository DeKinci/sketchbook --allow-publish`.
