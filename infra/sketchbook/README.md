@@ -12,7 +12,7 @@ reconstructing it from someone's browser history.
 | what runs | nginx serving static files |
 | auth / state / secrets | **none** — sketchbook persists to the visitor's `localStorage` |
 | container port | **`80`** |
-| updating | Redeploy rebuilds from the repo |
+| updating | auto-deploys on every push to `develop` (rebuilds from the repo) |
 
 ## Why the build context is the repo root
 

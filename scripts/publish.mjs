@@ -6,7 +6,9 @@
 // applies `publishConfig.exports` (src/ → dist/), so pnpm packs and npm publishes the
 // tarball. Changesets still owns the version bump (see .changeset/README.md).
 //
-// After publishing it tags the commit `markup-board@<version>` and pushes the tag.
+// It also makes sure the release tag `markup-board@<version>` exists on origin — checked
+// separately from npm, so a run whose publish succeeded but whose tag push failed is
+// repaired by the next run instead of leaving the version untagged forever.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,6 +29,16 @@ function view(spec) {
 }
 
 const dryRun = process.argv.includes("--dry-run");
+const tag = `${name}@${version}`;
+
+/** Create and push `tag` at HEAD unless origin already has it. */
+function ensureTag() {
+  const remote = execFileSync("git", ["ls-remote", "--tags", "origin", `refs/tags/${tag}`], { encoding: "utf8" }).trim();
+  if (remote) return;
+  const local = execFileSync("git", ["tag", "--list", tag], { encoding: "utf8" }).trim();
+  if (!local) run("git", ["tag", tag]);
+  run("git", ["push", "origin", `refs/tags/${tag}`]);
+}
 
 // npm only lets a trusted publisher be configured on a package that already exists, so
 // CI cannot make the very first publish — that one was manual (.changeset/README.md § Trusted publishing).
@@ -35,8 +47,9 @@ if (!dryRun && view(name) === null) {
   console.log(`::warning::${name} is not on npm yet — the first publish is manual (see .changeset/README.md). Skipping.`);
   process.exit(0);
 }
-if (view(`${name}@${version}`) === version) {
-  console.log(`${name}@${version} is already on npm — nothing to publish.`);
+if (view(tag) === version) {
+  console.log(`${tag} is already on npm — nothing to publish.`);
+  if (!dryRun) ensureTag();
   process.exit(0);
 }
 
@@ -48,7 +61,5 @@ if (!tgz) throw new Error(`pnpm pack produced no tarball in ${out}`);
 run("npm", ["publish", path.join(out, tgz), "--access", "public", ...(dryRun ? ["--dry-run"] : ["--provenance"])]);
 if (dryRun) process.exit(0);
 
-const tag = `${name}@${version}`;
-run("git", ["tag", tag]);
-run("git", ["push", "origin", tag]);
+ensureTag();
 console.log(`Published ${tag}.`);

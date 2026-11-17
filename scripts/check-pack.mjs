@@ -9,7 +9,9 @@ import path from "node:path";
 
 const out = mkdtempSync(path.join(tmpdir(), "markup-board-pack-"));
 execFileSync("pnpm", ["pack", "--pack-destination", out], { cwd: "packages/draw-board", stdio: "inherit" });
-const tgz = path.join(out, readdirSync(out).find((f) => f.endsWith(".tgz")));
+const tgzName = readdirSync(out).find((f) => f.endsWith(".tgz"));
+if (!tgzName) throw new Error(`pnpm pack produced no tarball in ${out}`);
+const tgz = path.join(out, tgzName);
 const files = execFileSync("tar", ["tzf", tgz], { encoding: "utf8" }).trim().split("\n").map((f) => f.replace(/^package\//, ""));
 const pkg = JSON.parse(execFileSync("tar", ["xzOf", tgz, "package/package.json"], { encoding: "utf8" }));
 

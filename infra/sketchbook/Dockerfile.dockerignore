@@ -9,6 +9,7 @@
 **/node_modules
 **/dist
 .git
+# Dorodango (the agent harness developing this repo) may keep board state here.
 .doro
 **/.doro
 .changeset

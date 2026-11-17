@@ -22,6 +22,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      # check-pack's `pnpm pack` rebuilds the lib through its `prepack` script — the same
+      # build a publish runs, so the check covers exactly what would ship.
       - name: Packed markup-board ships dist only
         run: node scripts/check-pack.mjs
       - name: Deploy bundle static checks
@@ -50,6 +52,10 @@ jobs:
   publish:
     needs: [check, browser, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    # Serialize publishes: two quick pushes must not both see a version as unpublished.
+    concurrency:
+      group: publish
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write # push the release tag

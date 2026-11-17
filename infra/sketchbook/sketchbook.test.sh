@@ -133,9 +133,9 @@ done
 ls ./*.env* >/dev/null 2>&1 \
   && bad "an env file lives in this bundle — this resource needs no environment variables" \
   || ok "no env file (README step 3: none required)"
-grep -qE '^(VOLUME|ENV DORO_)' "$DF" \
-  && bad "the image declares state or harness env — sketchbook persists to localStorage only" \
-  || ok "no VOLUME, no DORO_ env"
+grep -qE '^(VOLUME|ENV) ' "$DF" \
+  && bad "the image declares state or env — sketchbook persists to localStorage only" \
+  || ok "no VOLUME, no ENV"
 
 # --- 4. the live-image probe (opt-in) -----------------------------------------------------
 if [ "${1:-}" = "--docker" ]; then

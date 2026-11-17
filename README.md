@@ -9,7 +9,7 @@ A drawing board library and the app built on it.
 
 ## Develop
 
-Requires Node ≥ 20 and pnpm (the version pinned in `package.json` → `packageManager`;
+Requires Node ≥ 22.13 (pnpm 11's minimum) and pnpm (the version pinned in `package.json` → `packageManager`;
 `corepack enable` picks it up).
 
 ```sh

@@ -8,9 +8,9 @@
  *    survive a full page reload;
  *  - switching drawings remounts the board on the right doc.
  *
- * Same vite-in-playwright pattern as apps/web's drawViewport suite (see the
- * four setup laws documented there: inline tailwind, no watch/HMR, dep warmup,
- * and the board theme fed explicitly so ink/accent utilities exist).
+ * Vite-in-playwright setup laws (shared with Dorodango's drawViewport suite,
+ * which lives outside this repo): inline tailwind, no watch/HMR, dep warmup,
+ * and the board theme fed explicitly so ink/accent utilities exist.
  */
 import { expect, test, type Page } from "@playwright/test";
 import fs from "node:fs";

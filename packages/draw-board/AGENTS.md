@@ -33,7 +33,7 @@ Konva binds DOM listeners on `Stage.content` (`_bindContentEvents`) ⇒ the stag
 
 Listeners never `preventDefault`/`stopPropagation`, no-op unless this board's gesture is live, removed on unmount (finisher runs once more). Pinned: 4 tests in Dorodango's `apps/web/src/components/drawViewport.browser.test.ts` (out of repo) (re-entry with button held — the `buttons === 0` backstop in `onStageMove` can't save — + `touchcancel` mid-pinch).
 
-**Fourth path — unmount mid-gesture — no seam; review-held (measured, `mto6ry4x`).** `DrawEditor.tsx:1555` gates `<DrawCanvas>` on `avail && view && fontReady`; none goes falsy once true (collapsed container ⇒ truthy `{w:0,h:0}`) ⇒ never unmounts; a test seam = the encapsulation hole this package avoids. The `useEffect` cleanup (`endOutsideRef.current()` + `camBusyRef.current = false`) is the same settle teardown; only review catches a refactor dropping it.
+**Fourth path — unmount mid-gesture — no seam; review-held (measured).** `DrawEditor.tsx` gates `<DrawCanvas>` on `avail && view && fontReady`; none goes falsy once true (collapsed container ⇒ truthy `{w:0,h:0}`) ⇒ never unmounts; a test seam = the encapsulation hole this package avoids. The `useEffect` cleanup (`endOutsideRef.current()` + `camBusyRef.current = false`) is the same settle teardown; only review catches a refactor dropping it.
 
 ## Export
 - `boardFile.ts` — `exportBoardPng`/`exportBoardSvg`, `parseBoardFile`/`parseBoardPayload`, `readBoardDocFromPngBytes`; a rich PNG embeds the doc in a text chunk (`pngMeta.ts`: `embedPngText`/`readPngText`, `BOARD_KEYWORD`) ⇒ re-imports as a live board; slim = pixels only.

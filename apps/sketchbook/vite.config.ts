@@ -19,9 +19,9 @@ const port = Number(
 export default defineConfig({
   // watchWorkspacePackages: `markup-board` is imported as out-of-root source,
   // which vite watches per-file — a mode chokidar 4 permanently loses on git file
-  // replaces (every Dorodango land). Dir-level coverage keeps HMR alive; see the plugin.
+  // replaces (checkouts, pulls, harness lands). Dir-level coverage keeps HMR alive; see the plugin.
   plugins: [react(), watchWorkspacePackages()],
   // `.ts.net` so the dev server is reachable at its own tailnet origin through Tailscale
-  // Serve (the own-origin preview path — see apps/server/src/previewOrigins.ts).
+  // Serve (Dorodango's own-origin preview path; that harness lives outside this repo).
   server: { port, allowedHosts: [".ts.net"] },
 });
