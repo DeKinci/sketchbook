@@ -21,3 +21,5 @@ pnpm workspace, two packages. **Read the package's own `AGENTS.md` before workin
 ## CI / release
 
 `.github/workflows/ci.yml`: checks on push + PR; on `develop` it publishes any unpublished `markup-board` version via npm trusted publishing (OIDC). GitHub only sees what is **pushed** — landing a commit locally publishes nothing.
+
+**The agent pushes, not the owner (owner's standing instruction, 2026-11-17).** Dorodango lands this member repo's commits on the local `develop` but never pushes them, so CI, the npm publish and the draw.mar.so deploy see nothing until a push. When a task's commits have landed (`git -C <live checkout> log develop` shows them), push them yourself: `git -C ~/Dev/sketchbook push origin develop`. It's a plain fast-forward, never `--force`. Then watch the run (`gh run watch -R DeKinci/sketchbook`) and treat a red CI as the task's own failure.
